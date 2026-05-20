@@ -39,7 +39,8 @@ function calculateRecurringTotalAmount(order) {
 router.get("/dashboard/stats", isAdmin, async (req, res) => {
   try {
     const stripe = stripeLib(process.env.STRIPE_SECRET_KEY);
-    const allOrders   = await Order.find({}).lean();
+    const orgFilter = req.organisation?._id ? { organisationId: req.organisation._id } : {};
+    const allOrders   = await Order.find(orgFilter).lean();
     const validOrders = allOrders.filter(o => o.paymentStatus !== "failed");
 
     let totalDonated = 0, paidDonated = 0;
@@ -145,7 +146,9 @@ router.get("/", isAdmin, async (req, res) => {
     const type      = req.query.type    || "All";
     const skip      = (page - 1) * limit;
 
-    const allOrders = await Order.find({ paymentStatus: { $ne: "failed" } })
+    const donorOrgFilter = { paymentStatus: { $ne: "failed" } };
+    if (req.organisation?._id) donorOrgFilter.organisationId = req.organisation._id;
+    const allOrders = await Order.find(donorOrgFilter)
       .populate("user", "name email phone address country dateOfBirth")
       .lean();
 

@@ -3,6 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const connectDB = require("./config/db");
 const errorHandler = require("./middleware/errorHandler");
+const tenantMiddleware = require("./middleware/tenant");
 
 // Import routes
 const userRoutes = require("./routes/userRoutes");
@@ -21,6 +22,14 @@ const joinRoutes = require("./routes/joinRoutes");
 const newsLetter = require("./models/newsletter");
 const productRoutes = require("./routes/productRoutes");
 const donationtyperoute = require("./routes/donationtyperoute");
+const programRoutes = require("./routes/programRoutes");
+const brandingRoutes = require("./routes/brandingRoutes");
+
+// SaaS & Super Admin routes
+const saasRoutes = require("./routes/saas");
+const saasWebhookRoutes = require("./routes/saas/webhooks");
+const superAdminRoutes = require("./routes/superadmin");
+
 const fs = require('fs');
 const path = require('path');
 const setupInstallmentProcessingJob = require("./jobs/processInstallments");
@@ -36,28 +45,57 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 connectDB();
 setupInstallmentProcessingJob();
 scheduleSubscriptionChecks();
-// Middleware
-// app.use(cors({ origin: '*' }));
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  process.env.CLIENT_URL,
-].filter(Boolean);
-
+// CORS — dynamic origin to support tenant subdomains
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: function (origin, callback) {
+      // Allow requests with no origin (server-to-server, Postman, etc.)
+      if (!origin) return callback(null, true);
+
+      // Dev: match any subdomain of localhost on common ports
+      if (/^https?:\/\/([a-z0-9-]+\.)?localhost:(5173|5174|5001)$/.test(origin)) {
+        return callback(null, true);
+      }
+
+      // Production: match any subdomain of CORS_DOMAIN
+      if (process.env.CORS_DOMAIN) {
+        const escaped = process.env.CORS_DOMAIN.replace(/\./g, '\\.');
+        if (new RegExp(`^https://([a-z0-9-]+\\.)?${escaped}$`).test(origin)) {
+          return callback(null, true);
+        }
+      }
+
+      // Also allow explicit CLIENT_URL
+      if (origin === process.env.CLIENT_URL) {
+        return callback(null, true);
+      }
+
+      callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Slug']
   })
 );
-app.use(express.json());
+
+// SaaS webhook route — needs raw body for Stripe signature verification
+// Must be registered BEFORE express.json()
+app.use('/api/saas/webhooks', express.raw({ type: 'application/json' }), saasWebhookRoutes);
+
+// JSON body parser with raw body preservation for existing donation webhooks
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (req.originalUrl.includes('/webhook')) {
+      req.rawBody = buf;
+    }
+  }
+}));
 
 app.get("/", (req, res) => {
   res.send("API is running...");
 });
+
 // Ensure uploads directory exists
 const uploadsBaseDir = path.join(__dirname, 'public/uploads');
 const uploadsProductsDir = path.join(uploadsBaseDir, 'products');
@@ -75,43 +113,67 @@ app.use('/uploads', express.static(path.join(__dirname, 'public/uploads'), {
   }
 }));
 
-// Routes
+// ============================================================
+// NON-TENANT ROUTES (no org context needed)
+// ============================================================
 app.use("/api/users", userRoutes);
-app.use("/api/orders", orderRoutes);
-app.use("/api/contact", contactRoutes);
-app.use("/api/events", eventRoutes);
-app.use("/api/newsletter", newsletterRoutes);
-app.use("/api/subscriptions", subscriptionRoutes);
-app.use("/api/payment-methods", paymentMethodRoutes);
-app.use("/api/profile", profileRoutes);
-app.use("/api/admin/orders", adminOrderRoutes);
-app.use("/api/admin/donors", donorController);
-app.use("/api/admin/subscriptions", subscriptionRoutesAdmin);
-app.use("/api/admin/events", eventRoutesAdmin);
-app.use("/api/join", joinRoutes);
-app.use("/api/products", productRoutes);
-app.use("/api/donationtypes", donationtyperoute);
-app.post("/api/newsletter", async (req, res) => {
+app.use("/api/saas", saasRoutes);
+app.use("/api/superadmin", superAdminRoutes);
+
+// Public contact form (no auth)
+const superAdminController = require("./controllers/superAdminController");
+app.post("/api/contact", superAdminController.submitContactQuery);
+
+// ============================================================
+// TENANT-SCOPED ROUTES (tenant middleware resolves org from subdomain/header)
+// ============================================================
+const tenantRouter = express.Router();
+tenantRouter.use(tenantMiddleware);
+
+tenantRouter.use("/api/orders", orderRoutes);
+tenantRouter.use("/api/contact", contactRoutes);
+tenantRouter.use("/api/events", eventRoutes);
+tenantRouter.use("/api/newsletter", newsletterRoutes);
+tenantRouter.use("/api/subscriptions", subscriptionRoutes);
+tenantRouter.use("/api/payment-methods", paymentMethodRoutes);
+tenantRouter.use("/api/profile", profileRoutes);
+tenantRouter.use("/api/admin/orders", adminOrderRoutes);
+tenantRouter.use("/api/admin/donors", donorController);
+tenantRouter.use("/api/admin/subscriptions", subscriptionRoutesAdmin);
+tenantRouter.use("/api/admin/events", eventRoutesAdmin);
+tenantRouter.use("/api/join", joinRoutes);
+tenantRouter.use("/api/products", productRoutes);
+tenantRouter.use("/api/donationtypes", donationtyperoute);
+tenantRouter.use("/api/programs", programRoutes);
+tenantRouter.use("/api/branding", brandingRoutes);
+
+// Inline newsletter routes (tenant-scoped)
+tenantRouter.post("/api/newsletter", async (req, res) => {
   const { email } = req.body;
-  const existingSubscriber = await newsLetter.findOne({ email });
+  const orgId = req.organisation?._id || null;
+  const existingSubscriber = await newsLetter.findOne({ email, organisationId: orgId });
   if (existingSubscriber) {
     return res.status(400).json({ message: "You are already subscribed" });
   }
-  const subscriber = await newsLetter.create({ email });
+  const subscriber = await newsLetter.create({ email, organisationId: orgId });
   subscriber.save();
   return res
     .status(201)
     .json({ message: "You have been subscribed successfully" });
 });
-app.get("/api/newsletters", async (req, res) => {
-  const subscribers = await newsLetter.find();
+tenantRouter.get("/api/newsletters", async (req, res) => {
+  const filter = {};
+  if (req.organisation?._id) filter.organisationId = req.organisation._id;
+  const subscribers = await newsLetter.find(filter);
   res.json(subscribers);
 });
+
+app.use(tenantRouter);
 
 // Error handling
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5001;  // Changed from 5000 to 5001
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

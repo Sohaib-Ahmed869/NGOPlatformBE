@@ -1,15 +1,21 @@
 const mongoose = require('mongoose');
 
 const donationTypeSchema = new mongoose.Schema({
+  organisationId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Organisation",
+    default: null,
+  },
   donationType: {
     type: String,
     required: [true, 'Donation type is required'],
     trim: true,
-    maxLength: [100, 'Donation type cannot exceed 100 characters'],
-    unique: true
+    maxLength: [100, 'Donation type cannot exceed 100 characters']
   }
 }, {
   timestamps: true
 });
+
+donationTypeSchema.index({ organisationId: 1, donationType: 1 }, { unique: true });
 
 module.exports = mongoose.model('DonationType', donationTypeSchema);

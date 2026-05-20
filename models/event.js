@@ -1,8 +1,12 @@
 // Event Model
 const mongoose = require("mongoose");
-const bcrypt = require("bcrypt");
 const eventSchema = new mongoose.Schema(
   {
+    organisationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organisation",
+      default: null,
+    },
     title: {
       type: String,
       required: true,

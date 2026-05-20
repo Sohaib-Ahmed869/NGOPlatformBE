@@ -16,8 +16,9 @@ exports.getEvents = async (req, res) => {
       endDate,
     } = req.query;
 
-    // Build filter conditions
+    // Build filter conditions (scoped to org)
     const filter = {};
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
 
     if (status && status !== "all") {
       filter.status = status;

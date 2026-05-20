@@ -6,6 +6,7 @@ const createDonationType = async (req, res) => {
     const { donationType } = req.body;
     
     const newDonationType = new DonationType({
+      organisationId: req.organisation?._id || null,
       donationType
     });
     
@@ -34,7 +35,9 @@ const createDonationType = async (req, res) => {
 // Get all donation types
 const getDonationTypes = async (req, res) => {
   try {
-    const donationTypes = await DonationType.find().sort({ createdAt: -1 });
+    const filter = {};
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const donationTypes = await DonationType.find(filter).sort({ createdAt: -1 });
     
     res.status(200).json({
       success: true,

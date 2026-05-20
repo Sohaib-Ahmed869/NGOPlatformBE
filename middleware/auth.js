@@ -6,7 +6,7 @@ const auth = async (req, res, next) => {
     const token = req.header("Authorization").replace("Bearer ", "");
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     // Explicitly select the address field and other needed fields
-    const user = await User.findById(decoded.id).select("firstName lastName email phone country address notifications role");
+    const user = await User.findById(decoded.id).select("firstName lastName email phone country address notifications role organisationId");
     
     if (!user) {
       throw new Error();

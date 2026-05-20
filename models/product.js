@@ -2,6 +2,11 @@ const mongoose = require('mongoose');
 const slugify = require('slugify');
 
 const productSchema = new mongoose.Schema({
+    organisationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Organisation",
+        default: null,
+    },
     title: {
         type: String,
         required: true,

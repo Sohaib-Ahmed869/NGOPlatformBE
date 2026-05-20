@@ -174,7 +174,7 @@ exports.loginAdmin = async (req, res) => {
       throw new Error("Invalid login credentials");
     }
 
-    if (user.role !== "admin") {
+    if (user.role !== "admin" && user.role !== "superadmin") {
       throw new Error("Unauthorized");
     }
 
@@ -221,7 +221,8 @@ exports.forgotPassword = async (req, res) => {
     await user.save();
 
     // Create reset URL
-    const resetUrl = `https://shahidafridifoundation.org.au/reset-password/${resetToken}`;
+    const clientUrl = process.env.CLIENT_URL || `${req.protocol}://${req.get("host")}`;
+    const resetUrl = `${clientUrl}/reset-password/${resetToken}`;
 
     // Email content
     const emailBody = `

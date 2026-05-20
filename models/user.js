@@ -23,8 +23,13 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["user", "admin"],
-      default: "user",
+      enum: ["superadmin", "admin", "donor"],
+      default: "donor",
+    },
+    organisationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organisation",
+      default: null,
     },
     defaultPaymentMethod: {
       type: mongoose.Schema.Types.ObjectId,

@@ -1,8 +1,12 @@
 // Contact Request Model
 const mongoose = require("mongoose");
-const bcrypt = require("bcrypt");
 const contactRequestSchema = new mongoose.Schema(
   {
+    organisationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organisation",
+      default: null,
+    },
     fullName: {
       type: String,
       required: true,

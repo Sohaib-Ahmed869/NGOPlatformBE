@@ -7,8 +7,9 @@ exports.getDashboardStats = async (req, res) => {
   try {
     const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
-    // Get all orders
-    const allOrders = await Order.find({}).lean();
+    // Get all orders (scoped to org)
+    const orgFilter = req.organisation?._id ? { organisationId: req.organisation._id } : {};
+    const allOrders = await Order.find(orgFilter).lean();
 
     // Filter out failed orders for all calculations
     const validOrders = allOrders.filter(order => order.paymentStatus !== "failed");
@@ -781,8 +782,9 @@ exports.getAllDonations = async (req, res) => {
       sortOrder = "desc",
     } = req.query;
 
-    // Build filter conditions
+    // Build filter conditions (scoped to org)
     const filter = {};
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
     if (status && status !== "All") {
       filter.paymentStatus = status;
     }

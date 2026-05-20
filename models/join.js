@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const joinSchema = new mongoose.Schema(
   {
+    organisationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organisation",
+      default: null,
+    },
     firstName: {
       type: String,
       required: true,

@@ -8,7 +8,7 @@ const isAdmin = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.id);
 
-    if (!user || user.role !== "admin") {
+    if (!user || !['admin', 'superadmin'].includes(user.role)) {
       throw new Error();
     }
 

@@ -255,10 +255,10 @@ exports.getDashboardStats = async (req, res) => {
   try {
     const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
-    // Get all valid orders (excluding failed)
-    const allOrders = await Order.find({
-      paymentStatus: { $ne: "failed" }
-    }).lean();
+    // Get all valid orders (excluding failed, scoped to org)
+    const subOrgFilter = { paymentStatus: { $ne: "failed" } };
+    if (req.organisation?._id) subOrgFilter.organisationId = req.organisation._id;
+    const allOrders = await Order.find(subOrgFilter).lean();
 
     console.log("=== SUBSCRIPTION STATS CALCULATION ===");
     console.log("Total valid orders found:", allOrders.length);

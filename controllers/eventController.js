@@ -23,6 +23,7 @@ exports.createEvent = async (req, res) => {
 
     // Create the event with the image URL from S3
     const eventData = {
+      organisationId: req.organisation?._id || null,
       title: req.body.title,
       date: req.body.date,
       startTime: req.body.startTime || "",
@@ -46,7 +47,9 @@ exports.createEvent = async (req, res) => {
 // Get all events
 exports.getEvents = async (req, res) => {
   try {
-    const events = await Event.find().sort({ date: 1 });
+    const filter = {};
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const events = await Event.find(filter).sort({ date: 1 });
     res.json(events);
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -56,7 +59,9 @@ exports.getEvents = async (req, res) => {
 // Get single event
 exports.getEvent = async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const filter = { _id: req.params.id };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const event = await Event.findOne(filter);
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
     }

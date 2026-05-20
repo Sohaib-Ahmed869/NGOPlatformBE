@@ -1,12 +1,15 @@
 // Newsletter Subscription Model
 const mongoose = require("mongoose");
-const bcrypt = require("bcrypt");
 const newsletterSubscriptionSchema = new mongoose.Schema(
   {
+    organisationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organisation",
+      default: null,
+    },
     email: {
       type: String,
       required: true,
-      unique: true,
       trim: true,
       lowercase: true,
     },
@@ -24,6 +27,8 @@ const newsletterSubscriptionSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+newsletterSubscriptionSchema.index({ organisationId: 1, email: 1 }, { unique: true });
 
 const NewsletterSubscription = mongoose.model(
   "NewsletterSubscription",

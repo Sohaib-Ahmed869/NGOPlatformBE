@@ -598,6 +598,7 @@ exports.createOrder = async (req, res) => {
     // Build the order object conditionally.
     // Note: If paymentType is not "recurring" or "installments", we explicitly set those keys to undefined.
     const orderObj = {
+      organisationId: req.organisation?._id || null,
       user: user ? user._id : null,
       donationId,
       items: processedItems,

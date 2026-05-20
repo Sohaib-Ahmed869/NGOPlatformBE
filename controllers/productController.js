@@ -27,12 +27,13 @@ exports.createProduct = async (req, res) => {
 
         // Create new product
         const product = new Product({
+            organisationId: req.organisation?._id || null,
             title,
             description,
             price,
             category,
-            image: imageUrl,  // Store full S3 URL
-            imagePath: imagePath  // Store S3 key for future reference
+            image: imageUrl,
+            imagePath: imagePath
         });
 
         const savedProduct = await product.save();
@@ -57,7 +58,9 @@ exports.createProduct = async (req, res) => {
 // @access  Public
 exports.getProducts = async (req, res) => {
     try {
-        const products = await Product.find({ isActive: true });
+        const filter = { isActive: true };
+        if (req.organisation?._id) filter.organisationId = req.organisation._id;
+        const products = await Product.find(filter);
         res.json({ success: true, products });
     } catch (error) {
         console.error('Error fetching products:', error);

@@ -81,10 +81,29 @@ const deleteS3Object = async (key) => {
   }
 };
 
-module.exports = { 
+// Configure multer for Branding/logo uploads
+const brandingUpload = multer({
+  storage: multerS3(createUploadConfig("branding")),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB for logos
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|svg|webp/;
+    const mimetype = /image\/(jpeg|jpg|png|svg\+xml|webp)/.test(file.mimetype);
+    const extname = filetypes.test(
+      path.extname(file.originalname).toLowerCase()
+    );
+
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files (JPEG, PNG, SVG, WebP) are allowed for logos!"));
+  },
+});
+
+module.exports = {
   upload: eventsUpload, // For backward compatibility
-  s3Client, 
+  s3Client,
   deleteS3Object,
   eventsUpload,
-  productUpload
+  productUpload,
+  brandingUpload,
 };

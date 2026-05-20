@@ -4,7 +4,7 @@ const ContactRequest = require("../models/contact");
 exports.createContact = async (req, res) => {
   try {
     console.log(req.body); 
-    const contact = await ContactRequest.create(req.body);
+    const contact = await ContactRequest.create({ ...req.body, organisationId: req.organisation?._id || null });
     res.status(201).json(contact);
   } catch (error) {
     console.log(error);
@@ -14,7 +14,9 @@ exports.createContact = async (req, res) => {
 
 exports.getAlContact = async (req, res) => {
   try {
-    const contacts = await ContactRequest.find();
+    const filter = {};
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const contacts = await ContactRequest.find(filter);
     res.status(200).json(contacts);
   } catch (error) {
     console.log(error);
