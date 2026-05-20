@@ -7,16 +7,20 @@ exports.getDashboardStats = async (req, res) => {
   try {
     const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
-    // Get all orders (scoped to org)
+    // Get all orders (scoped to org + optional date range)
     const orgFilter = req.organisation?._id ? { organisationId: req.organisation._id } : {};
+    if (req.query.startDate) {
+      orgFilter.createdAt = { ...(orgFilter.createdAt || {}), $gte: new Date(req.query.startDate) };
+    }
+    if (req.query.endDate) {
+      const end = new Date(req.query.endDate);
+      end.setHours(23, 59, 59, 999);
+      orgFilter.createdAt = { ...(orgFilter.createdAt || {}), $lte: end };
+    }
     const allOrders = await Order.find(orgFilter).lean();
 
     // Filter out failed orders for all calculations
     const validOrders = allOrders.filter(order => order.paymentStatus !== "failed");
-
-    console.log("=== DEBUGGING DASHBOARD STATS ===");
-    console.log("Total orders found:", allOrders.length);
-    console.log("Valid orders (excluding failed):", validOrders.length);
 
     // Initialize stats
     let totalDonated = 0; // Total expected amount (including future payments)
@@ -312,40 +316,59 @@ exports.getDashboardStats = async (req, res) => {
     const successRate = totalCount > 0 ? (completedDonationsCount / totalCount) * 100 : 0;
     const averageDonation = totalCount > 0 ? totalDonated / totalCount : 0;
 
-    console.log("\n=== FINAL STATS ===");
-    console.log("Total Donated:", totalDonated);
-    console.log("Paid Donated:", paidDonated);
-    console.log("Pending Amount:", pendingAmount);
-    console.log("Active Recurring:", activeRecurring);
-    console.log("Recurring Count:", recurringCount);
-    console.log("One Time Count:", oneTimeCount);
-    console.log("Installment Count:", installmentCount);
-    console.log("Monthly Recurring Revenue:", monthlyRecurringRevenue);
+    // Monthly trend data (last 6 months)
+    const monthlyMap = {};
+    const now = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      monthlyMap[key] = { month: key, amount: 0, count: 0 };
+    }
+    for (const order of validOrders) {
+      const d = new Date(order.createdAt);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      if (monthlyMap[key]) {
+        monthlyMap[key].amount += order.totalAmount || 0;
+        monthlyMap[key].count += 1;
+      }
+    }
+    const monthlyTrend = Object.values(monthlyMap);
+
+    // Recent donations (last 10)
+    const recentDonations = validOrders
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 10)
+      .map((o) => ({
+        _id: o._id,
+        donationId: o.donationId,
+        totalAmount: o.totalAmount,
+        paymentStatus: o.paymentStatus,
+        paymentType: o.paymentType,
+        donationType: o.donationType || o.items?.[0]?.title || "Donation",
+        programId: o.programId || null,
+        donorName: o.donorDetails?.name || "Anonymous",
+        createdAt: o.createdAt,
+      }));
 
     res.json({
       stats: {
-        // Main financial stats (matching user stats structure)
-        totalAmount: totalDonated,           // Total expected amount
-        totalAmountReceived: paidDonated,    // Total amount actually received
+        totalAmount: totalDonated,
+        totalAmountReceived: paidDonated,
         paidAmount: paidDonated,
-        pendingAmount: pendingAmount,        // Remaining amount to be received
-        
-        // Counts
+        pendingAmount,
         totalDonations: totalCount,
         recurringDonations: recurringCount,
         oneTimeDonations: oneTimeCount,
         installmentDonations: installmentCount,
-        activeRecurring: activeRecurring,
-        
-        // Revenue metrics
-        monthlyRecurringRevenue: monthlyRecurringRevenue, // Monthly revenue from paid transactions
-        averageDonation: averageDonation,
-        successRate: successRate,
-        
-        // Legacy fields (for backward compatibility)
-        totalDonated: totalDonated,
-        paidDonated: paidDonated,
+        activeRecurring,
+        monthlyRecurringRevenue,
+        averageDonation,
+        successRate,
+        totalDonated,
+        paidDonated,
         actualTotalAmount: paidDonated,
+        monthlyTrend,
+        recentDonations,
       },
     });
   } catch (error) {

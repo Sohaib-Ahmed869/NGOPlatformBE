@@ -29,8 +29,18 @@ const programSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["active", "closed"],
-      default: "active",
+      enum: ["published", "hidden", "completed"],
+      default: "published",
+    },
+    images: [
+      {
+        url: { type: String, required: true },
+        key: { type: String, required: true },
+      },
+    ],
+    coverImageIndex: {
+      type: Number,
+      default: 0,
     },
     createdBy: {
       type: Schema.Types.ObjectId,
@@ -41,6 +51,18 @@ const programSchema = new Schema(
         text: { type: String, required: true },
         images: [String],
         sentAt: { type: Date, default: Date.now },
+      },
+    ],
+    followUpRequests: [
+      {
+        userId: { type: Schema.Types.ObjectId, ref: "User" },
+        message: { type: String, default: "" },
+        requestedAt: { type: Date, default: Date.now },
+        status: {
+          type: String,
+          enum: ["pending", "acknowledged"],
+          default: "pending",
+        },
       },
     ],
     donors: [

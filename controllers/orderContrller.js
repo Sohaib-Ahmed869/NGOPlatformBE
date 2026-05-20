@@ -1,6 +1,7 @@
 // controllers/orderController.js
 const Order = require("../models/order");
 const User = require("../models/user");
+const Program = require("../models/program");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { sendReceiptEmail } = require("../services/recieptUtils");
 const { sendEmail } = require("../services/emailUtil");
@@ -553,6 +554,10 @@ exports.createOrder = async (req, res) => {
       onBehalfOf: item.onBehalfOf || null,
     }));
 
+    // Extract programId if any item is a program donation
+    const programItem = items.find((item) => item.programId);
+    const programId = programItem ? programItem.programId : null;
+
     // Capture the current day for recurring billing
     const today = new Date();
     const billingDay = today.getDate();
@@ -599,6 +604,7 @@ exports.createOrder = async (req, res) => {
     // Note: If paymentType is not "recurring" or "installments", we explicitly set those keys to undefined.
     const orderObj = {
       organisationId: req.organisation?._id || null,
+      programId: programId || null,
       user: user ? user._id : null,
       donationId,
       items: processedItems,
@@ -1173,6 +1179,24 @@ exports.createOrder = async (req, res) => {
           "Failed to send bank transfer pending email:",
           emailError
         );
+      }
+    }
+
+    // If this order is linked to a program and payment succeeded, update program totals
+    if (programId && savedOrder.paymentStatus === "completed") {
+      try {
+        await Program.findByIdAndUpdate(programId, {
+          $inc: { raisedAmount: savedOrder.totalAmount },
+          $push: {
+            donors: {
+              userId: savedOrder.user || null,
+              donationId: savedOrder._id,
+              email: donorDetails.email,
+            },
+          },
+        });
+      } catch (progErr) {
+        console.error("Failed to update program totals:", progErr);
       }
     }
 
