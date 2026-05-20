@@ -119,6 +119,7 @@ exports.createEvent = async (req, res) => {
     }
 
     const event = new Event({
+      organisationId: req.organisation?._id || null,
       title: req.body.title,
       date: req.body.date,
       startTime: req.body.startTime,
