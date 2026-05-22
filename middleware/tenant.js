@@ -21,6 +21,8 @@ const tenantMiddleware = async (req, res, next) => {
 
     // No tenant context needed
     if (!slug) {
+      console.log("No tenant slug provided, proceeding without tenant context", req.organisation);
+      console.log("Request URL:", req.originalUrl);
       req.organisation = null;
       return next();
     }
