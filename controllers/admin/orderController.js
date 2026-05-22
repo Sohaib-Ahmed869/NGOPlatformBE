@@ -1050,6 +1050,140 @@ const sendBankTransferCancellationEmail = async (donation) => {
   }
 };
 
+// Send an email to the donor when an admin posts an update
+const sendDonorUpdateEmail = async (donation, update) => {
+  try {
+    const recipient =
+      donation.donorDetails?.email ||
+      (donation.user && (await User.findById(donation.user))?.email);
+
+    if (!recipient) {
+      console.error("No donor email found for donation:", donation.donationId);
+      return;
+    }
+
+    const isCloseOff = update.type === "close-off";
+    const heading = isCloseOff ? "Your Donation Is Complete" : "An Update on Your Donation";
+    const accent = isCloseOff ? "#4a7c59" : "#2563eb";
+
+    const imagesHtml =
+      update.images && update.images.length > 0
+        ? `<div style="margin-top:15px;">${update.images
+            .map(
+              (img) =>
+                `<img src="${img}" alt="Update image" style="max-width:100%;border-radius:8px;margin-bottom:10px;" />`
+            )
+            .join("")}</div>`
+        : "";
+
+    const emailBody = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: ${accent};">${heading}</h2>
+        <p>Dear ${donation.donorDetails?.name || "Donor"},</p>
+        <p>${
+          isCloseOff
+            ? "We're writing to let you know your contribution has been put to work. Thank you for your generosity."
+            : "We wanted to share an update on the cause you supported."
+        }</p>
+        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
+          <p><strong>Donation ID:</strong> ${donation.donationId}</p>
+          ${update.comment ? `<p style="white-space:pre-line;">${update.comment}</p>` : ""}
+          ${imagesHtml}
+        </div>
+        <p>Thank you for your continued support.</p>
+      </div>
+    `;
+
+    const result = await sendEmail(
+      recipient,
+      emailBody,
+      isCloseOff
+        ? "Your donation is complete — thank you"
+        : "An update on your donation"
+    );
+
+    if (!result.success) {
+      console.error("Failed to send donor update email:", result.error);
+    }
+  } catch (error) {
+    console.error("Error sending donor update email:", error);
+  }
+};
+
+// Add an update (follow-up / close-off) to a donation for the donor
+exports.addDonorUpdate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type, comment } = req.body;
+
+    if (!["follow-up", "close-off"].includes(type)) {
+      return res.status(400).json({
+        status: "Error",
+        message: "Invalid update type. Must be 'follow-up' or 'close-off'",
+      });
+    }
+
+    if ((!comment || !comment.trim()) && (!req.files || req.files.length === 0)) {
+      return res.status(400).json({
+        status: "Error",
+        message: "Please provide a comment or at least one image",
+      });
+    }
+
+    const donation = await Order.findById(id);
+
+    if (!donation) {
+      return res.status(404).json({
+        status: "Error",
+        message: "Donation not found",
+      });
+    }
+
+    const images = (req.files || []).map((file) => file.location);
+
+    const update = {
+      type,
+      comment: comment ? comment.trim() : "",
+      images,
+      createdBy: req.user?._id,
+      createdByName: req.user?.name || req.user?.email,
+      createdAt: new Date(),
+    };
+
+    if (!donation.donorUpdates) {
+      donation.donorUpdates = [];
+    }
+    donation.donorUpdates.push(update);
+
+    // A close-off marks the donation as completed
+    if (type === "close-off" && donation.paymentStatus !== "cancelled") {
+      donation.paymentStatus = "completed";
+    }
+
+    await donation.save();
+
+    // Notify the donor by email (non-blocking failure)
+    try {
+      await sendDonorUpdateEmail(donation, update);
+    } catch (emailError) {
+      console.error("Failed to send donor update email:", emailError);
+    }
+
+    res.json({
+      status: "Success",
+      message: "Update added and shared with the donor",
+      donation,
+    });
+  } catch (error) {
+    console.error("Error adding donor update:", error);
+    res.status(500).json({
+      status: "Error",
+      message: "Failed to add donor update",
+      error: error.message,
+    });
+  }
+};
+
 // Update donation status
 exports.updateDonationStatus = async (req, res) => {
   try {

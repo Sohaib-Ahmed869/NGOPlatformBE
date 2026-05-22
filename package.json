@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "seed:whitelabel": "node scripts/seedWhiteLabel.js",
     "seed:superadmin": "node scripts/seedSuperAdmin.js",
-    "seed:orgs": "node scripts/seedOrganisations.js"
+    "seed:orgs": "node scripts/seedOrganisations.js",
+    "prices:update": "node scripts/updatePlanPrices.js"
   },
   "keywords": [],
   "author": "",

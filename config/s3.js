@@ -116,6 +116,24 @@ const programUpload = multer({
   },
 });
 
+// Configure multer for donation update uploads (images shared with donors)
+const donationUpdatesUpload = multer({
+  storage: multerS3(createUploadConfig("donation-updates")),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB file size limit
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|gif|webp/;
+    const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(
+      path.extname(file.originalname).toLowerCase()
+    );
+
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files are allowed!"));
+  },
+});
+
 module.exports = {
   upload: eventsUpload, // For backward compatibility
   s3Client,
@@ -124,4 +142,5 @@ module.exports = {
   productUpload,
   brandingUpload,
   programUpload,
+  donationUpdatesUpload,
 };

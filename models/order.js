@@ -288,6 +288,30 @@ const OrderSchema = new Schema(
       type: String,
       default: "",
     },
+    // Admin updates shared with the donor (follow-up / close-off)
+    donorUpdates: [
+      {
+        type: {
+          type: String,
+          enum: ["follow-up", "close-off"],
+          required: true,
+        },
+        comment: {
+          type: String,
+          default: "",
+        },
+        images: [String],
+        createdBy: {
+          type: Schema.Types.ObjectId,
+          ref: "User",
+        },
+        createdByName: String,
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
     lastPaymentDate: Date,
   },
   {

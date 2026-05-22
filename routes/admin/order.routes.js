@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const isAdmin = require("../../middleware/isAdmin");
+const { donationUpdatesUpload } = require("../../config/s3");
 const {
   getDashboardStats,
   getTopDonors,
@@ -11,6 +12,7 @@ const {
   getAllDonations,
   getDonationById, // Added this
   updateDonationStatus, // Added this
+  addDonorUpdate, // Donor follow-up / close-off updates
 } = require("../../controllers/admin/orderController");
 
 router.get("/dashboard/stats", isAdmin, getDashboardStats);
@@ -23,6 +25,12 @@ router.get("/donations/all", isAdmin, getAllDonations);
 router.get("/donations/user/:userId", isAdmin, getDonationForUser); // User-specific route first
 router.get("/donations/:id", isAdmin, getDonationById); // Then the general ID route
 router.put("/donations/:id/status", isAdmin, updateDonationStatus); // Status update route
+router.post(
+  "/donations/:id/updates",
+  isAdmin,
+  donationUpdatesUpload.array("images", 5),
+  addDonorUpdate
+); // Add a follow-up / close-off update for the donor
 router.get("/export", isAdmin, getDonationsExport);
 
 module.exports = router;
