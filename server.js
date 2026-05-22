@@ -120,9 +120,13 @@ app.use("/api/users", userRoutes);
 app.use("/api/saas", saasRoutes);
 app.use("/api/superadmin", superAdminRoutes);
 
-// Public contact form (no auth)
+// Public SaaS contact form (no auth) — only for requests WITHOUT a tenant slug
 const superAdminController = require("./controllers/superAdminController");
-app.post("/api/contact", superAdminController.submitContactQuery);
+app.post("/api/contact", (req, res, next) => {
+  // If the request has a tenant slug header, skip this handler and let the tenant router handle it
+  if (req.headers["x-tenant-slug"]) return next();
+  superAdminController.submitContactQuery(req, res, next);
+});
 
 // ============================================================
 // TENANT-SCOPED ROUTES (tenant middleware resolves org from subdomain/header)
