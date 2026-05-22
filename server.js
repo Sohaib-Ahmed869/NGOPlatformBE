@@ -54,7 +54,7 @@ app.use(
       if (!origin) return callback(null, true);
 
       // Dev: match any subdomain of localhost on common ports
-      if (/^https?:\/\/([a-z0-9-]+\.)?localhost:(5173|5174|5001)$/.test(origin)) {
+      if (/^https?:\/\/([a-z0-9-]+\.)?charities.ltd$/.test(origin)) {
         return callback(null, true);
       }
 
