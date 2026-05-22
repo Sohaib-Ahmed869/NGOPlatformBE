@@ -54,6 +54,17 @@ const organisationSchema = new mongoose.Schema(
       },
       tagline: { type: String, default: "" },
     },
+    // Organisation contact & details (managed by org admin)
+    contactEmail: { type: String, default: "" },
+    contactPhone: { type: String, default: "" },
+    address: { type: String, default: "" },
+    website: { type: String, default: "" },
+    bankDetails: {
+      bankName: { type: String, default: "" },
+      bsb: { type: String, default: "" },
+      accountNumber: { type: String, default: "" },
+      accountName: { type: String, default: "" },
+    },
     isActive: {
       type: Boolean,
       default: false,

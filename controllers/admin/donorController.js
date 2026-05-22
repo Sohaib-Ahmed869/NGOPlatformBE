@@ -290,10 +290,12 @@ router.get("/:id", isAdmin, async (req, res) => {
       return res.status(404).json({ status:"Error", message:"Donor not found" });
     }
 
-    const orders = await Order.find({
+    const donorOrderFilter = {
       user: donorId,
       paymentStatus:{ $ne:"failed" }
-    }).sort({ createdAt:-1 }).lean();
+    };
+    if (req.organisation?._id) donorOrderFilter.organisationId = req.organisation._id;
+    const orders = await Order.find(donorOrderFilter).sort({ createdAt:-1 }).lean();
 
     const history=[];
     orders.forEach(o=>{

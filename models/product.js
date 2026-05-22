@@ -14,7 +14,6 @@ const productSchema = new mongoose.Schema({
     },
     slug: {
         type: String,
-        unique: true,
         trim: true
     },
     description: {
@@ -60,6 +59,10 @@ const productSchema = new mongoose.Schema({
 
 // Create text index for search functionality
 productSchema.index({ title: 'text', description: 'text' });
+// Unique slug per organisation (not globally)
+productSchema.index({ organisationId: 1, slug: 1 }, { unique: true });
+// Performance index for org-scoped queries
+productSchema.index({ organisationId: 1, isActive: 1 });
 
 // Generate slug from title before saving
 productSchema.pre('save', function(next) {

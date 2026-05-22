@@ -118,11 +118,13 @@ exports.approveCancellationRequest = async (req, res) => {
     const { subscriptionId } = req.params;
     const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
-    // Find the subscription with pending cancellation status
-    const subscription = await Order.findOne({
+    // Find the subscription with pending cancellation status (scoped to org)
+    const approveQuery = {
       _id: subscriptionId,
       paymentStatus: "pending_cancellation",
-    });
+    };
+    if (req.organisation?._id) approveQuery.organisationId = req.organisation._id;
+    const subscription = await Order.findOne(approveQuery);
 
     if (!subscription) {
       return res.status(404).json({
@@ -187,11 +189,13 @@ exports.denyCancellationRequest = async (req, res) => {
     const { subscriptionId } = req.params;
     const { reason } = req.body;
 
-    // Find the subscription with pending cancellation status
-    const subscription = await Order.findOne({
+    // Find the subscription with pending cancellation status (scoped to org)
+    const denyQuery = {
       _id: subscriptionId,
       paymentStatus: "pending_cancellation",
-    });
+    };
+    if (req.organisation?._id) denyQuery.organisationId = req.organisation._id;
+    const subscription = await Order.findOne(denyQuery);
 
     if (!subscription) {
       return res.status(404).json({
@@ -231,9 +235,9 @@ exports.denyCancellationRequest = async (req, res) => {
 // Get all pending cancellation requests
 exports.getPendingCancellationRequests = async (req, res) => {
   try {
-    const pendingRequests = await Order.find({
-      paymentStatus: "pending_cancellation",
-    }).populate("user", "name email");
+    const pendingFilter = { paymentStatus: "pending_cancellation" };
+    if (req.organisation?._id) pendingFilter.organisationId = req.organisation._id;
+    const pendingRequests = await Order.find(pendingFilter).populate("user", "name email");
 
     res.json({
       status: "Success",
@@ -382,12 +386,14 @@ exports.getDashboardStats = async (req, res) => {
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(currentDate.getMonth() - 6);
 
+    const trendMatch = {
+      paymentStatus: { $ne: "failed" },
+      createdAt: { $gte: sixMonthsAgo },
+    };
+    if (req.organisation?._id) trendMatch.organisationId = req.organisation._id;
     const monthlyTrend = await Order.aggregate([
       {
-        $match: {
-          paymentStatus: { $ne: "failed" },
-          createdAt: { $gte: sixMonthsAgo },
-        },
+        $match: trendMatch,
       },
       {
         $group: {
@@ -488,10 +494,13 @@ exports.getSubscriptions = async (req, res) => {
 
     const skip = (page - 1) * limit;
 
-    // Build match conditions
+    // Build match conditions (scoped to org)
     const matchConditions = {
       paymentType: "recurring",
     };
+    if (req.organisation?._id) {
+      matchConditions.organisationId = req.organisation._id;
+    }
 
     if (search) {
       matchConditions.$or = [
@@ -569,10 +578,12 @@ exports.getSubscriptions = async (req, res) => {
 // Get Subscription Details
 exports.getSubscriptionDetails = async (req, res) => {
   try {
-    const subscription = await Order.findOne({
+    const subDetailQuery = {
       _id: req.params.id,
       paymentType: "recurring",
-    }).populate("user", "name email phone");
+    };
+    if (req.organisation?._id) subDetailQuery.organisationId = req.organisation._id;
+    const subscription = await Order.findOne(subDetailQuery).populate("user", "name email phone");
 
     if (!subscription) {
       return res.status(404).json({
@@ -609,11 +620,13 @@ exports.updateSubscriptionStatus = async (req, res) => {
       });
     }
 
+    const subUpdateQuery = {
+      _id: req.params.id,
+      paymentType: "recurring",
+    };
+    if (req.organisation?._id) subUpdateQuery.organisationId = req.organisation._id;
     const subscription = await Order.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        paymentType: "recurring",
-      },
+      subUpdateQuery,
       {
         $set: {
           paymentStatus: status,

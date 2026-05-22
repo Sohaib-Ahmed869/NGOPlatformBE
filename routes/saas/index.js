@@ -1,6 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const registrationController = require("../../controllers/saas/registrationController");
+const { brandingUpload } = require("../../config/s3");
+
+// Logo upload during registration (before org is created)
+router.post("/register/upload-logo", brandingUpload.single("logo"), registrationController.uploadRegistrationLogo);
 
 // Registration
 router.post("/register", registrationController.register);

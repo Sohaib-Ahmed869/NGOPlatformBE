@@ -386,12 +386,17 @@ exports.getTopDonors = async (req, res) => {
   try {
     const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 
-    // KEEP ORIGINAL QUERY to avoid breaking frontend
+    // Scope to current org
+    const topDonorsMatch = {
+      paymentStatus: { $in: ["completed", "active"] },
+    };
+    if (req.organisation?._id) {
+      topDonorsMatch.organisationId = req.organisation._id;
+    }
+
     const topDonorsOriginal = await Order.aggregate([
       {
-        $match: {
-          paymentStatus: { $in: ["completed", "active"] },
-        },
+        $match: topDonorsMatch,
       },
       {
         $group: {
@@ -429,11 +434,15 @@ exports.getTopDonors = async (req, res) => {
       topDonorsOriginal.map(async (donor) => {
         let actualTotal = 0;
 
-        // Get all orders for this donor
-        const userOrders = await Order.find({
+        // Get all orders for this donor (scoped to org)
+        const userOrdersFilter = {
           user: donor._id,
           paymentStatus: { $in: ["completed", "active"] },
-        }).lean();
+        };
+        if (req.organisation?._id) {
+          userOrdersFilter.organisationId = req.organisation._id;
+        }
+        const userOrders = await Order.find(userOrdersFilter).lean();
 
         // Calculate actual payment amounts
         await Promise.all(
@@ -629,7 +638,9 @@ exports.processCancellationRequest = async (req, res) => {
       });
     }
 
-    const donation = await Order.findById(id);
+    const donationQuery = { _id: id };
+    if (req.organisation?._id) donationQuery.organisationId = req.organisation._id;
+    const donation = await Order.findOne(donationQuery);
 
     if (!donation) {
       return res.status(404).json({
@@ -701,8 +712,9 @@ exports.getDonations = async (req, res) => {
       sortOrder = "desc",
     } = req.query;
 
-    // Build filter conditions
+    // Build filter conditions (scoped to org)
     const filter = {};
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
     if (status && status !== "All") {
       filter.paymentStatus = status;
     }
@@ -866,7 +878,9 @@ exports.getDonationsExport = async (req, res) => {
   try {
     // Implementation for exporting donations to CSV
     // Use a library like json2csv
-    const donations = await Order.find()
+    const exportFilter = {};
+    if (req.organisation?._id) exportFilter.organisationId = req.organisation._id;
+    const donations = await Order.find(exportFilter)
       .populate("user", "name email")
       .sort({ createdAt: -1 });
 
@@ -886,7 +900,9 @@ exports.getDonationsExport = async (req, res) => {
 exports.getDonationForUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const donations = await Order.find({ user: id }).lean();
+    const userFilter = { user: id };
+    if (req.organisation?._id) userFilter.organisationId = req.organisation._id;
+    const donations = await Order.find(userFilter).lean();
 
     res.json({ donations });
   } catch (error) {
@@ -902,7 +918,9 @@ exports.getDonationForUser = async (req, res) => {
 exports.getDonationById = async (req, res) => {
   try {
     const { id } = req.params;
-    const donation = await Order.findById(id)
+    const donationByIdQuery = { _id: id };
+    if (req.organisation?._id) donationByIdQuery.organisationId = req.organisation._id;
+    const donation = await Order.findOne(donationByIdQuery)
       .populate("user", "name email")
       .lean();
 
@@ -1130,7 +1148,9 @@ exports.addDonorUpdate = async (req, res) => {
       });
     }
 
-    const donation = await Order.findById(id);
+    const updateQuery = { _id: id };
+    if (req.organisation?._id) updateQuery.organisationId = req.organisation._id;
+    const donation = await Order.findOne(updateQuery);
 
     if (!donation) {
       return res.status(404).json({
@@ -1211,7 +1231,9 @@ exports.updateDonationStatus = async (req, res) => {
       });
     }
 
-    const donation = await Order.findById(id);
+    const statusQuery = { _id: id };
+    if (req.organisation?._id) statusQuery.organisationId = req.organisation._id;
+    const donation = await Order.findOne(statusQuery);
 
     if (!donation) {
       return res.status(404).json({

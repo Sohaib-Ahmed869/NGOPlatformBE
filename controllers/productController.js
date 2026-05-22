@@ -77,7 +77,9 @@ exports.getProducts = async (req, res) => {
 // @access  Public
 exports.getProductById = async (req, res) => {
     try {
-        const product = await Product.findById(req.params.id);
+        const productQuery = { _id: req.params.id };
+        if (req.organisation?._id) productQuery.organisationId = req.organisation._id;
+        const product = await Product.findOne(productQuery);
         
         if (!product) {
             return res.status(404).json({
@@ -105,8 +107,10 @@ exports.updateProduct = async (req, res) => {
         const { title, description, price, category } = req.body;
         const updateData = { title, description, price, category };
         
-        // Find the existing product
-        const existingProduct = await Product.findById(req.params.id);
+        // Find the existing product (scoped to org)
+        const productFindQuery = { _id: req.params.id };
+        if (req.organisation?._id) productFindQuery.organisationId = req.organisation._id;
+        const existingProduct = await Product.findOne(productFindQuery);
         if (!existingProduct) {
             return res.status(404).json({
                 success: false,
@@ -131,8 +135,10 @@ exports.updateProduct = async (req, res) => {
             updateData.imagePath = req.file.key;
         }
 
-        const updatedProduct = await Product.findByIdAndUpdate(
-            req.params.id,
+        const productUpdateQuery = { _id: req.params.id };
+        if (req.organisation?._id) productUpdateQuery.organisationId = req.organisation._id;
+        const updatedProduct = await Product.findOneAndUpdate(
+            productUpdateQuery,
             updateData,
             { new: true, runValidators: true }
         );
@@ -157,7 +163,9 @@ exports.updateProduct = async (req, res) => {
 // @access  Private/Admin
 exports.deleteProduct = async (req, res) => {
     try {
-        const product = await Product.findById(req.params.id);
+        const productDelQuery = { _id: req.params.id };
+        if (req.organisation?._id) productDelQuery.organisationId = req.organisation._id;
+        const product = await Product.findOne(productDelQuery);
         
         if (!product) {
             return res.status(404).json({
@@ -177,7 +185,7 @@ exports.deleteProduct = async (req, res) => {
         }
 
         // Remove the product from the database
-        await Product.findByIdAndDelete(req.params.id);
+        await Product.findOneAndDelete(productDelQuery);
         
         res.json({
             success: true,
@@ -198,7 +206,9 @@ exports.deleteProduct = async (req, res) => {
 // @access  Public
 exports.getCategories = async (req, res) => {
     try {
-        const categories = await Product.distinct('category');
+        const catFilter = {};
+        if (req.organisation?._id) catFilter.organisationId = req.organisation._id;
+        const categories = await Product.distinct('category', catFilter);
         res.json({ success: true, categories });
     } catch (error) {
         console.error('Error fetching categories:', error);

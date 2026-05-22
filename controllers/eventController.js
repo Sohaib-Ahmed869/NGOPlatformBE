@@ -74,7 +74,9 @@ exports.getEvent = async (req, res) => {
 // Update event
 exports.updateEvent = async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const eventQuery = { _id: req.params.id };
+    if (req.organisation?._id) eventQuery.organisationId = req.organisation._id;
+    const event = await Event.findOne(eventQuery);
 
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
@@ -127,8 +129,10 @@ exports.updateEvent = async (req, res) => {
       }
     }
 
-    const updatedEvent = await Event.findByIdAndUpdate(
-      req.params.id,
+    const updateQuery = { _id: req.params.id };
+    if (req.organisation?._id) updateQuery.organisationId = req.organisation._id;
+    const updatedEvent = await Event.findOneAndUpdate(
+      updateQuery,
       updateData,
       { new: true, runValidators: true }
     );
@@ -143,7 +147,9 @@ exports.updateEvent = async (req, res) => {
 // Delete event with image
 exports.deleteEvent = async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const deleteQuery = { _id: req.params.id };
+    if (req.organisation?._id) deleteQuery.organisationId = req.organisation._id;
+    const event = await Event.findOne(deleteQuery);
 
     if (!event) {
       return res.status(404).json({ error: "Event not found" });
@@ -164,7 +170,7 @@ exports.deleteEvent = async (req, res) => {
     }
 
     // Then delete the event
-    await Event.findByIdAndDelete(req.params.id);
+    await Event.findOneAndDelete(deleteQuery);
 
     res.json({ message: "Event deleted successfully" });
   } catch (error) {

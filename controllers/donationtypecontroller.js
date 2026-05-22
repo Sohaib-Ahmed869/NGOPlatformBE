@@ -55,7 +55,9 @@ const getDonationTypes = async (req, res) => {
 // Get single donation type by ID
 const getDonationTypeById = async (req, res) => {
   try {
-    const donationType = await DonationType.findById(req.params.id);
+    const dtQuery = { _id: req.params.id };
+    if (req.organisation?._id) dtQuery.organisationId = req.organisation._id;
+    const donationType = await DonationType.findOne(dtQuery);
     
     if (!donationType) {
       return res.status(404).json({
@@ -81,8 +83,10 @@ const updateDonationType = async (req, res) => {
   try {
     const { donationType } = req.body;
     
-    const updatedDonationType = await DonationType.findByIdAndUpdate(
-      req.params.id,
+    const dtUpdateQuery = { _id: req.params.id };
+    if (req.organisation?._id) dtUpdateQuery.organisationId = req.organisation._id;
+    const updatedDonationType = await DonationType.findOneAndUpdate(
+      dtUpdateQuery,
       { donationType },
       { new: true, runValidators: true }
     );
@@ -117,7 +121,9 @@ const updateDonationType = async (req, res) => {
 // Delete donation type
 const deleteDonationType = async (req, res) => {
   try {
-    const donationType = await DonationType.findByIdAndDelete(req.params.id);
+    const dtDelQuery = { _id: req.params.id };
+    if (req.organisation?._id) dtDelQuery.organisationId = req.organisation._id;
+    const donationType = await DonationType.findOneAndDelete(dtDelQuery);
     
     if (!donationType) {
       return res.status(404).json({

@@ -74,7 +74,7 @@ app.use(
       callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS' ,'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Slug']
   })
 );
@@ -146,6 +146,7 @@ tenantRouter.use("/api/products", productRoutes);
 tenantRouter.use("/api/donationtypes", donationtyperoute);
 tenantRouter.use("/api/programs", programRoutes);
 tenantRouter.use("/api/branding", brandingRoutes);
+tenantRouter.use("/api/settings", require("./routes/settingsRoutes"));
 
 // Inline newsletter routes (tenant-scoped)
 tenantRouter.post("/api/newsletter", async (req, res) => {

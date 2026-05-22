@@ -22,7 +22,6 @@ const OrderSchema = new Schema(
     donationId: {
       type: String,
       required: true,
-      unique: true,
     },
     items: [
       {
@@ -388,6 +387,11 @@ OrderSchema.virtual("subscriptionStatus").get(function () {
 
   return "Active";
 });
+
+// Unique donationId per organisation (not globally)
+OrderSchema.index({ organisationId: 1, donationId: 1 }, { unique: true });
+// Performance index for org-scoped queries
+OrderSchema.index({ organisationId: 1, paymentStatus: 1 });
 
 const Order = mongoose.model("Order", OrderSchema);
 

@@ -76,7 +76,9 @@ exports.getEvents = async (req, res) => {
 // Get single event
 exports.getEvent = async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const eventQuery = { _id: req.params.id };
+    if (req.organisation?._id) eventQuery.organisationId = req.organisation._id;
+    const event = await Event.findOne(eventQuery);
     if (!event) {
       return res.status(404).json({
         status: "Error",
@@ -152,8 +154,10 @@ exports.createEvent = async (req, res) => {
 // Update event with image upload
 exports.updateEvent = async (req, res) => {
   try {
-    // Get the current event
-    const currentEvent = await Event.findById(req.params.id);
+    // Get the current event (scoped to org)
+    const eventUpdateQuery = { _id: req.params.id };
+    if (req.organisation?._id) eventUpdateQuery.organisationId = req.organisation._id;
+    const currentEvent = await Event.findOne(eventUpdateQuery);
 
     if (!currentEvent) {
       return res.status(404).json({
@@ -211,8 +215,8 @@ exports.updateEvent = async (req, res) => {
     }
 
     // Update the event
-    const event = await Event.findByIdAndUpdate(
-      req.params.id,
+    const event = await Event.findOneAndUpdate(
+      eventUpdateQuery,
       { $set: updateData },
       { new: true, runValidators: true }
     );
@@ -234,7 +238,9 @@ exports.updateEvent = async (req, res) => {
 // Delete event
 exports.deleteEvent = async (req, res) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const eventDelQuery = { _id: req.params.id };
+    if (req.organisation?._id) eventDelQuery.organisationId = req.organisation._id;
+    const event = await Event.findOne(eventDelQuery);
 
     if (!event) {
       return res.status(404).json({
@@ -259,7 +265,7 @@ exports.deleteEvent = async (req, res) => {
     }
 
     // Delete the event
-    await Event.findByIdAndDelete(req.params.id);
+    await Event.findOneAndDelete(eventDelQuery);
 
     res.json({
       status: "Success",
@@ -277,7 +283,10 @@ exports.deleteEvent = async (req, res) => {
 // Get event statistics
 exports.getEventStats = async (req, res) => {
   try {
+    const eventStatsMatch = {};
+    if (req.organisation?._id) eventStatsMatch.organisationId = req.organisation._id;
     const stats = await Event.aggregate([
+      { $match: eventStatsMatch },
       {
         $facet: {
           totalEvents: [{ $count: "count" }],

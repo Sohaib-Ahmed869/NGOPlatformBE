@@ -6,12 +6,29 @@ const stripePrices = require("../../config/stripePrices");
 const { sendEmail } = require("../../services/emailUtil");
 
 /**
+ * POST /api/saas/register/upload-logo
+ * Upload a logo during registration (before org is created).
+ * Returns the S3 URL to be passed along with the registration request.
+ */
+exports.uploadRegistrationLogo = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No logo file uploaded" });
+    }
+    res.json({ logoUrl: req.file.location });
+  } catch (error) {
+    console.error("Logo upload error:", error);
+    res.status(500).json({ error: "Failed to upload logo" });
+  }
+};
+
+/**
  * POST /api/saas/register
  * Register a new organisation and create a Stripe Checkout Session for SaaS subscription.
  */
 exports.register = async (req, res) => {
   try {
-    const { orgName, slug, adminName, adminEmail, adminPassword, plan, billingCycle, revenueRange, theme } = req.body;
+    const { orgName, slug, adminName, adminEmail, adminPassword, plan, billingCycle, revenueRange, theme, logoUrl } = req.body;
 
     // Validate required fields
     if (!orgName || !slug || !adminName || !adminEmail || !adminPassword || !plan || !billingCycle) {
@@ -62,6 +79,7 @@ exports.register = async (req, res) => {
         primaryColor: selectedTheme.primaryColor,
         accentColor: selectedTheme.accentColor,
         backgroundColor: selectedTheme.backgroundColor,
+        logo: logoUrl || "",
       },
     });
 
@@ -170,7 +188,7 @@ exports.getBySlug = async (req, res) => {
     const { slug } = req.params;
 
     const org = await Organisation.findOne({ slug, isActive: true }).select(
-      "name slug plan billingCycle subscriptionStatus branding"
+      "name slug plan billingCycle subscriptionStatus branding contactEmail contactPhone address website bankDetails"
     );
 
     if (!org) {
