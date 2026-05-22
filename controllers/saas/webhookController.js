@@ -87,7 +87,7 @@ async function handleCheckoutCompleted(session) {
   // Send welcome email
   const subdomainUrl = process.env.CLIENT_URL
     ? `${organisation.slug}.${process.env.CLIENT_URL.replace(/^https?:\/\//, "")}`
-    : `${organisation.slug}.localhost:5173`;
+    : `${organisation.slug}.charities.ltd`;
 
   const emailBody = `
     <h2>Welcome to the Platform, ${adminName}!</h2>
