@@ -30,6 +30,8 @@ const tenantMiddleware = async (req, res, next) => {
     const organisation = await Organisation.findOne({ slug });
 
     if (!organisation) {
+      console.warn(`Tenant not found for slug: ${slug}`);
+      console.log("Request URL:", req.originalUrl);
       return res.status(404).json({ error: "Organisation not found" });
     }
 
