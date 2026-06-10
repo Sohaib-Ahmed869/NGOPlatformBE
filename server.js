@@ -53,8 +53,8 @@ app.use(
       // Allow requests with no origin (server-to-server, Postman, etc.)
       if (!origin) return callback(null, true);
 
-      // Dev: match any subdomain of localhost on common ports
-      if (/^https?:\/\/([a-z0-9-]+\.)?charities.ltd$/.test(origin)) {
+      // Dev: allow localhost origins
+      if (/^https?:\/\/(localhost|[a-z0-9-]+\.localhost)(:\d+)?$/.test(origin)) {
         return callback(null, true);
       }
 

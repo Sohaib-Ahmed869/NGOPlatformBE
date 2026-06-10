@@ -87,7 +87,7 @@ async function handleCheckoutCompleted(session) {
   // Send welcome email
   const subdomainUrl = process.env.CLIENT_URL
     ? `${organisation.slug}.${process.env.CLIENT_URL.replace(/^https?:\/\//, "")}`
-    : `${organisation.slug}.charities.ltd`;
+    : `${organisation.slug}.${process.env.CORS_DOMAIN || "localhost"}`;
 
   const emailBody = `
     <h2>Welcome to the Platform, ${adminName}!</h2>
