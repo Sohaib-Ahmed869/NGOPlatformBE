@@ -39,7 +39,15 @@ exports.updateBranding = async (req, res) => {
       return res.status(400).json({ error: "Organisation context required" });
     }
 
-    const { primaryColor, accentColor, backgroundColor, theme, tagline } = req.body;
+    const {
+      primaryColor,
+      accentColor,
+      backgroundColor,
+      theme,
+      tagline,
+      siteTitle,
+      faviconUseIcon,
+    } = req.body;
 
     const { themes: allThemes } = require("../config/themePresets");
     if (theme && !allThemes[theme]) {
@@ -64,6 +72,11 @@ exports.updateBranding = async (req, res) => {
     if (backgroundColor) updateFields["branding.backgroundColor"] = backgroundColor;
     if (theme) updateFields["branding.theme"] = theme;
     if (tagline !== undefined) updateFields["branding.tagline"] = tagline;
+    if (siteTitle !== undefined)
+      updateFields["branding.siteTitle"] = String(siteTitle).slice(0, 80);
+    if (faviconUseIcon !== undefined)
+      updateFields["branding.faviconUseIcon"] =
+        faviconUseIcon === true || faviconUseIcon === "true";
 
     const org = await Organisation.findByIdAndUpdate(
       orgId,
@@ -151,6 +164,103 @@ exports.deleteLogo = async (req, res) => {
   } catch (error) {
     console.error("Delete logo error:", error);
     res.status(500).json({ error: "Failed to remove logo" });
+  }
+};
+
+// Whitelist of branding image fields that can be uploaded/removed via the
+// generic asset endpoints. Keys are the `:type` URL param; values are the
+// matching field on `branding`.
+const ASSET_FIELDS = {
+  logo: "logo",
+  "logo-dark": "logoDark",
+  "icon-logo": "iconLogo",
+  "icon-logo-dark": "iconLogoDark",
+  favicon: "favicon",
+};
+
+/**
+ * POST /api/branding/asset/:type   (type = logo | icon-logo | favicon)
+ * Upload a branding image to S3 and store its URL on the org's branding.
+ * Replaces the dedicated /logo endpoint with one validated path for all three
+ * image slots (full logo, collapsed/icon logo, favicon).
+ */
+exports.uploadAsset = [
+  brandingUpload.single("file"),
+  async (req, res) => {
+    try {
+      const orgId = req.organisation?._id;
+      if (!orgId) {
+        return res.status(400).json({ error: "Organisation context required" });
+      }
+
+      const field = ASSET_FIELDS[req.params.type];
+      if (!field) {
+        return res.status(400).json({ error: "Invalid asset type" });
+      }
+
+      if (!req.file || !req.file.location) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const org = await Organisation.findById(orgId);
+      // Best-effort cleanup of the previous image for this slot.
+      if (org.branding?.[field]) {
+        try {
+          const oldKey = new URL(org.branding[field]).pathname.substring(1);
+          await deleteS3Object(oldKey);
+        } catch (e) {
+          // ignore — cleanup is best-effort
+        }
+      }
+
+      org.branding[field] = req.file.location;
+      await org.save();
+
+      res.json({
+        message: "Asset uploaded successfully",
+        field,
+        url: req.file.location,
+      });
+    } catch (error) {
+      console.error("Upload branding asset error:", error);
+      res.status(500).json({ error: "Failed to upload asset" });
+    }
+  },
+];
+
+/**
+ * DELETE /api/branding/asset/:type   (type = logo | icon-logo | favicon)
+ * Remove a branding image and clear its field.
+ */
+exports.deleteAsset = async (req, res) => {
+  try {
+    const orgId = req.organisation?._id;
+    if (!orgId) {
+      return res.status(400).json({ error: "Organisation context required" });
+    }
+
+    const field = ASSET_FIELDS[req.params.type];
+    if (!field) {
+      return res.status(400).json({ error: "Invalid asset type" });
+    }
+
+    const org = await Organisation.findById(orgId);
+    if (org.branding?.[field]) {
+      try {
+        const oldKey = new URL(org.branding[field]).pathname.substring(1);
+        await deleteS3Object(oldKey);
+      } catch (e) {
+        // best-effort cleanup
+      }
+    }
+
+    org.branding[field] = "";
+    await org.save();
+
+    res.json({ message: "Asset removed successfully", field });
+  } catch (error) {
+    console.error("Delete branding asset error:", error);
+    res.status(500).json({ error: "Failed to remove asset" });
   }
 };
 

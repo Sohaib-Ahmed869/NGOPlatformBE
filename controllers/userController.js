@@ -188,6 +188,7 @@ exports.loginAdmin = async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      profileImage: user.profileImage || "",
       token: generateToken(user._id),
     });
   } catch (error) {
@@ -251,7 +252,7 @@ exports.forgotPassword = async (req, res) => {
 </div>
     `;
 
-    await sendEmail(user.email, emailBody, "Password Reset Request");
+    await sendEmail(user.email, emailBody, "Password Reset Request", [], { organisationId: user.organisationId });
 
     res.status(200).json({
       status: "Success",
@@ -310,7 +311,7 @@ exports.resetPassword = async (req, res) => {
       If you did not perform this action, please contact our support team immediately.
     `;
 
-    await sendEmail(user.email, emailBody, "Password Reset Successful");
+    await sendEmail(user.email, emailBody, "Password Reset Successful", [], { organisationId: user.organisationId });
 
     res.status(200).json({
       status: "Success",

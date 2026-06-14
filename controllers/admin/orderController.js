@@ -2,10 +2,11 @@
 const Order = require("../../models/order");
 const User = require("../../models/user");
 const { sendEmail } = require("../../services/emailUtil");
+const { getTenantStripe } = require("../../services/tenantStripe");
 
 exports.getDashboardStats = async (req, res) => {
   try {
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
 
     // Get all orders (scoped to org + optional date range)
     const orgFilter = req.organisation?._id ? { organisationId: req.organisation._id } : {};
@@ -384,7 +385,7 @@ exports.getDashboardStats = async (req, res) => {
 // Corrected getTopDonors function that keeps original response format
 exports.getTopDonors = async (req, res) => {
   try {
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
 
     // Scope to current org
     const topDonorsMatch = {
@@ -613,7 +614,9 @@ const sendCancellationConfirmationEmail = async (donation) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Subscription Cancelled - Shahid Afridi Foundation"
+      "Subscription Cancelled - Shahid Afridi Foundation",
+      [],
+      { organisationId: donation.organisationId }
     );
 
     if (!result.success) {
@@ -660,7 +663,7 @@ exports.processCancellationRequest = async (req, res) => {
       // If it's a Stripe subscription, cancel it in Stripe
       if (donation.transactionDetails?.stripeSubscriptionId) {
         try {
-          const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+          const stripe = getTenantStripe(req.organisation);
           await stripe.subscriptions.del(donation.transactionDetails.stripeSubscriptionId);
           console.log(`Cancelled Stripe subscription: ${donation.transactionDetails.stripeSubscriptionId}`);
         } catch (stripeError) {
@@ -983,7 +986,9 @@ const sendBankTransferApprovalEmail = async (donation) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Donation Approved - Shahid Afridi Foundation"
+      "Donation Approved - Shahid Afridi Foundation",
+      [],
+      { organisationId: donation.organisationId }
     );
 
     if (!result.success) {
@@ -1045,7 +1050,9 @@ const sendBankTransferCancellationEmail = async (donation) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Donation Cancelled - Shahid Afridi Foundation"
+      "Donation Cancelled - Shahid Afridi Foundation",
+      [],
+      { organisationId: donation.organisationId }
     );
 
     if (!result.success) {
@@ -1117,7 +1124,9 @@ const sendDonorUpdateEmail = async (donation, update) => {
       emailBody,
       isCloseOff
         ? "Your donation is complete — thank you"
-        : "An update on your donation"
+        : "An update on your donation",
+      [],
+      { organisationId: donation.organisationId }
     );
 
     if (!result.success) {

@@ -1,5 +1,6 @@
 // controllers/admin/subscriptionController.js
 const Order = require("../../models/order");
+const { getTenantStripe } = require("../../services/tenantStripe");
 
 // Send email when admin approves a cancellation request
 const sendCancellationApprovalEmail = async (subscription) => {
@@ -44,7 +45,9 @@ const sendCancellationApprovalEmail = async (subscription) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Subscription Cancellation Approved - Shahid Afridi Foundation"
+      "Subscription Cancellation Approved - Shahid Afridi Foundation",
+      [],
+      { organisationId: subscription.organisationId }
     );
 
     if (!result.success) {
@@ -99,7 +102,9 @@ const sendCancellationDenialEmail = async (subscription) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Subscription Cancellation Request Update - Shahid Afridi Foundation"
+      "Subscription Cancellation Request Update - Shahid Afridi Foundation",
+      [],
+      { organisationId: subscription.organisationId }
     );
 
     if (!result.success) {
@@ -116,7 +121,7 @@ const sendCancellationDenialEmail = async (subscription) => {
 exports.approveCancellationRequest = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
 
     // Find the subscription with pending cancellation status (scoped to org)
     const approveQuery = {
@@ -257,7 +262,7 @@ exports.getPendingCancellationRequests = async (req, res) => {
 // Get Dashboard Stats
 exports.getDashboardStats = async (req, res) => {
   try {
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
 
     // Get all valid orders (excluding failed, scoped to org)
     const subOrgFilter = { paymentStatus: { $ne: "failed" } };

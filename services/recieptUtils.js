@@ -720,7 +720,8 @@ const sendReceiptEmail = async (
       order.donorDetails.email,
       emailBody,
       emailSubject,
-      mailOptions.attachments
+      mailOptions.attachments,
+      { organisationId: order.organisationId }
     );
     console.log("Receipt email sent: ", info.response);
 

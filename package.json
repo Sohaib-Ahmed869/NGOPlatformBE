@@ -8,6 +8,10 @@
     "seed:whitelabel": "node scripts/seedWhiteLabel.js",
     "seed:superadmin": "node scripts/seedSuperAdmin.js",
     "seed:orgs": "node scripts/seedOrganisations.js",
+    "seed:pages": "node scripts/seedPages.js",
+    "backfill:events": "node scripts/backfillEvents.js",
+    "seed:sample-events": "node scripts/seedSampleEvents.js",
+    "seed:campaigns": "node scripts/seedCampaigns.js",
     "prices:update": "node scripts/updatePlanPrices.js"
   },
   "keywords": [],
@@ -36,6 +40,7 @@
     "pdfkit": "^0.16.0",
     "saf-backend": "file:",
     "slugify": "^1.6.6",
+    "socket.io": "^4.8.3",
     "stripe": "^17.6.0"
   }
 }

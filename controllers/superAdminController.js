@@ -222,6 +222,14 @@ exports.approveBrandingRequest = async (req, res) => {
     if (rb.theme) updateFields["branding.theme"] = rb.theme;
     if (rb.tagline !== undefined) updateFields["branding.tagline"] = rb.tagline;
     if (rb.logo) updateFields["branding.logo"] = rb.logo;
+    if (rb.logoDark) updateFields["branding.logoDark"] = rb.logoDark;
+    if (rb.iconLogo) updateFields["branding.iconLogo"] = rb.iconLogo;
+    if (rb.iconLogoDark) updateFields["branding.iconLogoDark"] = rb.iconLogoDark;
+    if (rb.favicon) updateFields["branding.favicon"] = rb.favicon;
+    if (rb.faviconUseIcon !== undefined)
+      updateFields["branding.faviconUseIcon"] = rb.faviconUseIcon;
+    if (rb.siteTitle !== undefined)
+      updateFields["branding.siteTitle"] = rb.siteTitle;
 
     await Organisation.findByIdAndUpdate(request.organisationId, {
       $set: updateFields,

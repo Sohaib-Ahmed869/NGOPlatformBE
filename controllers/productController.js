@@ -72,6 +72,21 @@ exports.getProducts = async (req, res) => {
     }
 };
 
+// @desc    Get all products for the org, including inactive (admin)
+// @route   GET /api/products/admin/all
+// @access  Private/Admin
+exports.getProductsAdmin = async (req, res) => {
+    try {
+        const filter = {};
+        if (req.organisation?._id) filter.organisationId = req.organisation._id;
+        const products = await Product.find(filter).sort({ createdAt: -1 });
+        res.json({ success: true, products });
+    } catch (error) {
+        console.error('Error fetching products (admin):', error);
+        res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    }
+};
+
 // @desc    Get single product
 // @route   GET /api/products/:id
 // @access  Public

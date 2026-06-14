@@ -25,6 +25,7 @@ router.get("/:id", programController.getProgram);
 // Admin CRUD (with image uploads)
 router.post("/", protect, admin, checkLimit("campaigns"), programUpload.array("images", 5), programController.createProgram);
 router.put("/:id", protect, admin, programUpload.array("images", 5), programController.updateProgram);
+router.delete("/:id", protect, admin, programController.deleteProgram);
 router.post("/:id/followup", protect, admin, programUpload.array("images", 5), programController.postFollowUp);
 router.put("/:id/close", protect, admin, programController.closeProgram);
 

@@ -25,7 +25,12 @@ const createUploadConfig = (folder) => ({
   },
   key: function (req, file, cb) {
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `${folder}/` + uniqueSuffix + path.extname(file.originalname));
+    // Isolate each tenant's uploads under their slug, e.g. "calcite/products/...".
+    // Falls back to a flat folder when there's no tenant context (e.g. the
+    // registration logo upload, before the org exists).
+    const slug = req.organisation?.slug;
+    const prefix = slug ? `${slug}/${folder}` : folder;
+    cb(null, `${prefix}/` + uniqueSuffix + path.extname(file.originalname));
   },
 });
 
@@ -86,8 +91,12 @@ const brandingUpload = multer({
   storage: multerS3(createUploadConfig("branding")),
   limits: { fileSize: 2 * 1024 * 1024 }, // 2MB for logos
   fileFilter: function (req, file, cb) {
-    const filetypes = /jpeg|jpg|png|svg|webp/;
-    const mimetype = /image\/(jpeg|jpg|png|svg\+xml|webp)/.test(file.mimetype);
+    // Logos + favicons. Favicons are commonly .ico, so accept that too.
+    const filetypes = /jpeg|jpg|png|svg|webp|ico/;
+    const mimetype =
+      /image\/(jpeg|jpg|png|svg\+xml|webp|x-icon|vnd\.microsoft\.icon)/.test(
+        file.mimetype
+      );
     const extname = filetypes.test(
       path.extname(file.originalname).toLowerCase()
     );
@@ -95,7 +104,24 @@ const brandingUpload = multer({
     if (mimetype && extname) {
       return cb(null, true);
     }
-    cb(new Error("Only image files (JPEG, PNG, SVG, WebP) are allowed for logos!"));
+    cb(new Error("Only image files (JPEG, PNG, SVG, WebP, ICO) are allowed for logos!"));
+  },
+});
+
+// Configure multer for user avatar uploads (admin/user profile photos)
+const avatarUpload = multer({
+  storage: multerS3(createUploadConfig("avatars")),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|webp/;
+    const mimetype = /image\/(jpeg|jpg|png|webp)/.test(file.mimetype);
+    const extname = filetypes.test(
+      path.extname(file.originalname).toLowerCase()
+    );
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files (JPEG, PNG, WebP) are allowed for avatars!"));
   },
 });
 
@@ -106,6 +132,40 @@ const programUpload = multer({
   fileFilter: function (req, file, cb) {
     const filetypes = /jpeg|jpg|png|gif|webp/;
     const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(
+      path.extname(file.originalname).toLowerCase()
+    );
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files are allowed!"));
+  },
+});
+
+// Configure multer for P2P campaign uploads (images only)
+const campaignUpload = multer({
+  storage: multerS3(createUploadConfig("campaigns")),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|gif|webp/;
+    const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(
+      path.extname(file.originalname).toLowerCase()
+    );
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files are allowed!"));
+  },
+});
+
+// Configure multer for page-content image uploads (CMS page editor)
+const pageContentUpload = multer({
+  storage: multerS3(createUploadConfig("page-content")),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|gif|webp|svg/;
+    const mimetype = /image\/(jpeg|jpg|png|gif|webp|svg\+xml)/.test(file.mimetype);
     const extname = filetypes.test(
       path.extname(file.originalname).toLowerCase()
     );
@@ -142,5 +202,8 @@ module.exports = {
   productUpload,
   brandingUpload,
   programUpload,
+  campaignUpload,
+  pageContentUpload,
   donationUpdatesUpload,
+  avatarUpload,
 };

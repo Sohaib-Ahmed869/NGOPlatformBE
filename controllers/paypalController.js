@@ -1,233 +1,134 @@
-const axios = require('axios');
+// Per-tenant PayPal donations. All calls use the tenant's own PayPal app
+// (resolved via services/tenantPaypal), falling back to the platform app when a
+// tenant hasn't connected their own. The tenant is taken from req.organisation
+// (set by the tenant middleware) for donor-facing routes, or resolved by slug
+// for the webhook.
+const Order = require("../models/order");
+const Organisation = require("../models/organisation");
+const { getPaypalClient, getPaypalConfig } = require("../services/tenantPaypal");
 
-const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
-const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
-const PAYPAL_BASE_URL = process.env.PAYPAL_BASE_URL || 'https://api-m.sandbox.paypal.com';
-
-// Helper function to get frequency from PayPal plan ID
 function getFrequencyFromPayPalPlan(planId) {
-  if (!planId) return 'monthly'; // Default to monthly if no plan ID
-  
-  const planIdLower = planId.toLowerCase();
-  if (planIdLower.includes('daily')) return 'daily';
-  if (planIdLower.includes('weekly')) return 'weekly';
-  if (planIdLower.includes('monthly')) return 'monthly';
-  if (planIdLower.includes('yearly')) return 'yearly';
-  
-  return 'monthly'; // Default to monthly if no match
+  if (!planId) return "monthly";
+  const p = String(planId).toLowerCase();
+  if (p.includes("daily")) return "daily";
+  if (p.includes("weekly")) return "weekly";
+  if (p.includes("monthly")) return "monthly";
+  if (p.includes("yearly")) return "yearly";
+  return "monthly";
 }
 
-// Get your actual frontend URL - replace with your production URL when deploying
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+// The tenant's public site (for PayPal redirect URLs). Prefer the request origin.
+function frontendBase(req) {
+  return req.headers.origin || process.env.FRONTEND_URL || "http://localhost:5173";
+}
 
-// Get PayPal access token
-const getAccessToken = async () => {
-  try {
-    const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
-    const response = await axios.post(
-      `${PAYPAL_BASE_URL}/v1/oauth2/token`,
-      'grant_type=client_credentials',
-      {
-        headers: {
-          'Authorization': `Basic ${auth}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-      }
-    );
-    return response.data.access_token;
-  } catch (error) {
-    console.error('Error getting PayPal access token:', error.response?.data || error.message);
-    throw error;
-  }
-};
-
-// Create PayPal order
+// Create one-time PayPal order
 exports.createOrder = async (req, res) => {
   try {
-    const { amount } = req.body;
-    
-    if (!amount) {
-      return res.status(400).json({ error: 'Amount is required' });
-    }
+    const { amount, currency = "AUD" } = req.body;
+    if (!amount) return res.status(400).json({ error: "Amount is required" });
 
-    console.log('Creating PayPal order with amount:', amount);
-    const accessToken = await getAccessToken();
-
-    const response = await axios.post(
-      `${PAYPAL_BASE_URL}/v2/checkout/orders`,
-      {
-        intent: 'CAPTURE',
-        purchase_units: [{
-          amount: {
-            currency_code: 'AUD',
-            value: amount.toString(),
-          },
-        }],
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    console.log('PayPal order created:', response.data);
+    const { client } = await getPaypalClient(req.organisation);
+    const response = await client.post("/v2/checkout/orders", {
+      intent: "CAPTURE",
+      purchase_units: [{ amount: { currency_code: currency, value: amount.toString() } }],
+    });
     res.json({ id: response.data.id });
   } catch (error) {
-    console.error('Error creating PayPal order:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create order' });
+    console.error("Error creating PayPal order:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to create order" });
   }
 };
 
-// Capture PayPal order
+// Capture a one-time PayPal order
 exports.captureOrder = async (req, res) => {
   try {
     const { orderID } = req.body;
-    
-    if (!orderID) {
-      return res.status(400).json({ error: 'Order ID is required' });
-    }
+    if (!orderID) return res.status(400).json({ error: "Order ID is required" });
 
-    console.log('Capturing PayPal order:', orderID);
-    const accessToken = await getAccessToken();
-
-    const response = await axios.post(
-      `${PAYPAL_BASE_URL}/v2/checkout/orders/${orderID}/capture`,
-      {},
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    console.log('PayPal order captured:', response.data);
+    const { client } = await getPaypalClient(req.organisation);
+    const response = await client.post(`/v2/checkout/orders/${orderID}/capture`, {});
     res.json(response.data);
   } catch (error) {
-    console.error('Error capturing PayPal order:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to capture payment' });
+    console.error("Error capturing PayPal order:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to capture payment" });
   }
 };
 
-// Create PayPal subscription
+// Create a PayPal subscription from an existing plan
 exports.createSubscription = async (req, res) => {
   try {
     const { plan_id } = req.body;
-    if (!plan_id) {
-      return res.status(400).json({ error: 'Plan ID is required' });
-    }
-    
-    console.log('Creating PayPal subscription with plan:', plan_id);
-    const accessToken = await getAccessToken();
-    
-    const response = await axios.post(
-      `${PAYPAL_BASE_URL}/v1/billing/subscriptions`,
-      {
-        plan_id,
-        application_context: {
-          brand_name: "Shahid Afridi Foundation",
-          user_action: "SUBSCRIBE_NOW",
-          return_url: `${FRONTEND_URL}/order-confirmation`,
-          cancel_url: `${FRONTEND_URL}/subscription-cancelled`
-        }
+    if (!plan_id) return res.status(400).json({ error: "Plan ID is required" });
+
+    const { client } = await getPaypalClient(req.organisation);
+    const base = frontendBase(req);
+    const response = await client.post("/v1/billing/subscriptions", {
+      plan_id,
+      application_context: {
+        brand_name: req.organisation?.name || "Donation",
+        user_action: "SUBSCRIBE_NOW",
+        return_url: `${base}/order-confirmation`,
+        cancel_url: `${base}/subscription-cancelled`,
       },
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    
-    console.log('PayPal subscription created:', response.data);
-    
-    // Find approval link
-    const approvalLink = response.data.links.find(link => link.rel === 'approve');
-    
-    if (!approvalLink) {
-      throw new Error('Approval link not found in PayPal response');
-    }
-    
-    res.json({ 
-      id: response.data.id, 
-      approvalUrl: approvalLink.href,
-      status: response.data.status
     });
+
+    const approvalLink = (response.data.links || []).find((l) => l.rel === "approve");
+    if (!approvalLink) throw new Error("Approval link not found in PayPal response");
+    res.json({ id: response.data.id, approvalUrl: approvalLink.href, status: response.data.status });
   } catch (error) {
-    console.error('Error creating PayPal subscription:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create subscription' });
+    console.error("Error creating PayPal subscription:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to create subscription" });
   }
 };
 
-// Create dynamic PayPal plan for custom recurring donation
+// Create a dynamic plan for a custom recurring donation
 exports.createDynamicPlan = async (req, res) => {
   try {
     const { amount, frequency = "MONTH", currency = "AUD", total_cycles = 0 } = req.body;
     if (!amount) return res.status(400).json({ error: "Amount is required" });
-    
-    console.log('Creating dynamic PayPal plan:', { amount, frequency, currency, total_cycles });
-    const accessToken = await getAccessToken();
-    
-    // 1. Create (or reuse) a product
-    let productId = process.env.PAYPAL_PRODUCT_ID;
+
+    const { client } = await getPaypalClient(req.organisation);
+    const cfg = getPaypalConfig(req.organisation);
+
+    // Reuse the org's catalog product, else create one and persist it.
+    let productId = cfg.productId;
     if (!productId) {
-      console.log('Creating new PayPal product...');
-      const productRes = await axios.post(
-        `${PAYPAL_BASE_URL}/v1/catalogs/products`,
-        {
-          name: "SAF Recurring Donation",
-          description: "Recurring donation to Shahid Afridi Foundation",
-          type: "SERVICE",
-          category: "CHARITY"
-        },
-        { 
-          headers: { 
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json'
-          } 
-        }
-      );
+      const orgName = req.organisation?.name || "Donation";
+      const productRes = await client.post("/v1/catalogs/products", {
+        name: `${orgName} Recurring Donation`,
+        description: `Recurring donation to ${orgName}`,
+        type: "SERVICE",
+        category: "CHARITY",
+      });
       productId = productRes.data.id;
-      console.log('PayPal product created:', productId);
-      // Optionally: save this productId for future use
-    }
-    
-    // 2. Create plan
-    const planRes = await axios.post(
-      `${PAYPAL_BASE_URL}/v1/billing/plans`,
-      {
-        product_id: productId,
-        name: `SAF Donation Plan ${amount} ${currency}`,
-        description: `Custom recurring donation plan - ${amount} ${currency} per ${frequency.toLowerCase()}`,
-        billing_cycles: [
-          {
-            frequency: { interval_unit: frequency, interval_count: 1 },
-            tenure_type: "REGULAR",
-            sequence: 1,
-            total_cycles: total_cycles,
-            pricing_scheme: {
-              fixed_price: { value: amount.toString(), currency_code: currency }
-            }
-          }
-        ],
-        payment_preferences: {
-          auto_bill_outstanding: true,
-          setup_fee: { value: "0", currency_code: currency },
-          setup_fee_failure_action: "CONTINUE",
-          payment_failure_threshold: 3
-        }
-      },
-      { 
-        headers: { 
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        } 
+      if (cfg.tenant && req.organisation?._id) {
+        await Organisation.findByIdAndUpdate(req.organisation._id, { $set: { "paypal.productId": productId } });
       }
-    );
-    
-    console.log('PayPal plan created:', planRes.data.id);
+    }
+
+    const orgName = req.organisation?.name || "Donation";
+    const planRes = await client.post("/v1/billing/plans", {
+      product_id: productId,
+      name: `${orgName} Plan ${amount} ${currency}`,
+      description: `Custom recurring donation - ${amount} ${currency} per ${frequency.toLowerCase()}`,
+      billing_cycles: [
+        {
+          frequency: { interval_unit: frequency, interval_count: 1 },
+          tenure_type: "REGULAR",
+          sequence: 1,
+          total_cycles,
+          pricing_scheme: { fixed_price: { value: amount.toString(), currency_code: currency } },
+        },
+      ],
+      payment_preferences: {
+        auto_bill_outstanding: true,
+        setup_fee: { value: "0", currency_code: currency },
+        setup_fee_failure_action: "CONTINUE",
+        payment_failure_threshold: 3,
+      },
+    });
+
     res.json({ planId: planRes.data.id });
   } catch (error) {
     console.error("Error creating dynamic PayPal plan:", error.response?.data || error.message);
@@ -235,468 +136,159 @@ exports.createDynamicPlan = async (req, res) => {
   }
 };
 
+// Confirm a subscription and persist the Order (tenant-scoped)
 exports.confirmSubscription = async (req, res) => {
-  console.log('=== START confirmSubscription ===');
-  console.log('Request body:', JSON.stringify(req.body, null, 2));
-  
   try {
     const { subscriptionId } = req.body;
-    if (!subscriptionId) {
-      const error = new Error('No subscriptionId provided in request body');
-      console.error(error.message);
-      return res.status(400).json({ error: 'subscriptionId is required' });
-    }
+    if (!subscriptionId) return res.status(400).json({ error: "subscriptionId is required" });
 
-    console.log('Getting PayPal access token...');
-    const accessToken = await getAccessToken();
-    if (!accessToken) {
-      const error = new Error('Failed to get PayPal access token');
-      console.error(error.message);
-      return res.status(500).json({ error: 'Failed to authenticate with PayPal' });
-    }
-
-    console.log('Fetching subscription details from PayPal...');
-    const response = await axios.get(
-      `${PAYPAL_BASE_URL}/v1/billing/subscriptions/${subscriptionId}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    
+    const { client } = await getPaypalClient(req.organisation);
+    const response = await client.get(`/v1/billing/subscriptions/${subscriptionId}`);
     const sub = response.data;
-    console.log('PayPal subscription details received');
-    
-    // Log important subscription details
-    const subscriptionAmount = sub.billing_info?.last_payment?.amount?.value || 
-                             sub.plan?.billing_cycles?.[0]?.pricing_scheme?.fixed_price?.value;
-    console.log('Subscription amount:', subscriptionAmount);
-    console.log('Subscription status:', sub.status);
 
-    // Always use the logged-in user's information if available
-    let donorName = 'Anonymous Donor';
+    const subscriptionAmount =
+      sub.billing_info?.last_payment?.amount?.value ||
+      sub.plan?.billing_cycles?.[0]?.pricing_scheme?.fixed_price?.value;
+
+    let donorName = "Anonymous Donor";
     let donorEmail = null;
-    let donorPhone = '';
+    let donorPhone = "";
     let donorAddress = {};
-    let userId = undefined;
+    let userId;
     if (req.user) {
-      donorName = req.user.name || req.user.firstName || 'Anonymous Donor';
+      donorName = req.user.name || req.user.firstName || "Anonymous Donor";
       donorEmail = req.user.email;
-      donorPhone = req.user.phone || '';
+      donorPhone = req.user.phone || "";
       donorAddress = req.user.address || {};
       userId = req.user._id;
     } else if (sub.subscriber?.email_address) {
-      // Fall back to PayPal subscriber info only if no user is logged in
       donorEmail = sub.subscriber.email_address;
-      donorName = sub.subscriber.name?.given_name ? 
-        `${sub.subscriber.name.given_name} ${sub.subscriber.name.surname || ''}`.trim() : 
-        'Anonymous Donor';
-      donorPhone = '';
-      donorAddress = {};
+      donorName = sub.subscriber.name?.given_name
+        ? `${sub.subscriber.name.given_name} ${sub.subscriber.name.surname || ""}`.trim()
+        : "Anonymous Donor";
     }
 
-    try {
-      // Import required models and utilities
-      const Order = require('../models/order');
-      const { v4: uuidv4 } = require('uuid');
-      
-      // Check if order already exists
-      let order = await Order.findOne({ 
-        $or: [
-          { externalId: subscriptionId },
-          { 'details.id': subscriptionId },
-          { 'transactionDetails.subscription_id': subscriptionId }
-        ],
-        paymentType: 'recurring'
-      });
-      
-      if (!order) {
-        console.log('Creating new order in database...');
-        const donationId = `DON-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        const frequency = getFrequencyFromPayPalPlan(sub.plan_id);
-        
-        const orderData = {
-          user: userId,
-          donationId: donationId,
-          items: [{
-            title: 'Recurring Donation',
-            price: subscriptionAmount || 0,
-            quantity: 1,
-            description: `Recurring ${frequency} donation`
-          }],
-          paymentType: 'recurring',
-          donationType: 'general',
-          paymentMethod: 'paypal',
-          paymentStatus: sub.status === 'ACTIVE' ? 'active' : 'pending',
-          totalAmount: subscriptionAmount || 0,
-          recurringDetails: {
-            frequency: frequency,
-            amount: subscriptionAmount || 0,
-            startDate: sub.start_time ? new Date(sub.start_time) : new Date(),
-            endDate: sub.billing_info?.final_payment_time ? new Date(sub.billing_info.final_payment_time) : null,
-            status: sub.status === 'ACTIVE' ? 'active' : 'pending',
-            nextPaymentDate: sub.billing_info?.next_billing_time ? new Date(sub.billing_info.next_billing_time) : null,
-            paymentHistory: sub.billing_info?.last_payment ? [{
-              date: new Date(sub.billing_info.last_payment.time),
-              amount: subscriptionAmount || 0,
-              invoiceId: sub.billing_info.last_payment.id,
-              status: sub.status === 'ACTIVE' ? 'succeeded' : 'pending',
-              receiptUrl: sub.links?.find(link => link.rel === 'self')?.href || ''
-            }] : [],
-            paypalSubscriptionId: subscriptionId,
-            paypalPlanId: sub.plan_id
-          },
-          externalId: subscriptionId,
-          transactionDetails: {
-            subscription_id: subscriptionId,
-            plan_id: sub.plan_id,
-            status: sub.status,
-            create_time: sub.create_time,
-            links: sub.links
-          },
-          details: sub,
-          donorDetails: {
-            name: donorName,
-            email: donorEmail || '',
-            phone: donorPhone,
-            address: donorAddress
-          },
-          createdAt: sub.create_time ? new Date(sub.create_time) : new Date(),
-          updatedAt: new Date()
-        };
-        
-        console.log('Order data to be saved:', JSON.stringify(orderData, null, 2));
-        
-        order = new Order(orderData);
-        await order.save();
-        console.log('Order created successfully. Order ID:', order._id);
-        
-        // Verify the order was saved
-        const savedOrder = await Order.findById(order._id);
-        console.log('Verified saved order exists:', !!savedOrder);
-      } else {
-        console.log('Found existing order. Order ID:', order._id);
-        
-        // Update existing order if needed
-        order.status = sub.status === 'ACTIVE' ? 'active' : 'pending';
-        order.amount = subscriptionAmount || order.amount;
-        order.details = sub;
-        order.updatedAt = new Date();
-        
-        await order.save();
-        console.log('Updated existing order');
-      }
-      
-      // Prepare response
-      const responseData = { 
-        success: true,
-        order: {
-          id: order._id,
-          status: order.status,
-          amount: order.amount,
-          subscriptionId: order.externalId,
-          createdAt: order.createdAt
+    let order = await Order.findOne({
+      $or: [
+        { externalId: subscriptionId },
+        { "transactionDetails.subscription_id": subscriptionId },
+      ],
+      paymentType: "recurring",
+    });
+
+    if (!order) {
+      const donationId = `DON-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const frequency = getFrequencyFromPayPalPlan(sub.plan_id);
+      order = new Order({
+        organisationId: req.organisation?._id || null,
+        user: userId,
+        donationId,
+        items: [{ title: "Recurring Donation", price: subscriptionAmount || 0, quantity: 1, description: `Recurring ${frequency} donation` }],
+        paymentType: "recurring",
+        donationType: "general",
+        paymentMethod: "paypal",
+        paymentStatus: sub.status === "ACTIVE" ? "active" : "pending",
+        totalAmount: subscriptionAmount || 0,
+        recurringDetails: {
+          frequency,
+          amount: subscriptionAmount || 0,
+          startDate: sub.start_time ? new Date(sub.start_time) : new Date(),
+          status: sub.status === "ACTIVE" ? "active" : "pending",
+          nextPaymentDate: sub.billing_info?.next_billing_time ? new Date(sub.billing_info.next_billing_time) : null,
+          paypalSubscriptionId: subscriptionId,
+          paypalPlanId: sub.plan_id,
         },
-        subscription: {
-          id: subscriptionId,
-          status: sub.status,
-          amount: subscriptionAmount,
-          createdAt: order.createdAt
-        }
-      };
-      
-      console.log('Sending success response:', JSON.stringify(responseData, null, 2));
-      return res.json(responseData);
-      
-    } catch (dbError) {
-      console.error('Database error:', {
-        message: dbError.message,
-        stack: dbError.stack,
-        code: dbError.code,
-        name: dbError.name
+        externalId: subscriptionId,
+        transactionDetails: { subscription_id: subscriptionId, plan_id: sub.plan_id, status: sub.status },
+        details: sub,
+        donorDetails: { name: donorName, email: donorEmail || "", phone: donorPhone, address: donorAddress },
       });
-      
-      if (dbError.name === 'ValidationError') {
-        console.error('Validation errors:', dbError.errors);
-      }
-      
-      // Return the subscription details even if database save fails
-      const subscriptionData = {
-        success: true,
-        subscription: {
-          id: subscriptionId,
-          status: sub.status,
-          amount: subscriptionAmount,
-          createdAt: new Date()
-        },
-        warning: 'Subscription confirmed but could not save to database',
-        error: process.env.NODE_ENV === 'development' ? dbError.message : undefined
-      };
-      
-      console.log('Sending response with database warning:', JSON.stringify(subscriptionData, null, 2));
-      return res.json(subscriptionData);
+      await order.save();
+    } else {
+      order.paymentStatus = sub.status === "ACTIVE" ? "active" : "pending";
+      order.details = sub;
+      await order.save();
     }
-    
+
+    return res.json({
+      success: true,
+      order: { id: order._id, status: order.paymentStatus, amount: order.totalAmount, subscriptionId: order.externalId },
+      subscription: { id: subscriptionId, status: sub.status, amount: subscriptionAmount },
+    });
   } catch (error) {
-    const errorDetails = {
-      message: error.message,
-      name: error.name,
-      code: error.code,
-      response: error.response?.data,
-      stack: error.stack
-    };
-    
-    console.error('Error in confirmSubscription:', JSON.stringify(errorDetails, null, 2));
-    
-    const statusCode = error.response?.status || 500;
-    const errorMessage = error.response?.data?.message || 'Failed to confirm subscription';
-    
-    const errorResponse = { 
-      error: errorMessage,
-      details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
-    };
-    
-    console.log('Sending error response:', JSON.stringify(errorResponse, null, 2));
-    return res.status(statusCode).json(errorResponse);
-  } finally {
-    console.log('=== END confirmSubscription ===');
+    console.error("Error in confirmSubscription:", error.response?.data || error.message);
+    res.status(error.response?.status || 500).json({ error: error.response?.data?.message || "Failed to confirm subscription" });
   }
 };
 
-// PayPal Webhook Handler
+/* ── Per-tenant webhook ─────────────────────────────────────────────────────
+ * PayPal posts to /api/webhooks/paypal/:slug. The slug resolves the org so the
+ * handler is tenant-aware. (Signature verification with the org's webhookId can
+ * be layered on later.)
+ */
 exports.handleWebhook = async (req, res) => {
   try {
     const event = req.body;
-    console.log('PayPal webhook received:', event.event_type, event.resource_type);
-
-    // Verify webhook signature (recommended for production)
-    // const isValid = await verifyWebhookSignature(req);
-    // if (!isValid) {
-    //   return res.status(400).json({ error: 'Invalid webhook signature' });
-    // }
+    const org = await Organisation.findOne({ slug: req.params.slug }).select("_id slug").catch(() => null);
+    const orgId = org?._id || null;
+    console.log(`PayPal webhook [${req.params.slug}]:`, event.event_type);
 
     switch (event.event_type) {
-      case 'BILLING.SUBSCRIPTION.ACTIVATED':
-        await handleSubscriptionActivated(event);
+      case "BILLING.SUBSCRIPTION.ACTIVATED":
+        await updateOrderStatus(orgId, event.resource?.id, { paymentStatus: "active" });
         break;
-      
-      case 'BILLING.SUBSCRIPTION.PAYMENT.COMPLETED':
-        await handleSubscriptionPaymentCompleted(event);
+      case "BILLING.SUBSCRIPTION.CANCELLED":
+        await updateOrderStatus(orgId, event.resource?.id, { paymentStatus: "cancelled" });
         break;
-      
-      case 'BILLING.SUBSCRIPTION.PAYMENT.FAILED':
-        await handleSubscriptionPaymentFailed(event);
+      case "BILLING.SUBSCRIPTION.SUSPENDED":
+        await updateOrderStatus(orgId, event.resource?.id, { paymentStatus: "suspended" });
         break;
-      
-      case 'BILLING.SUBSCRIPTION.CANCELLED':
-        await handleSubscriptionCancelled(event);
+      case "BILLING.SUBSCRIPTION.PAYMENT.FAILED":
+        await updateOrderStatus(orgId, event.resource?.billing_agreement_id, { paymentStatus: "failed" });
         break;
-      
-      case 'BILLING.SUBSCRIPTION.SUSPENDED':
-        await handleSubscriptionSuspended(event);
+      case "PAYMENT.SALE.COMPLETED":
+        await recordSalePayment(orgId, event.resource);
         break;
-      
-      case 'PAYMENT.SALE.COMPLETED':
-        await handlePaymentSaleCompleted(event);
-        break;
-      
       default:
-        console.log('Unhandled PayPal webhook event:', event.event_type);
+        console.log("Unhandled PayPal webhook event:", event.event_type);
     }
-
-    res.status(200).json({ status: 'success' });
+    res.status(200).json({ status: "success" });
   } catch (error) {
-    console.error('PayPal webhook error:', error);
-    res.status(500).json({ error: 'Webhook processing failed' });
+    console.error("PayPal webhook error:", error.message);
+    res.status(500).json({ error: "Webhook processing failed" });
   }
 };
 
-// Handle subscription activation
-const handleSubscriptionActivated = async (event) => {
-  const subscription = event.resource;
-  console.log('Subscription activated:', subscription.id);
-  
-  // Find order by PayPal subscription ID
-  const order = await Order.findOne({ 
-    'paypalDetails.subscriptionId': subscription.id 
-  });
-  
-  if (order) {
-    order.paymentStatus = 'active';
-    order.paypalDetails = {
-      ...order.paypalDetails,
-      status: subscription.status,
-      lastUpdated: new Date()
-    };
-    await order.save();
-    console.log('Order updated for activated subscription:', order.donationId);
-  }
-};
+// Find an order by its PayPal subscription id (org-scoped when known) and patch it.
+async function updateOrderStatus(orgId, subscriptionId, patch) {
+  if (!subscriptionId) return;
+  const q = {
+    $or: [{ externalId: subscriptionId }, { "recurringDetails.paypalSubscriptionId": subscriptionId }, { "transactionDetails.subscription_id": subscriptionId }],
+  };
+  if (orgId) q.organisationId = orgId;
+  const order = await Order.findOne(q);
+  if (!order) return;
+  Object.assign(order, patch);
+  if (patch.paymentStatus === "cancelled" && order.recurringDetails) order.recurringDetails.status = "cancelled";
+  await order.save();
+}
 
-// Handle successful subscription payment
-const handleSubscriptionPaymentCompleted = async (event) => {
-  const payment = event.resource;
-  console.log('Webhook payment resource:', JSON.stringify(payment, null, 2));
-  // Find order by PayPal subscription ID
-  const order = await Order.findOne({ 
-    'paypalDetails.subscriptionId': payment.billing_agreement_id 
-  });
-  
-  if (order) {
-    if (order.paymentType === 'installments') {
-      // Update installment progress
-      const currentPaid = order.installmentDetails.installmentsPaid || 0;
-      const totalInstallments = order.installmentDetails.numberOfInstallments;
-      const installmentLog = {
-        installmentNumber: currentPaid + 1,
-        amount: payment.amount.total,
-        paymentDate: new Date(),
-        paypalPaymentId: payment.id,
-        status: 'completed'
-      };
-      console.log('Adding to installmentHistory:', installmentLog);
-      order.installmentDetails.installmentsPaid = currentPaid + 1;
-      order.installmentDetails.installmentHistory.push(installmentLog);
-      
-      // Check if all installments are paid
-      if (order.installmentDetails.installmentsPaid >= totalInstallments) {
-        order.paymentStatus = 'completed';
-        order.installmentDetails.status = 'completed';
-      } else {
-        // Set next installment date
-        const nextDate = new Date();
-        nextDate.setMonth(nextDate.getMonth() + 1);
-        order.installmentDetails.nextInstallmentDate = nextDate;
-      }
-    } else if (order.paymentType === 'recurring') {
-      // Add to payment history for recurring
-      if (!order.paymentHistory) order.paymentHistory = [];
-      order.paymentHistory.push({
-        paymentDate: new Date(),
-        amount: payment.amount.total,
-        paypalPaymentId: payment.id,
-        status: 'completed'
-      });
-    }
-    
-    order.paypalDetails = {
-      ...order.paypalDetails,
-      lastPaymentDate: new Date(),
-      lastPaymentId: payment.id,
-      lastUpdated: new Date()
-    };
-    
-    await order.save();
-    console.log('Order updated for payment:', order.donationId);
+async function recordSalePayment(orgId, payment) {
+  if (!payment?.billing_agreement_id) return;
+  const q = {
+    $or: [{ externalId: payment.billing_agreement_id }, { "recurringDetails.paypalSubscriptionId": payment.billing_agreement_id }],
+  };
+  if (orgId) q.organisationId = orgId;
+  const order = await Order.findOne(q);
+  if (!order) return;
+  if (order.recurringDetails) {
+    order.recurringDetails.paymentHistory = order.recurringDetails.paymentHistory || [];
+    order.recurringDetails.paymentHistory.push({
+      date: new Date(),
+      amount: payment.amount?.total || order.totalAmount,
+      invoiceId: payment.id,
+      status: "succeeded",
+    });
   }
-};
-
-// Handle failed subscription payment
-const handleSubscriptionPaymentFailed = async (event) => {
-  const payment = event.resource;
-  console.log('Subscription payment failed:', payment.id);
-  
-  const order = await Order.findOne({ 
-    'paypalDetails.subscriptionId': payment.billing_agreement_id 
-  });
-  
-  if (order) {
-    if (order.paymentType === 'installments') {
-      // Add failed payment to history
-      const currentPaid = order.installmentDetails.installmentsPaid || 0;
-      order.installmentDetails.installmentHistory.push({
-        installmentNumber: currentPaid + 1,
-        amount: payment.amount.total,
-        paymentDate: new Date(),
-        paypalPaymentId: payment.id,
-        status: 'failed'
-      });
-    }
-    
-    order.paymentStatus = 'failed';
-    order.paypalDetails = {
-      ...order.paypalDetails,
-      lastPaymentDate: new Date(),
-      lastPaymentId: payment.id,
-      lastUpdated: new Date()
-    };
-    
-    await order.save();
-    console.log('Order marked as failed:', order.donationId);
-  }
-};
-
-// Handle subscription cancellation
-const handleSubscriptionCancelled = async (event) => {
-  const subscription = event.resource;
-  console.log('Subscription cancelled:', subscription.id);
-  
-  const order = await Order.findOne({ 
-    'paypalDetails.subscriptionId': subscription.id 
-  });
-  
-  if (order) {
-    order.paymentStatus = 'cancelled';
-    order.paypalDetails = {
-      ...order.paypalDetails,
-      status: subscription.status,
-      lastUpdated: new Date()
-    };
-    
-    if (order.paymentType === 'installments') {
-      order.installmentDetails.status = 'cancelled';
-    }
-    
-    await order.save();
-    console.log('Order cancelled:', order.donationId);
-  }
-};
-
-// Handle subscription suspension
-const handleSubscriptionSuspended = async (event) => {
-  const subscription = event.resource;
-  console.log('Subscription suspended:', subscription.id);
-  
-  const order = await Order.findOne({ 
-    'paypalDetails.subscriptionId': subscription.id 
-  });
-  
-  if (order) {
-    order.paymentStatus = 'suspended';
-    order.paypalDetails = {
-      ...order.paypalDetails,
-      status: subscription.status,
-      lastUpdated: new Date()
-    };
-    
-    await order.save();
-    console.log('Order suspended:', order.donationId);
-  }
-};
-
-// Handle one-time payment completion
-const handlePaymentSaleCompleted = async (event) => {
-  const payment = event.resource;
-  console.log('Payment sale completed:', payment.id);
-  
-  // This handles one-time payments that might be part of installments
-  // You might need to match by custom_id or other identifier
-  const order = await Order.findOne({ 
-    'paypalDetails.paymentId': payment.id 
-  });
-  
-  if (order) {
-    // Update payment status for one-time payments
-    order.paymentStatus = 'completed';
-    order.paypalDetails = {
-      ...order.paypalDetails,
-      paymentCompleted: true,
-      lastUpdated: new Date()
-    };
-    
-    await order.save();
-    console.log('One-time payment completed for order:', order.donationId);
-  }
-};
+  await order.save();
+}

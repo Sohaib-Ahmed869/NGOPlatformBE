@@ -94,6 +94,13 @@ exports.register = async (req, res) => {
     organisation.stripeCustomerId = customer.id;
     await organisation.save();
 
+    // Seed default website pages for the new org (best-effort).
+    try {
+      await require("../../services/pageService").seedPagesForOrg(organisation._id);
+    } catch (e) {
+      console.error("Failed to seed pages for new org:", e.message);
+    }
+
     // Look up the Stripe price ID
     const priceId = stripePrices[plan]?.[billingCycle];
     if (!priceId) {
@@ -188,14 +195,38 @@ exports.getBySlug = async (req, res) => {
     const { slug } = req.params;
 
     const org = await Organisation.findOne({ slug, isActive: true }).select(
-      "name slug plan billingCycle subscriptionStatus branding contactEmail contactPhone address website bankDetails"
+      "name slug plan billingCycle subscriptionStatus branding contactEmail contactPhone address addressDetails socialLinks website bankDetails"
     );
 
     if (!org) {
       return res.status(404).json({ error: "Organisation not found" });
     }
 
-    res.json(org);
+    // Site config: which pages exist + nav structure (drives the public
+    // navbar and route gating). Auto-seeds defaults for orgs created before
+    // the CMS feature existed.
+    let pages = [];
+    try {
+      const { getNavPages } = require("../../services/pageService");
+      pages = await getNavPages(org._id);
+    } catch (e) {
+      console.error("Failed to load site pages for org", slug, e.message);
+    }
+
+    // Public payment info — only the publishable key + enabled flag (never secrets).
+    const fullOrg = await Organisation.findById(org._id).select("payment paypal");
+    const payment = {
+      enabled: !!(fullOrg?.payment?.enabled && fullOrg?.payment?.publishableKey),
+      publishableKey: fullOrg?.payment?.publishableKey || "",
+    };
+    // Public PayPal info — client id is public (the buttons load with it).
+    const paypal = {
+      enabled: !!(fullOrg?.paypal?.enabled && fullOrg?.paypal?.clientId),
+      clientId: fullOrg?.paypal?.clientId || "",
+      mode: fullOrg?.paypal?.mode || "sandbox",
+    };
+
+    res.json({ ...org.toObject(), pages, payment, paypal });
   } catch (error) {
     console.error("Get by slug error:", error);
     res.status(500).json({ error: "Server error" });

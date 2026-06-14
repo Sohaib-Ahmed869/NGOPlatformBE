@@ -5,6 +5,7 @@ const isAdmin    = require("../../middleware/isAdmin");
 const Order      = require("../../models/order");
 const User       = require("../../models/user");
 const stripeLib  = require("stripe");
+const { getTenantStripe } = require("../../services/tenantStripe");
 
 // Helper: calculate full expected amount for recurring orders
 function calculateRecurringTotalAmount(order) {
@@ -38,7 +39,7 @@ function calculateRecurringTotalAmount(order) {
 // GET /admin/donors/dashboard/stats
 router.get("/dashboard/stats", isAdmin, async (req, res) => {
   try {
-    const stripe = stripeLib(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
     const orgFilter = req.organisation?._id ? { organisationId: req.organisation._id } : {};
     const allOrders   = await Order.find(orgFilter).lean();
     const validOrders = allOrders.filter(o => o.paymentStatus !== "failed");
@@ -51,8 +52,10 @@ router.get("/dashboard/stats", isAdmin, async (req, res) => {
     await Promise.all(validOrders.map(async o => {
       const { user, paymentType, paymentStatus, totalAmount, installmentDetails,
               transactionDetails, recurringDetails } = o;
-      const uid = user.toString();
-      donorTotals.set(uid, (donorTotals.get(uid) || 0) + totalAmount);
+      // Orders may have no linked donor user (anonymous donations); skip donor
+      // attribution for those but still count their amounts below.
+      const uid = user ? user.toString() : null;
+      if (uid) donorTotals.set(uid, (donorTotals.get(uid) || 0) + totalAmount);
 
       if (["completed", "succeeded"].includes(paymentStatus)) completedCount++;
       if (paymentType === "recurring") recurringCount++;
@@ -82,11 +85,18 @@ router.get("/dashboard/stats", isAdmin, async (req, res) => {
         totalDonated += expected;
         let paidAmt = 0;
         if (transactionDetails?.stripeSubscriptionId) {
-          const inv = await stripe.invoices.list({
-            subscription: transactionDetails.stripeSubscriptionId,
-            status: "paid", limit: 100
-          });
-          paidAmt = inv.data.reduce((s,i) => s + i.amount_paid/100, 0);
+          try {
+            const inv = await stripe.invoices.list({
+              subscription: transactionDetails.stripeSubscriptionId,
+              status: "paid", limit: 100
+            });
+            paidAmt = inv.data.reduce((s,i) => s + i.amount_paid/100, 0);
+          } catch (e) {
+            // The subscription may not exist on the current Stripe account (e.g.
+            // it was created under a different account before per-tenant keys, or
+            // is seed/test data). Fall back to the locally stored payment history.
+            console.warn(`Dashboard: invoices.list failed for ${transactionDetails.stripeSubscriptionId}: ${e.message}`);
+          }
         }
         if (!paidAmt && Array.isArray(recurringDetails.paymentHistory)) {
           paidAmt = recurringDetails.paymentHistory
@@ -110,7 +120,7 @@ router.get("/dashboard/stats", isAdmin, async (req, res) => {
     const totalDonors    = donorTotals.size;
     const avgDonation    = totalDonors ? totalDonated/totalDonors : 0;
     const recurringDonors= new Set(allOrders
-      .filter(o => o.paymentType==="recurring" && o.paymentStatus!=="failed")
+      .filter(o => o.paymentType==="recurring" && o.paymentStatus!=="failed" && o.user)
       .map(o => o.user.toString())
     ).size;
 
@@ -154,6 +164,8 @@ router.get("/", isAdmin, async (req, res) => {
 
     const map = new Map();
     allOrders.forEach(o => {
+      // Skip orders with no linked donor user (anonymous donations).
+      if (!o.user || !o.user._id) return;
       const uid = o.user._id.toString();
       if (!map.has(uid)) map.set(uid, { user: o.user, orders: [] });
       map.get(uid).orders.push(o);

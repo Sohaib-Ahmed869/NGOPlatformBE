@@ -6,11 +6,15 @@ const { productUpload } = require('../config/s3');
 const {
     createProduct,
     getProducts,
+    getProductsAdmin,
     getProductById,
     updateProduct,
     deleteProduct,
     getCategories
 } = require('../controllers/productController');
+
+// Admin — all products incl. inactive (declared before the public `/:id` route)
+router.get('/admin/all', protect, admin, getProductsAdmin);
 
 // Public routes
 router.get('/', getProducts);

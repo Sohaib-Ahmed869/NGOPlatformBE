@@ -12,6 +12,10 @@ router.put("/", protect, admin, brandingController.updateBranding);
 router.post("/logo", protect, admin, brandingController.uploadLogo);
 router.delete("/logo", protect, admin, brandingController.deleteLogo);
 
+// Generic branding image slots: logo | icon-logo | favicon
+router.post("/asset/:type", protect, admin, brandingController.uploadAsset);
+router.delete("/asset/:type", protect, admin, brandingController.deleteAsset);
+
 // Branding change requests (org admin → super admin approval)
 router.post("/request", protect, admin, brandingController.submitRequest);
 router.get("/requests", protect, admin, brandingController.getMyRequests);

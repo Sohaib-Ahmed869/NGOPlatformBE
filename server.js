@@ -4,6 +4,7 @@ const cors = require("cors");
 const connectDB = require("./config/db");
 const errorHandler = require("./middleware/errorHandler");
 const tenantMiddleware = require("./middleware/tenant");
+const isAdmin = require("./middleware/isAdmin");
 
 // Import routes
 const userRoutes = require("./routes/userRoutes");
@@ -23,7 +24,10 @@ const newsLetter = require("./models/newsletter");
 const productRoutes = require("./routes/productRoutes");
 const donationtyperoute = require("./routes/donationtyperoute");
 const programRoutes = require("./routes/programRoutes");
+const goFundMeRoutes = require("./routes/goFundMeRoutes");
 const brandingRoutes = require("./routes/brandingRoutes");
+const pageRoutes = require("./routes/pageRoutes");
+const adminPageRoutes = require("./routes/admin/page.routes");
 
 // SaaS & Super Admin routes
 const saasRoutes = require("./routes/saas");
@@ -32,10 +36,14 @@ const superAdminRoutes = require("./routes/superadmin");
 
 const fs = require('fs');
 const path = require('path');
+const http = require("http");
 const setupInstallmentProcessingJob = require("./jobs/processInstallments");
 const {
   scheduleSubscriptionChecks,
 } = require("./services/subscriptionScheduler");
+const { setupCampaignScheduler } = require("./jobs/processCampaigns");
+const mailchimpSvc = require("./services/mailchimp");
+const { initSocket } = require("./services/socket");
 const app = express();
 
 const Order = require("./models/order");
@@ -45,6 +53,7 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 connectDB();
 setupInstallmentProcessingJob();
 scheduleSubscriptionChecks();
+setupCampaignScheduler();
 
 // CORS — dynamic origin to support tenant subdomains
 app.use(
@@ -124,6 +133,32 @@ app.use("/api/superadmin", superAdminRoutes);
 const superAdminController = require("./controllers/superAdminController");
 app.post("/api/saas/contact", superAdminController.submitContactQuery);
 
+// Public: one-click newsletter unsubscribe. The token self-identifies the
+// subscriber/org, so this needs neither auth nor tenant context — registered
+// before the tenant router so it isn't shadowed by /api/newsletter.
+const newsletterCampaignController = require("./controllers/newsletterCampaignController");
+app.post("/api/newsletter/unsubscribe", newsletterCampaignController.unsubscribe);
+app.get("/api/newsletter/unsubscribe", newsletterCampaignController.unsubscribe);
+
+// Public: Mailchimp posts subscribe/unsubscribe/clean events here (form-encoded).
+// The token in the URL self-identifies the org, so no auth/tenant context.
+const mailchimpController = require("./controllers/mailchimpController");
+app.get("/api/newsletter/mailchimp-webhook", mailchimpController.webhookVerify);
+app.post(
+  "/api/newsletter/mailchimp-webhook",
+  express.urlencoded({ extended: true }),
+  mailchimpController.webhook
+);
+
+// Per-tenant donation webhook — Stripe calls this directly with the tenant slug
+// in the path; verified against that organisation's own webhook signing secret.
+const subscriptionController = require("./controllers/subscriptionController");
+app.post("/api/webhooks/stripe/:slug", subscriptionController.handleStripeWebhook);
+
+// Per-tenant PayPal webhook — PayPal posts here with the tenant slug in the path.
+const paypalController = require("./controllers/paypalController");
+app.post("/api/webhooks/paypal/:slug", paypalController.handleWebhook);
+
 // ============================================================
 // TENANT-SCOPED ROUTES (tenant middleware resolves org from subdomain/header)
 // ============================================================
@@ -134,6 +169,7 @@ tenantRouter.use("/api/orders", orderRoutes);
 tenantRouter.use("/api/contact", contactRoutes);
 tenantRouter.use("/api/events", eventRoutes);
 tenantRouter.use("/api/newsletter", newsletterRoutes);
+tenantRouter.use("/api/newsletter-campaigns", require("./routes/newsletterCampaignRoutes"));
 tenantRouter.use("/api/subscriptions", subscriptionRoutes);
 tenantRouter.use("/api/payment-methods", paymentMethodRoutes);
 tenantRouter.use("/api/profile", profileRoutes);
@@ -145,8 +181,16 @@ tenantRouter.use("/api/join", joinRoutes);
 tenantRouter.use("/api/products", productRoutes);
 tenantRouter.use("/api/donationtypes", donationtyperoute);
 tenantRouter.use("/api/programs", programRoutes);
+tenantRouter.use("/api/gofundme", goFundMeRoutes);
 tenantRouter.use("/api/branding", brandingRoutes);
 tenantRouter.use("/api/settings", require("./routes/settingsRoutes"));
+tenantRouter.use("/api/pages", pageRoutes);
+tenantRouter.use("/api/admin/pages", adminPageRoutes);
+tenantRouter.use("/api/admin/payment-config", require("./routes/admin/paymentConfig.routes"));
+tenantRouter.use("/api/admin/email-config", require("./routes/admin/emailConfig.routes"));
+tenantRouter.use("/api/admin/paypal-config", require("./routes/admin/paypalConfig.routes"));
+tenantRouter.use("/api/paypal", require("./routes/paypalRoutes"));
+tenantRouter.use("/api/admin/mailchimp", require("./routes/admin/mailchimp.routes"));
 
 // Inline newsletter routes (tenant-scoped)
 tenantRouter.post("/api/newsletter", async (req, res) => {
@@ -157,7 +201,7 @@ tenantRouter.post("/api/newsletter", async (req, res) => {
     return res.status(400).json({ message: "You are already subscribed" });
   }
   const subscriber = await newsLetter.create({ email, organisationId: orgId });
-  subscriber.save();
+  mailchimpSvc.syncMemberSafe(req.organisation, email, "active"); // → Mailchimp
   return res
     .status(201)
     .json({ message: "You have been subscribed successfully" });
@@ -169,12 +213,58 @@ tenantRouter.get("/api/newsletters", async (req, res) => {
   res.json(subscribers);
 });
 
+// Admin: update a subscriber's status (unsubscribe / re-activate)
+tenantRouter.patch("/api/newsletters/:id", isAdmin, async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!["active", "unsubscribed"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+    const filter = { _id: req.params.id };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const subscriber = await newsLetter.findOneAndUpdate(
+      filter,
+      { status },
+      { new: true }
+    );
+    if (!subscriber) {
+      return res.status(404).json({ message: "Subscriber not found" });
+    }
+    mailchimpSvc.syncMemberSafe(
+      req.organisation,
+      subscriber.email,
+      status === "unsubscribed" ? "unsubscribed" : "active"
+    ); // → Mailchimp
+    res.json(subscriber);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Admin: delete a subscriber
+tenantRouter.delete("/api/newsletters/:id", isAdmin, async (req, res) => {
+  try {
+    const filter = { _id: req.params.id };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const subscriber = await newsLetter.findOneAndDelete(filter);
+    if (!subscriber) {
+      return res.status(404).json({ message: "Subscriber not found" });
+    }
+    mailchimpSvc.syncMemberSafe(req.organisation, subscriber.email, "deleted"); // → Mailchimp
+    res.json({ message: "Subscriber deleted", id: req.params.id });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
 app.use(tenantRouter);
 
 // Error handling
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
+const server = http.createServer(app);
+initSocket(server); // attach Socket.IO to the same HTTP server
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

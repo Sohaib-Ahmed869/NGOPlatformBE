@@ -2,7 +2,9 @@
 const Order = require("../models/order");
 const User = require("../models/user");
 const Program = require("../models/program");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const Organisation = require("../models/organisation");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
+const { getTenantStripe } = require("../services/tenantStripe");
 const { sendReceiptEmail } = require("../services/recieptUtils");
 const { sendEmail } = require("../services/emailUtil");
 const crypto = require("crypto");
@@ -17,7 +19,7 @@ const axios = require("axios");
  * @param {String} donationId - The donation ID to include in the email
  * @returns {Object} The created user or null if creation failed
  */
-const createUserForDonor = async (donorDetails, donationId) => {
+const createUserForDonor = async (donorDetails, donationId, organisationId = null) => {
   try {
     // Check if user with this email already exists
     const existingUser = await User.findOne({ email: donorDetails.email });
@@ -39,7 +41,8 @@ const createUserForDonor = async (donorDetails, donationId) => {
       password: hashedPassword,
       name: donorDetails.name,
       phone: donorDetails.phone,
-      role: "user",
+      role: "donor", // must match the User model enum: superadmin | admin | donor
+      organisationId: organisationId, // scope the donor to the tenant
       isTemporaryPassword: true, // Mark as temporary password that needs to be changed on first login
     });
 
@@ -85,8 +88,14 @@ const createUserForDonor = async (donorDetails, donationId) => {
       </div>
     `;
 
-    await sendEmail(donorDetails.email, emailBody, emailSubject);
-    console.log(`Sent welcome email to: ${donorDetails.email}`);
+    // Welcome email is best-effort — never let a delivery failure prevent the
+    // account from being created/linked to the order.
+    try {
+      await sendEmail(donorDetails.email, emailBody, emailSubject, [], { organisationId });
+      console.log(`Sent welcome email to: ${donorDetails.email}`);
+    } catch (emailErr) {
+      console.error(`Welcome email failed for ${donorDetails.email}:`, emailErr.message);
+    }
 
     return newUser;
   } catch (error) {
@@ -283,7 +292,9 @@ const sendBankTransferPendingEmail = async (order) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Bank Transfer Donation Pending - Shahid Afridi Foundation"
+      "Bank Transfer Donation Pending - Shahid Afridi Foundation",
+      [],
+      { organisationId: order.organisationId }
     );
 
     if (!result.success) {
@@ -351,7 +362,9 @@ const sendCancellationRequestEmail = async (order) => {
 
       //info@shahidafridifoundation.org.au is the actual admin email
       adminEmailBody,
-      "Subscription Cancellation Request - Shahid Afridi Foundation"
+      "Subscription Cancellation Request - Shahid Afridi Foundation",
+      [],
+      { organisationId: order.organisationId }
     );
 
     // Send confirmation email to donor
@@ -379,7 +392,9 @@ const sendCancellationRequestEmail = async (order) => {
     await sendEmail(
       user.email,
       donorEmailBody,
-      "Cancellation Request Received - Shahid Afridi Foundation"
+      "Cancellation Request Received - Shahid Afridi Foundation",
+      [],
+      { organisationId: order.organisationId }
     );
 
     console.log(
@@ -458,6 +473,10 @@ exports.createOrder = async (req, res) => {
       updateUserDetails,
       donationType,
     } = req.body;
+
+    // Charge on the tenant's own Stripe account (falls back to the platform
+    // account when the tenant hasn't configured their own keys).
+    const stripe = getTenantStripe(req.organisation);
 
     console.log("Received order data:", req.body);
 
@@ -675,7 +694,8 @@ exports.createOrder = async (req, res) => {
       try {
         const newUser = await createUserForDonor(
           donorDetails,
-          savedOrder.donationId
+          savedOrder.donationId,
+          savedOrder.organisationId
         );
         if (newUser) {
           savedOrder.user = newUser._id;
@@ -1354,7 +1374,7 @@ exports.updateOrderStatus = async (req, res) => {
 exports.getOrderStats = async (req, res) => {
   try {
     const userId = req.user._id;
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
 
     console.log("Getting order stats for user:", req.user);
 
@@ -1862,6 +1882,12 @@ exports.processNextInstallment = async (orderId) => {
       return;
     }
 
+    // Charge on the order's tenant Stripe account (falls back to platform).
+    const orgForStripe = order.organisationId
+      ? await Organisation.findById(order.organisationId)
+      : null;
+    const stripe = getTenantStripe(orgForStripe);
+
     // Log the order transaction details for debugging
     console.log(
       `Processing order ${orderId} with transaction details:`,
@@ -1910,7 +1936,6 @@ exports.processNextInstallment = async (orderId) => {
         order.transactionDetails.stripeCustomerId
       ) {
         try {
-          const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
           const customer = await stripe.customers.retrieve(
             order.transactionDetails.stripeCustomerId,
             { expand: ["default_source"] }
@@ -1975,8 +2000,6 @@ exports.processNextInstallment = async (orderId) => {
     }
 
     // Process payment with Stripe.
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-
     // Now create and confirm the payment intent with explicit payment method
     const paymentIntent = await stripe.paymentIntents.create({
       amount: Math.round(order.installmentDetails.installmentAmount * 100),

@@ -17,7 +17,7 @@ exports.listPrograms = async (req, res) => {
     }
 
     const programs = await Program.find(filter)
-      .select("title description goalAmount raisedAmount status images coverImageIndex donors followUpRequests createdAt")
+      .select("title description goalAmount raisedAmount status images coverImageIndex donors followUpUpdates followUpRequests createdAt")
       .sort({ createdAt: -1 });
 
     const result = programs.map((p) => ({
@@ -234,7 +234,7 @@ exports.postFollowUp = async (req, res) => {
         <p><em>Thank you for your generous support!</em></p>
       `;
       const promises = donorEmails.map((email) =>
-        sendEmail(email, emailBody, `Update: ${program.title}`).catch((err) =>
+        sendEmail(email, emailBody, `Update: ${program.title}`, [], { organisationId: program.organisationId }).catch((err) =>
           console.error(`Failed to email ${email}:`, err)
         )
       );
@@ -271,6 +271,32 @@ exports.closeProgram = async (req, res) => {
   } catch (error) {
     console.error("Close program error:", error);
     res.status(500).json({ error: "Failed to close program" });
+  }
+};
+
+/**
+ * DELETE /api/programs/:id
+ * Permanently remove a program (admin). Cleans up its S3 images. The underlying
+ * payment/Order records live elsewhere, so this only drops the campaign itself.
+ */
+exports.deleteProgram = async (req, res) => {
+  try {
+    const orgId = req.organisation?._id;
+    if (!orgId) return res.status(400).json({ error: "Organisation context required" });
+
+    const program = await Program.findOne({ _id: req.params.id, organisationId: orgId });
+    if (!program) return res.status(404).json({ error: "Program not found" });
+
+    // Best-effort cleanup of stored images.
+    for (const img of program.images || []) {
+      if (img.key) await deleteS3Object(img.key).catch((err) => console.error("S3 delete error:", err));
+    }
+
+    await Program.deleteOne({ _id: program._id, organisationId: orgId });
+    res.json({ message: "Program deleted successfully" });
+  } catch (error) {
+    console.error("Delete program error:", error);
+    res.status(500).json({ error: "Failed to delete program" });
   }
 };
 
@@ -436,7 +462,7 @@ async function sendCompletionEmails(program) {
   `;
 
   const promises = donorEmails.map((email) =>
-    sendEmail(email, emailBody, `Program Completed: ${program.title}`).catch((err) =>
+    sendEmail(email, emailBody, `Program Completed: ${program.title}`, [], { organisationId: program.organisationId }).catch((err) =>
       console.error(`Failed to email ${email}:`, err)
     )
   );

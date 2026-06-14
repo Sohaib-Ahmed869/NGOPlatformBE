@@ -128,7 +128,9 @@ exports.uploadProfileImage = async (req, res) => {
     }
 
     const user = await User.findById(req.user._id);
-    user.profileImage = req.file.path; // Assuming you're storing the file path
+    // multer-s3 exposes the public URL on `location`; fall back to `path` for
+    // any legacy local-disk config.
+    user.profileImage = req.file.location || req.file.path;
     await user.save();
 
     res.json({

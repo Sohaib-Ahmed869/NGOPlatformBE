@@ -4,10 +4,14 @@ const DonationType = require('../models/donationtypes');
 const createDonationType = async (req, res) => {
   try {
     const { donationType } = req.body;
-    
+    const orgId = req.organisation?._id || null;
+    // Append new types to the end of the list.
+    const order = await DonationType.countDocuments(orgId ? { organisationId: orgId } : {});
+
     const newDonationType = new DonationType({
-      organisationId: req.organisation?._id || null,
-      donationType
+      organisationId: orgId,
+      donationType,
+      order,
     });
     
     const savedDonationType = await newDonationType.save();
@@ -37,7 +41,7 @@ const getDonationTypes = async (req, res) => {
   try {
     const filter = {};
     if (req.organisation?._id) filter.organisationId = req.organisation._id;
-    const donationTypes = await DonationType.find(filter).sort({ createdAt: -1 });
+    const donationTypes = await DonationType.find(filter).sort({ order: 1, createdAt: 1 });
     
     res.status(200).json({
       success: true,
@@ -144,10 +148,33 @@ const deleteDonationType = async (req, res) => {
   }
 };
 
+// Reorder donation types — body { ids: [...] } in the desired display order.
+const reorderDonationTypes = async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids)) {
+      return res.status(400).json({ success: false, message: "ids array is required" });
+    }
+    const orgId = req.organisation?._id || null;
+    const ops = ids.map((id, index) => ({
+      updateOne: {
+        filter: orgId ? { _id: id, organisationId: orgId } : { _id: id },
+        update: { $set: { order: index } },
+      },
+    }));
+    if (ops.length) await DonationType.bulkWrite(ops);
+
+    res.status(200).json({ success: true, message: "Order updated" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   createDonationType,
   getDonationTypes,
   getDonationTypeById,
   updateDonationType,
-  deleteDonationType
+  deleteDonationType,
+  reorderDonationTypes
 };

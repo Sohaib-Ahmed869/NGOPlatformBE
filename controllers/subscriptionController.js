@@ -1,6 +1,8 @@
 // Updated subscription controller with Stripe integration
 const Order = require("../models/order");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const Organisation = require("../models/organisation");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
+const { getTenantStripe, getTenantWebhookSecret } = require("../services/tenantStripe");
 
 exports.getActiveSubscriptions = async (req, res) => {
   try {
@@ -88,6 +90,7 @@ exports.pauseSubscription = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
     const { pauseDuration } = req.body; // Duration in days
+    const stripe = getTenantStripe(req.organisation);
 
     const subscription = await Order.findOne({
       _id: subscriptionId,
@@ -177,6 +180,7 @@ exports.pauseSubscription = async (req, res) => {
 exports.resumeSubscription = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
+    const stripe = getTenantStripe(req.organisation);
 
     const subscription = await Order.findOne({
       _id: subscriptionId,
@@ -289,7 +293,9 @@ const sendCancellationRequestEmail = async (subscription) => {
       // Use the actual admin email here
       //info@shahidafridifoundation.org.au is the actual admin email
       adminEmailBody,
-      "Subscription Cancellation Request - Shahid Afridi Foundation"
+      "Subscription Cancellation Request - Shahid Afridi Foundation",
+      [],
+      { organisationId: subscription.organisationId }
     );
 
     // Send confirmation email to donor
@@ -320,7 +326,9 @@ const sendCancellationRequestEmail = async (subscription) => {
     await sendEmail(
       user.email,
       donorEmailBody,
-      "Cancellation Request Received - Shahid Afridi Foundation"
+      "Cancellation Request Received - Shahid Afridi Foundation",
+      [],
+      { organisationId: subscription.organisationId }
     );
 
     console.log(`Cancellation request emails sent for subscription: ${subscription._id}`);
@@ -335,7 +343,7 @@ exports.cancelSubscription = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
     const { reason } = req.body;
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+    const stripe = getTenantStripe(req.organisation);
 
     const subscription = await Order.findOne({
       _id: subscriptionId,
@@ -428,6 +436,7 @@ exports.updateSubscriptionAmount = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
     const { newAmount } = req.body;
+    const stripe = getTenantStripe(req.organisation);
 
     const subscription = await Order.findOne({
       _id: subscriptionId,
@@ -477,7 +486,10 @@ exports.updateSubscriptionAmount = async (req, res) => {
           product: stripeSubscription.items.data[0].price.product,
         });
 
-        // Update subscription with the new price
+        // Update subscription with the new price.
+        // proration_behavior: "none" — donations shouldn't be prorated mid-cycle;
+        // the new amount simply applies from the next billing cycle (matches
+        // how the subscription is created).
         await stripe.subscriptions.update(
           subscription.transactionDetails.stripeSubscriptionId,
           {
@@ -487,6 +499,7 @@ exports.updateSubscriptionAmount = async (req, res) => {
                 price: newPrice.id,
               },
             ],
+            proration_behavior: "none",
           }
         );
 
@@ -618,6 +631,7 @@ exports.updateSubscriptionEndDate = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
     const { newEndDate } = req.body;
+    const stripe = getTenantStripe(req.organisation);
 
     const subscription = await Order.findOne({
       _id: subscriptionId,
@@ -875,13 +889,34 @@ async function handlePaymentIntentFailed(paymentIntent) {
 // Stripe webhook handler
 exports.handleStripeWebhook = async (req, res) => {
   const signature = req.headers["stripe-signature"];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  // Default to the platform account/secret (legacy /api/subscriptions/webhook).
+  let endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  let verifyStripe = stripe;
+
+  // Per-tenant webhook (/api/webhooks/stripe/:slug): verify with that org's
+  // own webhook signing secret + Stripe account.
+  if (req.params && req.params.slug) {
+    try {
+      const org = await Organisation.findOne({
+        slug: String(req.params.slug).toLowerCase(),
+      });
+      if (org) {
+        const tenantSecret = getTenantWebhookSecret(org);
+        if (tenantSecret) endpointSecret = tenantSecret;
+        verifyStripe = getTenantStripe(org);
+      }
+    } catch (e) {
+      console.error("Webhook tenant lookup failed:", e.message);
+    }
+  }
+
   let event;
 
   try {
     // Verify the webhook signature
-    event = stripe.webhooks.constructEvent(
-      req.rawBody, // You need to configure your Express app to provide raw body
+    event = verifyStripe.webhooks.constructEvent(
+      req.rawBody, // Express provides the raw body for /webhook URLs
       signature,
       endpointSecret
     );
@@ -938,6 +973,23 @@ async function handleInvoicePaymentSucceeded(invoice) {
       });
 
       if (order) {
+        // Idempotency guard: if this invoice was already recorded (e.g. the
+        // scheduler synced it moments before this webhook fired), skip so we
+        // don't double-count payment history, totals, or receipt emails.
+        const alreadyRecorded =
+          (order.recurringDetails?.paymentHistory || []).some(
+            (p) => p.invoiceId === invoice.id
+          ) ||
+          (order.installmentDetails?.installmentHistory || []).some(
+            (h) => h.invoiceId === invoice.id
+          );
+        if (alreadyRecorded) {
+          console.log(
+            `Invoice ${invoice.id} already recorded for order ${order._id}; skipping duplicate.`
+          );
+          return;
+        }
+
         // Update payment history
         if (order.paymentType === "recurring" && order.recurringDetails) {
           order.recurringDetails.totalPayments =
@@ -1207,6 +1259,7 @@ async function handleSubscriptionDeleted(subscription) {
 exports.retryPayment = async (req, res) => {
   try {
     const { subscriptionId } = req.params;
+    const stripe = getTenantStripe(req.organisation);
 
     const subscription = await Order.findOne({
       _id: subscriptionId,

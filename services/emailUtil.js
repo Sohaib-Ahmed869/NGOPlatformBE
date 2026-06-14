@@ -1,43 +1,41 @@
 // emailUtil.js
-const nodemailer = require("nodemailer");
-const path = require("path");
-// Configure the transporter for nodemailer
-const transporter = nodemailer.createTransport({
-  host: "smtp-mail.outlook.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.EMAIL_USER, // Your email address (store in environment variable for security)
-    pass: process.env.EMAIL_PASS, // Your email password (store in environment variable)
-  },
-  tls: {
-    ciphers: "SSLv3",
-  },
-});
+// Transactional email. Tenant-aware: pass `options.org` (an Organisation doc) and
+// the email is sent through that tenant's own SMTP account when configured +
+// enabled, otherwise through the platform account. Calls without `options.org`
+// behave exactly as before (platform account) — fully backward compatible.
+const { getTenantTransport, getFromIdentity, platformTransport, resolveOrg } = require("./tenantEmail");
 
-// Utility function to send an email
+// Backward-compat export — some modules import the raw platform transporter.
+const transporter = platformTransport;
+
 const sendEmail = async (
   recipientEmail,
   emailBody,
   emailSubject,
-  attachments = []
+  attachments = [],
+  options = {}
 ) => {
   try {
+    // Resolve the tenant from either a passed org doc or just an organisationId.
+    const org = options.org || (options.organisationId ? await resolveOrg(options.organisationId) : null);
+    const { transport } = getTenantTransport(org);
+    const { fromName, fromEmail, replyTo } = getFromIdentity(org, options);
+
     const mailOptions = {
-      from: `"Shahid Afridi Foundation" <${process.env.EMAIL_USER}>`,
-      to: recipientEmail, // Recipient's email address
-      subject: emailSubject, // Subject of the email
-      text: emailBody.replace(/<[^>]*>/g, ""), // Plain text body (strip HTML)
-      html: ` 
+      from: `"${fromName}" <${fromEmail}>`,
+      to: recipientEmail,
+      subject: emailSubject,
+      text: String(emailBody || "").replace(/<[^>]*>/g, ""), // plain-text fallback
+      html: `
         <div>
           ${emailBody}
         </div>
        `,
-      attachments: attachments,
+      attachments,
     };
+    if (replyTo) mailOptions.replyTo = replyTo;
 
-    // Send the email
-    const info = await transporter.sendMail(mailOptions);
+    const info = await transport.sendMail(mailOptions);
     console.log("Email sent: ", info.response);
     return { success: true, message: "Email sent successfully" };
   } catch (error) {

@@ -1,13 +1,14 @@
 // services/subscriptionScheduler.js
 
 const Order = require("../models/order");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const Organisation = require("../models/organisation");
+const { getTenantStripe } = require("../services/tenantStripe");
 const cron = require("node-cron");
 
 /**
  * Sync payment history for a subscription with Stripe
  */
-const syncSubscriptionPaymentHistory = async (subscription) => {
+const syncSubscriptionPaymentHistory = async (subscription, stripe) => {
   try {
     const subscriptionId = subscription.transactionDetails.stripeSubscriptionId;
 
@@ -209,13 +210,19 @@ const scheduleSubscriptionChecks = () => {
       // Check each subscription with Stripe
       for (const subscription of subscriptions) {
         try {
+          // Use the order's tenant Stripe account (falls back to platform).
+          const org = subscription.organisationId
+            ? await Organisation.findById(subscription.organisationId)
+            : null;
+          const stripe = getTenantStripe(org);
+
           // Get current status from Stripe
           const stripeSubscription = await stripe.subscriptions.retrieve(
             subscription.transactionDetails.stripeSubscriptionId
           );
 
           // SYNC PAYMENT HISTORY - This is the key addition!
-          await syncSubscriptionPaymentHistory(subscription);
+          await syncSubscriptionPaymentHistory(subscription, stripe);
 
           console.log(`Stripe subscription data for ${subscription._id}:`);
 

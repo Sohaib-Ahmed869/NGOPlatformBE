@@ -11,6 +11,11 @@ const donationTypeSchema = new mongoose.Schema({
     required: [true, 'Donation type is required'],
     trim: true,
     maxLength: [100, 'Donation type cannot exceed 100 characters']
+  },
+  // Display order — lower shows first. Set on create (append) and via reorder.
+  order: {
+    type: Number,
+    default: 0,
   }
 }, {
   timestamps: true

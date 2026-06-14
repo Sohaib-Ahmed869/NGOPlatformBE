@@ -1,5 +1,6 @@
 // Newsletter Subscription Model
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 const newsletterSubscriptionSchema = new mongoose.Schema(
   {
     organisationId: {
@@ -21,6 +22,12 @@ const newsletterSubscriptionSchema = new mongoose.Schema(
     source: {
       type: String,
       default: "website",
+    },
+    // Per-subscriber secret for one-click unsubscribe links in campaigns.
+    unsubscribeToken: {
+      type: String,
+      default: () => crypto.randomBytes(24).toString("hex"),
+      index: true,
     },
   },
   {

@@ -1,180 +1,257 @@
-// controllers/eventController.js
+// controllers/eventController.js  (public, tenant-scoped)
 const Event = require("../models/event");
-const { s3Client, deleteS3Object } = require("../config/s3");
+const EventRegistration = require("../models/eventRegistration");
+const { validateAnswers } = require("../utils/eventQuestions");
 
-// Create event with image upload
-exports.createEvent = async (req, res) => {
-  try {
-    // The image data will be available in req.file from multer middleware
-    if (!req.file) {
-      return res.status(400).json({ error: "Image is required" });
-    }
+/* ── helpers ─────────────────────────────────────────────────────────────── */
 
-    // Parse the location JSON if it comes as a string
-    let location = req.body.location;
-    if (typeof location === "string") {
-      try {
-        location = JSON.parse(location);
-      } catch (e) {
-        console.error("Error parsing location JSON:", e);
-        location = {};
-      }
-    }
+// Derive the live registration state for an event (spots, open/closed).
+function registrationState(event) {
+  const cap = event.capacity;
+  const count = event.registrationCount || 0;
+  const spotsLeft = cap == null ? null : Math.max(0, cap - count);
+  const isFull = cap != null && count >= cap;
+  const deadlinePassed =
+    event.registrationDeadline && new Date() > new Date(event.registrationDeadline);
+  const registrationOpenNow =
+    event.registrationMode === "internal" &&
+    event.isRegistrationOpen &&
+    event.status !== "cancelled" &&
+    !isFull &&
+    !deadlinePassed;
+  return { spotsLeft, isFull, deadlinePassed: !!deadlinePassed, registrationOpenNow };
+}
 
-    // Create the event with the image URL from S3
-    const eventData = {
-      organisationId: req.organisation?._id || null,
-      title: req.body.title,
-      date: req.body.date,
-      startTime: req.body.startTime || "",
-      endTime: req.body.endTime || "",
-      timezone: req.body.timezone || "UTC",
-      location,
-      description: req.body.description || "",
-      imageUrl: req.file.location, // S3 URL of the uploaded file
-      registrationLink: req.body.registrationLink || "",
-      status: req.body.status || "upcoming",
-    };
+// Public-facing shape of an event (lean doc) with computed fields.
+function decorate(event) {
+  return { ...event, ...registrationState(event) };
+}
 
-    const event = await Event.create(eventData);
-    res.status(201).json(event);
-  } catch (error) {
-    console.error("Event creation error:", error);
-    res.status(400).json({ error: error.message });
-  }
-};
+/* ── reads ───────────────────────────────────────────────────────────────── */
 
-// Get all events
+// GET /events  — list this tenant's events (with computed registration state).
 exports.getEvents = async (req, res) => {
   try {
     const filter = {};
     if (req.organisation?._id) filter.organisationId = req.organisation._id;
-    const events = await Event.find(filter).sort({ date: 1 });
-    res.json(events);
+
+    const events = await Event.find(filter).sort({ date: 1 }).lean();
+    let decorated = events.map(decorate);
+
+    // For a logged-in user, attach their own registration (button state).
+    if (req.user) {
+      const regs = await EventRegistration.find({
+        eventId: { $in: events.map((e) => e._id) },
+        userId: req.user._id,
+      })
+        .select("eventId rsvpStatus")
+        .lean();
+      const byEvent = {};
+      regs.forEach((r) => (byEvent[r.eventId.toString()] = r.rsvpStatus));
+      decorated = decorated.map((e) => ({
+        ...e,
+        myRegistration: byEvent[e._id.toString()]
+          ? { rsvpStatus: byEvent[e._id.toString()] }
+          : null,
+      }));
+    }
+
+    res.json(decorated);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 };
 
-// Get single event
+// GET /events/:id  — single event (includes registrationQuestions for the form).
 exports.getEvent = async (req, res) => {
   try {
     const filter = { _id: req.params.id };
     if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const event = await Event.findOne(filter).lean();
+    if (!event) return res.status(404).json({ error: "Event not found" });
+    res.json(decorate(event));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+// GET /events/:id/registration-status  — has the current user/email registered?
+exports.getRegistrationStatus = async (req, res) => {
+  try {
+    const filter = { _id: req.params.id };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const event = await Event.findOne(filter).lean();
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    let registration = null;
+    const email = (req.user?.email || req.query.email || "").toLowerCase().trim();
+    if (req.user || email) {
+      const orQuery = [];
+      if (req.user) orQuery.push({ userId: req.user._id });
+      if (email) orQuery.push({ email });
+      registration = await EventRegistration.findOne({
+        eventId: event._id,
+        $or: orQuery,
+      })
+        .select("rsvpStatus numberOfGuests attended")
+        .lean();
+    }
+
+    res.json({ ...registrationState(event), registration });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+/* ── registration (internal events) ──────────────────────────────────────── */
+
+// POST /events/:id/register  — RSVP (guests via optionalAuth allowed).
+exports.registerForEvent = async (req, res) => {
+  try {
+    const filter = { _id: req.params.id };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
     const event = await Event.findOne(filter);
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    if (event.registrationMode !== "internal") {
+      return res
+        .status(400)
+        .json({ error: "Online registration is not available for this event" });
     }
-    res.json(event);
+
+    const state = registrationState(event);
+    if (event.status === "cancelled") {
+      return res.status(400).json({ error: "This event has been cancelled" });
+    }
+    if (!event.isRegistrationOpen) {
+      return res.status(400).json({ error: "Registration is closed for this event" });
+    }
+    if (state.deadlinePassed) {
+      return res.status(400).json({ error: "The registration deadline has passed" });
+    }
+    if (state.isFull) {
+      return res.status(400).json({ error: "This event is at full capacity" });
+    }
+
+    // Identity — logged-in user takes precedence; otherwise guest name+email.
+    const name = (req.user?.name || req.body.name || "").trim();
+    const email = (req.user?.email || req.body.email || "").toLowerCase().trim();
+    const phone = req.body.phone || req.user?.phone || "";
+
+    if (!name || !email) {
+      return res.status(400).json({ error: "Name and email are required" });
+    }
+
+    // Guests
+    let numberOfGuests = Number(req.body.numberOfGuests) || 0;
+    if (!event.allowGuests) numberOfGuests = 0;
+    else if (event.maxGuestsPerRegistration && numberOfGuests > event.maxGuestsPerRegistration) {
+      return res.status(400).json({
+        error: `You may bring at most ${event.maxGuestsPerRegistration} guest(s)`,
+      });
+    }
+
+    // Validate custom answers against the event's questions.
+    const result = validateAnswers(event.registrationQuestions, req.body.answers);
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    // Dedup: same user, or same email for this event.
+    const orQuery = [{ email }];
+    if (req.user) orQuery.push({ userId: req.user._id });
+    const existing = await EventRegistration.findOne({
+      eventId: event._id,
+      $or: orQuery,
+    });
+
+    if (existing) {
+      if (existing.rsvpStatus === "cancelled") {
+        // Re-activate a previously cancelled registration.
+        existing.rsvpStatus = "registered";
+        existing.name = name;
+        existing.phone = phone;
+        existing.numberOfGuests = numberOfGuests;
+        existing.answers = result.answers;
+        await existing.save();
+        await Event.updateOne({ _id: event._id }, { $inc: { registrationCount: 1 } });
+        return res.status(200).json({
+          status: "Success",
+          message: "You're registered",
+          registration: existing,
+        });
+      }
+      return res
+        .status(409)
+        .json({ error: "You are already registered for this event" });
+    }
+
+    const registration = await EventRegistration.create({
+      organisationId: event.organisationId,
+      eventId: event._id,
+      userId: req.user?._id || null,
+      name,
+      email,
+      phone,
+      numberOfGuests,
+      answers: result.answers,
+      notes: req.body.notes || "",
+      rsvpStatus: "registered",
+      paymentStatus: "free",
+      source: "public",
+    });
+
+    await Event.updateOne({ _id: event._id }, { $inc: { registrationCount: 1 } });
+
+    res.status(201).json({
+      status: "Success",
+      message: "You're registered",
+      registration,
+    });
+  } catch (error) {
+    // Duplicate key (race on the unique {eventId,email} index)
+    if (error.code === 11000) {
+      return res
+        .status(409)
+        .json({ error: "You are already registered for this event" });
+    }
+    console.error("Event registration error:", error);
+    res.status(400).json({ error: error.message });
+  }
+};
+
+// GET /events/my/registrations  — the logged-in user's registrations.
+exports.getMyRegistrations = async (req, res) => {
+  try {
+    const filter = { userId: req.user._id };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    const registrations = await EventRegistration.find(filter)
+      .populate("eventId", "title date startTime endTime location imageUrl status")
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json(registrations);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 };
 
-// Update event
-exports.updateEvent = async (req, res) => {
+// DELETE /events/registrations/:regId  — cancel my own registration.
+exports.cancelMyRegistration = async (req, res) => {
   try {
-    const eventQuery = { _id: req.params.id };
-    if (req.organisation?._id) eventQuery.organisationId = req.organisation._id;
-    const event = await Event.findOne(eventQuery);
+    const reg = await EventRegistration.findOne({
+      _id: req.params.regId,
+      userId: req.user._id,
+    });
+    if (!reg) return res.status(404).json({ error: "Registration not found" });
 
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
+    if (reg.rsvpStatus !== "cancelled") {
+      reg.rsvpStatus = "cancelled";
+      await reg.save();
+      await Event.updateOne({ _id: reg.eventId }, { $inc: { registrationCount: -1 } });
     }
 
-    // Parse the location JSON if it comes as a string
-    let location = req.body.location;
-    if (typeof location === "string") {
-      try {
-        location = JSON.parse(location);
-      } catch (e) {
-        console.error("Error parsing location JSON:", e);
-        // Keep the existing location if parsing fails
-        location = event.location;
-      }
-    }
-
-    // Create update object
-    const updateData = {
-      title: req.body.title,
-      date: req.body.date,
-      startTime: req.body.startTime,
-      endTime: req.body.endTime,
-      timezone: req.body.timezone,
-      location,
-      description: req.body.description,
-      registrationLink: req.body.registrationLink,
-      status: req.body.status,
-    };
-
-    // If a new image is uploaded
-    if (req.file) {
-      updateData.imageUrl = req.file.location;
-
-      // Delete old image from S3 if it exists
-      if (
-        event.imageUrl &&
-        event.imageUrl.includes(process.env.S3_BUCKET_NAME)
-      ) {
-        try {
-          // Extract the key from the S3 URL
-          const key = event.imageUrl.split("/").slice(3).join("/");
-
-          await deleteS3Object(key);
-          console.log(`Deleted old image: ${key}`);
-        } catch (deleteError) {
-          console.error("Error deleting old image:", deleteError);
-          // Continue with the update even if image deletion fails
-        }
-      }
-    }
-
-    const updateQuery = { _id: req.params.id };
-    if (req.organisation?._id) updateQuery.organisationId = req.organisation._id;
-    const updatedEvent = await Event.findOneAndUpdate(
-      updateQuery,
-      updateData,
-      { new: true, runValidators: true }
-    );
-
-    res.json(updatedEvent);
+    res.json({ status: "Success", message: "Registration cancelled" });
   } catch (error) {
-    console.error("Event update error:", error);
-    res.status(400).json({ error: error.message });
-  }
-};
-
-// Delete event with image
-exports.deleteEvent = async (req, res) => {
-  try {
-    const deleteQuery = { _id: req.params.id };
-    if (req.organisation?._id) deleteQuery.organisationId = req.organisation._id;
-    const event = await Event.findOne(deleteQuery);
-
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
-    }
-
-    // Delete the image from S3 if it exists and is from our S3 bucket
-    if (event.imageUrl && event.imageUrl.includes(process.env.S3_BUCKET_NAME)) {
-      try {
-        // Extract the key from the S3 URL
-        const key = event.imageUrl.split("/").slice(3).join("/");
-
-        await deleteS3Object(key);
-        console.log(`Deleted image: ${key}`);
-      } catch (deleteError) {
-        console.error("Error deleting image:", deleteError);
-        // Continue with the deletion even if image deletion fails
-      }
-    }
-
-    // Then delete the event
-    await Event.findOneAndDelete(deleteQuery);
-
-    res.json({ message: "Event deleted successfully" });
-  } catch (error) {
-    console.error("Event deletion error:", error);
     res.status(400).json({ error: error.message });
   }
 };

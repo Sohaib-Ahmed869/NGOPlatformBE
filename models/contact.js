@@ -48,6 +48,18 @@ const contactRequestSchema = new mongoose.Schema(
       enum: ["pending", "reviewed", "responded"],
       default: "pending",
     },
+    // Internal communication: the team member responsible for this request.
+    assignedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    // Timestamp of the latest activity (submission or thread message) — drives
+    // inbox ordering and per-user unread detection.
+    lastMessageAt: {
+      type: Date,
+      default: Date.now,
+    },
   },
   {
     timestamps: true,
