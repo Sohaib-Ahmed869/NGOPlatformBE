@@ -14,6 +14,41 @@ const path = require("path");
 const axios = require("axios");
 
 /**
+ * Resolve Stripe's hosted receipt URL for a succeeded PaymentIntent.
+ * The receipt lives on the underlying Charge (`latest_charge`), which may be a
+ * bare id (string) when the PaymentIntent wasn't expanded — retrieve it if so.
+ * Best-effort: never throws, returns null on any failure.
+ * @param {object} stripeClient - tenant-scoped Stripe client
+ * @param {object|string} paymentIntent - PaymentIntent object or id
+ * @returns {Promise<string|null>}
+ */
+const fetchStripeReceiptUrl = async (stripeClient, paymentIntent) => {
+  try {
+    if (!stripeClient || !paymentIntent) return null;
+    let charge =
+      typeof paymentIntent === "object" ? paymentIntent.latest_charge : null;
+    if (charge && typeof charge === "object" && charge.receipt_url) {
+      return charge.receipt_url;
+    }
+    if (typeof charge === "string") {
+      charge = await stripeClient.charges.retrieve(charge);
+      if (charge?.receipt_url) return charge.receipt_url;
+    }
+    // Fall back to retrieving the PaymentIntent with the charge expanded.
+    const piId =
+      typeof paymentIntent === "string" ? paymentIntent : paymentIntent.id;
+    if (!piId) return null;
+    const pi = await stripeClient.paymentIntents.retrieve(piId, {
+      expand: ["latest_charge"],
+    });
+    return pi?.latest_charge?.receipt_url || null;
+  } catch (err) {
+    console.error("Failed to fetch Stripe receipt URL:", err.message);
+    return null;
+  }
+};
+
+/**
  * Creates a user account for anonymous donors and sends credentials email
  * @param {Object} donorDetails - Donor information from the order
  * @param {String} donationId - The donation ID to include in the email
@@ -470,6 +505,7 @@ exports.createOrder = async (req, res) => {
       recurringDetails,
       installmentDetails,
       stripePaymentMethodId,
+      stripeCustomerId, // present when paying with a SAVED card (PM attached to this customer)
       updateUserDetails,
       donationType,
     } = req.body;
@@ -719,14 +755,19 @@ exports.createOrder = async (req, res) => {
     ) {
       try {
         if (paymentType === "single") {
-          // Process one-time payment
+          // Process one-time payment. When paying with a SAVED card the
+          // payment method is attached to the donor's Stripe customer, so the
+          // PaymentIntent MUST include that customer (Stripe rejects an attached
+          // PM otherwise). New (one-off) cards have no customer — omit it.
           const paymentIntent = await stripe.paymentIntents.create({
             amount: Math.round(totalAmount * 100),
             currency: "aud",
             payment_method: stripePaymentMethodId,
+            ...(stripeCustomerId ? { customer: stripeCustomerId } : {}),
             confirm: true,
             off_session: true,
             description: `Donation ${savedOrder.donationId}`,
+            expand: ["latest_charge"], // so we can capture Stripe's hosted receipt
             metadata: {
               donationId: savedOrder.donationId,
               orderId: savedOrder._id.toString(),
@@ -741,6 +782,9 @@ exports.createOrder = async (req, res) => {
           };
 
           if (paymentIntent.status === "succeeded") {
+            // Capture Stripe's hosted receipt URL for the charge.
+            const receiptUrl = await fetchStripeReceiptUrl(stripe, paymentIntent);
+            if (receiptUrl) savedOrder.stripeReceiptUrl = receiptUrl;
             try {
               await sendReceiptEmail(savedOrder);
             } catch (emailError) {
@@ -984,6 +1028,14 @@ exports.createOrder = async (req, res) => {
                 );
               }
 
+              // Capture Stripe's hosted receipt URL for the first charge.
+              const recurringReceiptUrl = await fetchStripeReceiptUrl(
+                stripe,
+                paymentIntent
+              );
+              if (recurringReceiptUrl)
+                savedOrder.stripeReceiptUrl = recurringReceiptUrl;
+
               try {
                 await sendReceiptEmail(savedOrder);
               } catch (emailError) {
@@ -1021,6 +1073,14 @@ exports.createOrder = async (req, res) => {
                         calculateBillingAnchor(billingDay) * 1000
                       );
                     }
+
+                    // Capture Stripe's hosted receipt URL for the first charge.
+                    const confirmedReceiptUrl = await fetchStripeReceiptUrl(
+                      stripe,
+                      confirmedPI
+                    );
+                    if (confirmedReceiptUrl)
+                      savedOrder.stripeReceiptUrl = confirmedReceiptUrl;
 
                     try {
                       await sendReceiptEmail(savedOrder);
@@ -1162,6 +1222,14 @@ exports.createOrder = async (req, res) => {
           }
 
           if (paymentIntent.status === "succeeded") {
+            // Capture Stripe's hosted receipt URL for the first installment.
+            const installmentReceiptUrl = await fetchStripeReceiptUrl(
+              stripe,
+              paymentIntent
+            );
+            if (installmentReceiptUrl)
+              savedOrder.stripeReceiptUrl = installmentReceiptUrl;
+
             try {
               await sendReceiptEmail(savedOrder);
             } catch (emailError) {
@@ -2042,6 +2110,15 @@ exports.processNextInstallment = async (orderId) => {
       status: paymentIntent.status === "succeeded" ? "completed" : "processing",
       transactionId: paymentIntent.id,
     });
+
+    // Keep the order's latest Stripe hosted receipt URL up to date.
+    if (paymentIntent.status === "succeeded") {
+      const installmentReceiptUrl = await fetchStripeReceiptUrl(
+        stripe,
+        paymentIntent
+      );
+      if (installmentReceiptUrl) order.stripeReceiptUrl = installmentReceiptUrl;
+    }
 
     await order.save();
 

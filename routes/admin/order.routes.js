@@ -7,6 +7,7 @@ const {
   getDashboardStats,
   getTopDonors,
   getDonations,
+  getProgramPayments,
   getDonationsExport,
   getDonationForUser,
   getAllDonations,
@@ -19,6 +20,7 @@ router.get("/dashboard/stats", isAdmin, getDashboardStats);
 router.get("/dashboard/top-donors", isAdmin, getTopDonors);
 router.get("/donations", isAdmin, getDonations);
 router.get("/donations/all", isAdmin, getAllDonations);
+router.get("/program-payments", isAdmin, getProgramPayments);
 
 // Important: Order matters for routes with parameters
 // More specific routes should come before general ones to avoid conflicts

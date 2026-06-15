@@ -76,6 +76,12 @@ const eventSchema = new mongoose.Schema(
     // When eventType is "other", the custom type name entered by the admin.
     eventTypeOther: { type: String, default: "" },
 
+    // Who the event is for. Stores a stable `key` that references one of the
+    // tenant's configured audiences (Organisation.eventAudiences) — the label &
+    // colour live there so they can be edited without touching events. Empty =
+    // no specific audience (rendered neutrally on the public calendar).
+    audience: { type: String, default: "" },
+
     // ── Registration control ──────────────────────────────────────────────
     // none     → info-only event
     // external → use `registrationLink` (legacy behaviour)

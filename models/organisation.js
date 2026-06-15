@@ -18,6 +18,18 @@ const volunteerQuestionSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// A public-facing event audience segment the org defines (e.g. "Brothers only",
+// "Sisters only", "Open to all"). Events reference one by `key`; the label and
+// colour drive the public Events calendar (colour-coded blocks + legend).
+const eventAudienceSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true }, // stable id (slug of label)
+    label: { type: String, required: true },
+    color: { type: String, default: "#C9A84C" }, // hex, used on the public calendar
+  },
+  { _id: false }
+);
+
 const organisationSchema = new mongoose.Schema(
   {
     name: {
@@ -184,6 +196,9 @@ const organisationSchema = new mongoose.Schema(
     },
     // Custom questions appended to the public volunteer ("Join the team") form.
     volunteerQuestions: { type: [volunteerQuestionSchema], default: [] },
+    // Audience segments for events (label + colour). Drives the public Events
+    // calendar's audience filter, colour coding and legend. Empty = feature off.
+    eventAudiences: { type: [eventAudienceSchema], default: [] },
     isActive: {
       type: Boolean,
       default: false,

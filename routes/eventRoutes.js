@@ -17,4 +17,8 @@ router.get("/:id/registration-status", optionalAuth, eventController.getRegistra
 // ── Internal registration (guests allowed via optionalAuth) ──
 router.post("/:id/register", optionalAuth, eventController.registerForEvent);
 
+// ── Paid registration via in-house Stripe (create intent → confirm) ──
+router.post("/:id/payment-intent", optionalAuth, eventController.createRegistrationPaymentIntent);
+router.post("/:id/confirm-payment", optionalAuth, eventController.confirmRegistrationPayment);
+
 module.exports = router;

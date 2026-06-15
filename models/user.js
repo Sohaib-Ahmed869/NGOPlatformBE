@@ -35,6 +35,10 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "PaymentMethod",
     },
+    // Stripe customer for this donor on their tenant's Stripe account — used to
+    // save reusable cards (SetupIntent) and charge them at checkout. Created
+    // lazily the first time the donor saves a card.
+    stripeCustomerId: { type: String, default: "" },
     firstName: String,
     lastName: String,
     phone: {

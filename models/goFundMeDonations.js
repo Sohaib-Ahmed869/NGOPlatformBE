@@ -36,6 +36,8 @@ const goFundMeDonationSchema = new mongoose.Schema(
     paymentMethod: { type: String, default: "stripe" }, // visa | mastercard | paypal | stripe …
     transactionFee: { type: Number, default: 0 },
     netAmount: { type: Number, default: 0 },
+    // Stripe's hosted receipt URL for the charge (captured on process-donation).
+    stripeReceiptUrl: { type: String, default: "" },
   },
   { timestamps: true }
 );

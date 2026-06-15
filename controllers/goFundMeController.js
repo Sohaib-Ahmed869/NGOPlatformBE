@@ -11,6 +11,24 @@ const { getPaypalClient } = require("../services/tenantPaypal");
 
 const orgId = (req) => req.organisation?._id || null;
 const displayCategory = (category, custom) => (category === "other" && custom ? custom : category);
+
+// The fixed set of categories. Anything outside this list is a free-text
+// "custom" category, which is stored as category "other" + customCategory.
+const PREDEFINED_CATEGORIES = ["education", "water", "food", "emergency relief", "medical", "community", "personal", "other"];
+
+// Escape user/category input before using it in a RegExp.
+const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Anchored, case-insensitive exact match — so a filter value like "education"
+// matches stored values regardless of case ("Education", "EDUCATION", …).
+const ciExact = (s) => new RegExp(`^${escapeRegExp(s)}$`, "i");
+
+// Some categories are stored under different wordings across seed/older data.
+// Filtering by the canonical value also matches its synonyms (e.g. seed data
+// uses "Emergency" while the filter value is "emergency relief").
+const CATEGORY_SYNONYMS = {
+  "emergency relief": ["emergency relief", "emergency", "emergencies"],
+};
+
 const money = (n) => `$${Number(n || 0).toFixed(2)} AUD`;
 
 // Tenant-branded email shell (no hardcoded foundation branding).
@@ -95,7 +113,21 @@ exports.getPublicGoFundMes = async (req, res) => {
 
     const { category, urgency, sort = "recent", page = 1, limit = 12 } = req.query;
     const query = { organisationId: oid, status: "approved", isActive: true };
-    if (category && category !== "all") query.category = category;
+    if (category && category !== "all") {
+      // Match case-insensitively so the lowercase filter values line up with
+      // stored categories regardless of case (e.g. seeded "Education"), and
+      // accept known synonyms (e.g. "Emergency" ↔ "Emergency Relief").
+      const cat = category.toLowerCase();
+      if (PREDEFINED_CATEGORIES.includes(cat)) {
+        const variants = CATEGORY_SYNONYMS[cat] || [category];
+        query.category = { $in: variants.map(ciExact) };
+      } else {
+        // A custom-category pill sends its free-text label — those campaigns are
+        // stored as category "other" with that customCategory, so match there.
+        query.category = ciExact("other");
+        query.customCategory = ciExact(category);
+      }
+    }
     if (urgency && urgency !== "all") query.urgencyLevel = urgency;
 
     let sortOption = { approvedAt: -1 };
@@ -155,10 +187,10 @@ exports.getGoFundMeBySlug = async (req, res) => {
 exports.getAvailableCategories = async (req, res) => {
   try {
     const oid = orgId(req);
-    const predefined = ["education", "water", "food", "emergency relief", "medical", "community", "personal", "other"];
+    const predefined = PREDEFINED_CATEGORIES;
     const custom = await GoFundMe.distinct("customCategory", {
       organisationId: oid,
-      category: "other",
+      category: ciExact("other"),
       customCategory: { $exists: true, $ne: "" },
     });
     res.json({ success: true, categories: { predefined, custom } });
@@ -258,7 +290,7 @@ exports.getMyP2PDonations = async (req, res) => {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
-      .select("donorName amount message isAnonymous paymentStatus paymentMethod transactionFee netAmount createdAt");
+      .select("donorName amount message isAnonymous paymentStatus paymentMethod transactionFee netAmount stripePaymentIntentId stripeReceiptUrl createdAt");
     const total = await GoFundMeDonation.countDocuments(query);
 
     const summary = await GoFundMeDonation.aggregate([
@@ -333,7 +365,8 @@ exports.processDonation = async (req, res) => {
     if (!paymentIntentId) return res.status(400).json({ success: false, message: "Payment intent ID is required" });
 
     const stripe = getTenantStripe(req.organisation);
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    // Expand the charge so we can capture Stripe's hosted receipt URL.
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ["latest_charge"] });
     if (paymentIntent.status !== "succeeded") {
       return res.status(400).json({ success: false, message: "Payment not completed" });
     }
@@ -342,8 +375,18 @@ exports.processDonation = async (req, res) => {
       return res.status(400).json({ success: false, message: "Payment does not belong to this organisation" });
     }
 
+    const receiptUrl =
+      (paymentIntent.latest_charge && typeof paymentIntent.latest_charge === "object"
+        ? paymentIntent.latest_charge.receipt_url
+        : null) || "";
+
     const existing = await GoFundMeDonation.findOne({ stripePaymentIntentId: paymentIntentId });
     if (existing) {
+      // Backfill the receipt URL if an earlier process didn't capture it.
+      if (receiptUrl && !existing.stripeReceiptUrl) {
+        existing.stripeReceiptUrl = receiptUrl;
+        await existing.save();
+      }
       return res.json({ success: true, message: "Donation already processed", donation: existing, alreadyProcessed: true });
     }
 
@@ -372,6 +415,7 @@ exports.processDonation = async (req, res) => {
       transactionFee: gross - net,
       netAmount: net,
       paymentMethod: cardType,
+      stripeReceiptUrl: receiptUrl,
     });
 
     const campaign = await applyDonationToCampaign(goFundMeId, oid, net);
@@ -553,6 +597,109 @@ exports.getCampaignDonors = async (req, res) => {
     res.json({ success: true, donors: donations, campaign, pagination: { current: parseInt(page), pages: Math.ceil(total / parseInt(limit)), total } });
   } catch (error) {
     console.error("getCampaignDonors error:", error);
+    res.status(500).json({ success: false, message: "Server error", error: error.message });
+  }
+};
+
+// GET /gofundme/admin/payments — cross-campaign donations list (the admin
+// "Campaign Payments" dashboard). Org-scoped; supports search by donor,
+// status/campaign/date filters, sorting, pagination + summary stats.
+exports.getAdminPayments = async (req, res) => {
+  try {
+    const oid = orgId(req);
+    if (!oid) return res.status(400).json({ success: false, message: "Organisation context required" });
+
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+      paymentStatus,
+      campaignId,
+      startDate,
+      endDate,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
+
+    const filter = { organisationId: oid };
+    if (paymentStatus && paymentStatus !== "all") filter.paymentStatus = paymentStatus;
+    if (campaignId && campaignId !== "all" && mongoose.Types.ObjectId.isValid(campaignId)) {
+      filter.goFundMeId = new mongoose.Types.ObjectId(campaignId);
+    }
+    if (search) {
+      filter.$or = [
+        { donorName: { $regex: search, $options: "i" } },
+        { donorEmail: { $regex: search, $options: "i" } },
+      ];
+    }
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) filter.createdAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const perPage = Math.max(1, Math.min(1000, parseInt(limit, 10) || 10));
+    const sortDir = sortOrder === "asc" ? 1 : -1;
+    const allowedSort = ["createdAt", "amount", "donorName", "paymentStatus"];
+    const sortField = allowedSort.includes(sortBy) ? sortBy : "createdAt";
+
+    const [rows, total, statsAgg] = await Promise.all([
+      GoFundMeDonation.find(filter)
+        .populate("goFundMeId", "title slug")
+        .sort({ [sortField]: sortDir })
+        .skip((pageNum - 1) * perPage)
+        .limit(perPage)
+        .lean(),
+      GoFundMeDonation.countDocuments(filter),
+      GoFundMeDonation.aggregate([
+        { $match: filter },
+        { $group: { _id: "$paymentStatus", count: { $sum: 1 }, amount: { $sum: "$amount" }, net: { $sum: "$netAmount" } } },
+      ]),
+    ]);
+
+    const stats = { completedCount: 0, pendingCount: 0, failedCount: 0, refundedCount: 0, totalCollected: 0, totalNet: 0, currency: "AUD" };
+    statsAgg.forEach((g) => {
+      if (g._id === "completed") {
+        stats.completedCount = g.count;
+        stats.totalCollected = g.amount || 0;
+        stats.totalNet = g.net || 0;
+      } else if (g._id === "pending") stats.pendingCount = g.count;
+      else if (g._id === "failed") stats.failedCount = g.count;
+      else if (g._id === "refunded") stats.refundedCount = g.count;
+    });
+
+    const payments = rows.map((p) => ({
+      _id: p._id,
+      donorName: p.donorName,
+      donorEmail: p.donorEmail,
+      isAnonymous: p.isAnonymous,
+      amount: p.amount,
+      netAmount: p.netAmount,
+      transactionFee: p.transactionFee,
+      message: p.message,
+      paymentStatus: p.paymentStatus,
+      paymentMethod: p.paymentMethod,
+      stripePaymentIntentId: p.stripePaymentIntentId,
+      stripeReceiptUrl: p.stripeReceiptUrl,
+      createdAt: p.createdAt,
+      campaign: p.goFundMeId ? { _id: p.goFundMeId._id, title: p.goFundMeId.title, slug: p.goFundMeId.slug } : null,
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        payments,
+        pagination: { total, pages: Math.ceil(total / perPage), currentPage: pageNum, perPage },
+        stats,
+      },
+    });
+  } catch (error) {
+    console.error("getAdminPayments error:", error);
     res.status(500).json({ success: false, message: "Server error", error: error.message });
   }
 };

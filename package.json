@@ -12,6 +12,7 @@
     "backfill:events": "node scripts/backfillEvents.js",
     "seed:sample-events": "node scripts/seedSampleEvents.js",
     "seed:campaigns": "node scripts/seedCampaigns.js",
+    "seed:fundraisers": "node scripts/seedFundraisers.js",
     "prices:update": "node scripts/updatePlanPrices.js"
   },
   "keywords": [],

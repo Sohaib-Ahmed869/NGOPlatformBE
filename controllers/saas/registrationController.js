@@ -195,7 +195,7 @@ exports.getBySlug = async (req, res) => {
     const { slug } = req.params;
 
     const org = await Organisation.findOne({ slug, isActive: true }).select(
-      "name slug plan billingCycle subscriptionStatus branding contactEmail contactPhone address addressDetails socialLinks website bankDetails"
+      "name slug plan billingCycle subscriptionStatus branding contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences"
     );
 
     if (!org) {

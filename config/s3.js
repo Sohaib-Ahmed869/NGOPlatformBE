@@ -176,6 +176,21 @@ const pageContentUpload = multer({
   },
 });
 
+// Configure multer for partner brand-logo uploads (public "Become a partner" form)
+const partnerLogoUpload = multer({
+  storage: multerS3(createUploadConfig("partner-logos")),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB for logos
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|svg|webp/;
+    const mimetype = /image\/(jpeg|jpg|png|svg\+xml|webp)/.test(file.mimetype);
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only image files (JPEG, PNG, SVG, WebP) are allowed for logos!"));
+  },
+});
+
 // Configure multer for donation update uploads (images shared with donors)
 const donationUpdatesUpload = multer({
   storage: multerS3(createUploadConfig("donation-updates")),
@@ -206,4 +221,5 @@ module.exports = {
   pageContentUpload,
   donationUpdatesUpload,
   avatarUpload,
+  partnerLogoUpload,
 };

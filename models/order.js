@@ -287,6 +287,11 @@ const OrderSchema = new Schema(
       type: String,
       default: "",
     },
+    // Stripe's hosted receipt URL for card donations (captured on charge).
+    stripeReceiptUrl: {
+      type: String,
+      default: "",
+    },
     // Admin updates shared with the donor (follow-up / close-off)
     donorUpdates: [
       {

@@ -1,4 +1,5 @@
 // controllers/admin/eventController.js
+const mongoose = require("mongoose");
 const Event = require("../../models/event");
 const EventRegistration = require("../../models/eventRegistration");
 const Join = require("../../models/join");
@@ -46,6 +47,7 @@ function buildEventFields(body, currentLocation) {
   if (body.eventTypeOther !== undefined) {
     fields.eventTypeOther = body.eventType === "other" ? body.eventTypeOther : "";
   }
+  if (body.audience !== undefined) fields.audience = (body.audience || "").trim();
 
   // Registration control
   if (body.registrationMode !== undefined) fields.registrationMode = body.registrationMode;
@@ -403,6 +405,122 @@ exports.getEventRegistrations = async (req, res) => {
     res.status(500).json({
       status: "Error",
       message: "Failed to fetch registrations",
+      error: error.message,
+    });
+  }
+};
+
+// GET /admin/events/payments/list
+// Cross-event list of paid event registrations (the "Event Payments" dashboard).
+// Always excludes free RSVPs (paymentStatus: "free"); supports search by
+// registrant, status/event/date filters, sorting and pagination, plus summary
+// stats (collected / paid / pending / refunded) over the whole filtered set.
+exports.getEventPayments = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+      paymentStatus,
+      eventId,
+      startDate,
+      endDate,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
+
+    const filter = { paymentStatus: { $ne: "free" } };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    if (paymentStatus && paymentStatus !== "all") filter.paymentStatus = paymentStatus;
+    if (eventId && eventId !== "all" && mongoose.Types.ObjectId.isValid(eventId)) {
+      filter.eventId = new mongoose.Types.ObjectId(eventId);
+    }
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+      ];
+    }
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) filter.createdAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const perPage = Math.max(1, Math.min(1000, parseInt(limit, 10) || 10));
+    const sortDir = sortOrder === "asc" ? 1 : -1;
+    const allowedSort = ["createdAt", "amountPaid", "name", "paymentStatus"];
+    const sortField = allowedSort.includes(sortBy) ? sortBy : "createdAt";
+
+    const [rows, total, statsAgg] = await Promise.all([
+      EventRegistration.find(filter)
+        .populate("eventId", "title date price currency isPaid")
+        .sort({ [sortField]: sortDir })
+        .skip((pageNum - 1) * perPage)
+        .limit(perPage)
+        .lean(),
+      EventRegistration.countDocuments(filter),
+      EventRegistration.aggregate([
+        { $match: filter },
+        { $group: { _id: "$paymentStatus", count: { $sum: 1 }, amount: { $sum: "$amountPaid" } } },
+      ]),
+    ]);
+
+    const stats = { paidCount: 0, pendingCount: 0, refundedCount: 0, totalCollected: 0, currency: "AUD" };
+    statsAgg.forEach((g) => {
+      if (g._id === "paid") {
+        stats.paidCount = g.count;
+        stats.totalCollected = g.amount || 0;
+      } else if (g._id === "pending") stats.pendingCount = g.count;
+      else if (g._id === "refunded") stats.refundedCount = g.count;
+    });
+    if (rows[0]?.currency) stats.currency = rows[0].currency;
+
+    const payments = rows.map((p) => ({
+      _id: p._id,
+      name: p.name,
+      email: p.email,
+      phone: p.phone,
+      numberOfGuests: p.numberOfGuests,
+      amountPaid: p.amountPaid,
+      currency: p.currency,
+      paymentStatus: p.paymentStatus,
+      stripePaymentIntentId: p.stripePaymentIntentId,
+      stripeReceiptUrl: p.stripeReceiptUrl,
+      rsvpStatus: p.rsvpStatus,
+      attended: p.attended,
+      answers: p.answers,
+      source: p.source,
+      createdAt: p.createdAt,
+      event: p.eventId
+        ? {
+            _id: p.eventId._id,
+            title: p.eventId.title,
+            date: p.eventId.date,
+            price: p.eventId.price,
+            currency: p.eventId.currency,
+            isPaid: p.eventId.isPaid,
+          }
+        : null,
+    }));
+
+    res.json({
+      status: "Success",
+      data: {
+        payments,
+        pagination: { total, pages: Math.ceil(total / perPage), currentPage: pageNum, perPage },
+        stats,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: "Error",
+      message: "Failed to fetch event payments",
       error: error.message,
     });
   }

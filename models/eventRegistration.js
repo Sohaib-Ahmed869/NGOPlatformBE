@@ -53,13 +53,18 @@ const eventRegistrationSchema = new mongoose.Schema(
     attended: { type: Boolean, default: false },
     attendanceMarkedAt: { type: Date },
 
-    // Paid-ready (free for now)
+    // Paid events — in-house Stripe (per-tenant). Free events stay "free".
     paymentStatus: {
       type: String,
       enum: ["free", "pending", "paid", "refunded"],
       default: "free",
     },
     amountPaid: { type: Number, default: 0 },
+    currency: { type: String, default: "AUD" },
+    // Stripe PaymentIntent backing a paid registration (used to confirm + dedup).
+    stripePaymentIntentId: { type: String, default: "" },
+    // Stripe's hosted receipt URL for the charge (captured on confirm).
+    stripeReceiptUrl: { type: String, default: "" },
 
     // Who created it
     source: { type: String, enum: ["public", "admin", "volunteer"], default: "public" },
@@ -72,5 +77,7 @@ const eventRegistrationSchema = new mongoose.Schema(
 eventRegistrationSchema.index({ eventId: 1, email: 1 }, { unique: true });
 eventRegistrationSchema.index({ organisationId: 1, eventId: 1, rsvpStatus: 1 });
 eventRegistrationSchema.index({ organisationId: 1, userId: 1 });
+// Fast confirm lookups; sparse so the many free/unpaid rows don't collide on "".
+eventRegistrationSchema.index({ stripePaymentIntentId: 1 }, { sparse: true });
 
 module.exports = mongoose.model("EventRegistration", eventRegistrationSchema);

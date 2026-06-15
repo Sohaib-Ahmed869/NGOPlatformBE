@@ -24,6 +24,7 @@ router.post("/:id/paypal/capture", optionalAuth, goFundMe.capturePayPalDonation)
 // ── Admin ──
 router.get("/admin/requests", protect, admin, goFundMe.getAdminGoFundMeRequests);
 router.get("/admin/stats", protect, admin, goFundMe.getGoFundMeStats);
+router.get("/admin/payments", protect, admin, goFundMe.getAdminPayments);
 router.get("/admin/donors/:id", protect, admin, goFundMe.getCampaignDonors);
 router.get("/admin/analytics/:id", protect, admin, goFundMe.getCampaignAnalytics);
 router.put("/admin/review/:id", protect, admin, goFundMe.reviewGoFundMeRequest);

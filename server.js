@@ -178,6 +178,7 @@ tenantRouter.use("/api/admin/donors", donorController);
 tenantRouter.use("/api/admin/subscriptions", subscriptionRoutesAdmin);
 tenantRouter.use("/api/admin/events", eventRoutesAdmin);
 tenantRouter.use("/api/join", joinRoutes);
+tenantRouter.use("/api/partners", require("./routes/partnerRoutes"));
 tenantRouter.use("/api/products", productRoutes);
 tenantRouter.use("/api/donationtypes", donationtyperoute);
 tenantRouter.use("/api/programs", programRoutes);

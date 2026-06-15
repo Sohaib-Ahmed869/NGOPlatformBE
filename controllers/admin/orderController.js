@@ -809,6 +809,100 @@ exports.getDonations = async (req, res) => {
   }
 };
 
+// GET /admin/orders/program-payments — donations made to programs (the admin
+// "Program Payments" dashboard). Org-scoped; filtered to donationType
+// "Program Donation". Supports search/status/date, sort, pagination + stats.
+exports.getProgramPayments = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+      status,
+      startDate,
+      endDate,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
+
+    const filter = { donationType: "Program Donation" };
+    if (req.organisation?._id) filter.organisationId = req.organisation._id;
+    if (status && status !== "all") filter.paymentStatus = status;
+    if (search) {
+      filter.$or = [
+        { donationId: { $regex: search, $options: "i" } },
+        { "donorDetails.name": { $regex: search, $options: "i" } },
+        { "donorDetails.email": { $regex: search, $options: "i" } },
+      ];
+    }
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) filter.createdAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const perPage = Math.max(1, Math.min(1000, parseInt(limit, 10) || 10));
+    const sortDir = sortOrder === "asc" ? 1 : -1;
+    const allowedSort = ["createdAt", "totalAmount", "paymentStatus"];
+    const sortField = allowedSort.includes(sortBy) ? sortBy : "createdAt";
+
+    const [rows, total, statsAgg] = await Promise.all([
+      Order.find(filter).sort({ [sortField]: sortDir }).skip((pageNum - 1) * perPage).limit(perPage).lean(),
+      Order.countDocuments(filter),
+      Order.aggregate([
+        { $match: filter },
+        { $group: { _id: "$paymentStatus", count: { $sum: 1 }, amount: { $sum: "$totalAmount" } } },
+      ]),
+    ]);
+
+    const stats = { completedCount: 0, pendingCount: 0, failedCount: 0, totalCollected: 0, currency: "AUD" };
+    statsAgg.forEach((g) => {
+      if (g._id === "completed") {
+        stats.completedCount = g.count;
+        stats.totalCollected = g.amount || 0;
+      } else if (g._id === "pending" || g._id === "processing") {
+        stats.pendingCount += g.count;
+      } else if (g._id === "failed") {
+        stats.failedCount = g.count;
+      }
+    });
+
+    const payments = rows.map((o) => ({
+      _id: o._id,
+      donationId: o.donationId,
+      donorName: o.donorDetails?.name || "—",
+      donorEmail: o.donorDetails?.email || "",
+      donorPhone: o.donorDetails?.phone || "",
+      program: o.items?.[0]?.title || "—",
+      amount: o.totalAmount,
+      adminCost: o.adminCostContribution?.amount || 0,
+      paymentStatus: o.paymentStatus,
+      paymentMethod: o.paymentMethod,
+      paymentType: o.paymentType,
+      stripePaymentIntentId: o.transactionDetails?.stripePaymentIntentId || "",
+      stripeReceiptUrl: o.stripeReceiptUrl || "",
+      createdAt: o.createdAt,
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        payments,
+        pagination: { total, pages: Math.ceil(total / perPage), currentPage: pageNum, perPage },
+        stats,
+      },
+    });
+  } catch (error) {
+    console.error("getProgramPayments error:", error);
+    res.status(500).json({ status: "Error", message: "Failed to fetch program payments", error: error.message });
+  }
+};
+
 // In your controller (e.g., donationController.js)
 exports.getAllDonations = async (req, res) => {
   try {

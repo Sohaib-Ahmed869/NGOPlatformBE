@@ -8,6 +8,9 @@ const { upload } = require("../../config/s3");
 // Stats
 router.get("/stats", isAdmin, eventController.getEventStats);
 
+// ── Event payments (cross-event paid registrations dashboard) ──
+router.get("/payments/list", isAdmin, eventController.getEventPayments);
+
 // ── Registration management (per event) ──
 router.get("/:id/registrations/export", isAdmin, eventController.exportRegistrations);
 router.get("/:id/registrations", isAdmin, eventController.getEventRegistrations);

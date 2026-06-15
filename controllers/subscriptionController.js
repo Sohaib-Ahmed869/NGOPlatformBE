@@ -722,6 +722,32 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       return;
     }
 
+    // Capture Stripe's hosted receipt URL for this charge (the receipt lives on
+    // the underlying Charge). Best-effort — never block order processing. The
+    // branch-specific order.save() calls below persist it.
+    try {
+      const orgForStripe = order.organisationId
+        ? await Organisation.findById(order.organisationId)
+        : null;
+      const stripeClient = getTenantStripe(orgForStripe);
+      const charge = paymentIntent.latest_charge;
+      let receiptUrl =
+        charge && typeof charge === "object" ? charge.receipt_url : null;
+      if (!receiptUrl && typeof charge === "string") {
+        const ch = await stripeClient.charges.retrieve(charge);
+        receiptUrl = ch?.receipt_url || null;
+      }
+      if (!receiptUrl) {
+        const pi = await stripeClient.paymentIntents.retrieve(paymentIntent.id, {
+          expand: ["latest_charge"],
+        });
+        receiptUrl = pi?.latest_charge?.receipt_url || null;
+      }
+      if (receiptUrl) order.stripeReceiptUrl = receiptUrl;
+    } catch (recErr) {
+      console.error("Failed to capture receipt URL:", recErr.message);
+    }
+
     // Handle installment payments
     if (
       order.paymentType === "installments" &&
@@ -1045,6 +1071,32 @@ async function handleInvoicePaymentSucceeded(invoice) {
           order.paymentStatus === "processing"
         ) {
           order.paymentStatus = "active";
+        }
+
+        // Keep the order's latest Stripe hosted receipt URL up to date for this
+        // renewal charge (receipt lives on the underlying Charge).
+        try {
+          const orgForStripe = order.organisationId
+            ? await Organisation.findById(order.organisationId)
+            : null;
+          const stripeClient = getTenantStripe(orgForStripe);
+          let receiptUrl = null;
+          if (invoice.charge) {
+            const charge = await stripeClient.charges.retrieve(invoice.charge);
+            receiptUrl = charge?.receipt_url || null;
+          } else if (invoice.payment_intent) {
+            const pi = await stripeClient.paymentIntents.retrieve(
+              invoice.payment_intent,
+              { expand: ["latest_charge"] }
+            );
+            receiptUrl = pi?.latest_charge?.receipt_url || null;
+          }
+          if (receiptUrl) order.stripeReceiptUrl = receiptUrl;
+        } catch (recErr) {
+          console.error(
+            "Failed to capture renewal receipt URL:",
+            recErr.message
+          );
         }
 
         await order.save();

@@ -12,6 +12,36 @@ function composeAddress(a = {}) {
 
 const SOCIAL_KEYS = ["facebook", "instagram", "twitter", "linkedin", "whatsapp"];
 
+const slugify = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+// Clean + de-dupe the audience list coming from the admin. Each item keeps a
+// stable `key` (provided, or derived from its label); duplicate/empty keys are
+// dropped. Colours are validated as hex, falling back to the accent gold.
+function normalizeAudiences(input) {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of input) {
+    const label = String(raw?.label || "").trim();
+    if (!label) continue;
+    const base = slugify(raw?.key || label);
+    if (!base) continue;
+    // Guarantee uniqueness so events reference exactly one audience.
+    let unique = base;
+    let n = 2;
+    while (seen.has(unique)) unique = `${base}-${n++}`;
+    seen.add(unique);
+    const color = /^#[0-9a-fA-F]{6}$/.test(raw?.color) ? raw.color : "#C9A84C";
+    out.push({ key: unique, label, color });
+  }
+  return out;
+}
+
 /**
  * GET /api/settings
  * Get the current organisation's settings (contact, bank details, etc.)
@@ -24,7 +54,7 @@ exports.getSettings = async (req, res) => {
     }
 
     const org = await Organisation.findById(orgId).select(
-      "name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails"
+      "name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences"
     );
     if (!org) {
       return res.status(404).json({ error: "Organisation not found" });
@@ -35,6 +65,11 @@ exports.getSettings = async (req, res) => {
     res.json({
       name: org.name,
       slug: org.slug,
+      eventAudiences: (org.eventAudiences || []).map((x) => ({
+        key: x.key,
+        label: x.label,
+        color: x.color,
+      })),
       contactEmail: org.contactEmail || "",
       contactPhone: org.contactPhone || "",
       address: org.address || "",
@@ -72,10 +107,11 @@ exports.updateSettings = async (req, res) => {
       return res.status(400).json({ error: "Organisation context required" });
     }
 
-    const { contactEmail, contactPhone, address, addressDetails, socialLinks, website, bankDetails } = req.body;
+    const { contactEmail, contactPhone, address, addressDetails, socialLinks, website, bankDetails, eventAudiences } = req.body;
 
     const updateFields = {};
     if (contactEmail !== undefined) updateFields.contactEmail = contactEmail.trim();
+    if (eventAudiences !== undefined) updateFields.eventAudiences = normalizeAudiences(eventAudiences);
     if (contactPhone !== undefined) updateFields.contactPhone = contactPhone.trim();
     if (website !== undefined) updateFields.website = website.trim();
 
@@ -113,7 +149,7 @@ exports.updateSettings = async (req, res) => {
       orgId,
       { $set: updateFields },
       { new: true }
-    ).select("name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails");
+    ).select("name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences");
 
     res.json({
       message: "Settings updated successfully",
@@ -125,6 +161,7 @@ exports.updateSettings = async (req, res) => {
         socialLinks: org.socialLinks,
         website: org.website,
         bankDetails: org.bankDetails,
+        eventAudiences: org.eventAudiences || [],
       },
     });
   } catch (error) {
