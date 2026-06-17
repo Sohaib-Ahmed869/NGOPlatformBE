@@ -344,6 +344,27 @@ router.get("/:id", isAdmin, async (req, res) => {
     history.sort((a,b)=>new Date(b.date)-new Date(a.date));
     const totalDonations=history.reduce((s,e)=>s+e.amount,0);
 
+    // Derived summary for the donor detail page.
+    const dated = history.map(h => new Date(h.date)).filter(d => !isNaN(d));
+    const firstDonationDate = dated.length ? new Date(Math.min(...dated)).toISOString() : null;
+    const lastDonationDate  = dated.length ? new Date(Math.max(...dated)).toISOString() : null;
+
+    const orderTypes = orders.map(o => o.paymentType);
+    let donationType = "one-time";
+    if (orderTypes.includes("recurring")) donationType = "recurring";
+    else if (orderTypes.includes("installments")) donationType = "installments";
+
+    const typeBreakdown = {
+      "one-time":     { count: 0, amount: 0 },
+      recurring:      { count: 0, amount: 0 },
+      installments:   { count: 0, amount: 0 },
+    };
+    history.forEach(h => {
+      const k = h.type === "recurring" ? "recurring" : h.type === "installments" ? "installments" : "one-time";
+      typeBreakdown[k].count  += 1;
+      typeBreakdown[k].amount += h.amount || 0;
+    });
+
     res.json({
       status:"Success",
       data:{
@@ -354,10 +375,18 @@ router.get("/:id", isAdmin, async (req, res) => {
         email: donor.email,
         phone: donor.phone,
         address: donor.address,
+        country: donor.country,
+        dateOfBirth: donor.dateOfBirth,
         fullAddress: [donor.address?.street, donor.address?.city, donor.address?.state, donor.address?.postalCode]
                        .filter(Boolean).join(", "),
         donationHistory: history,
-        totalDonations
+        totalDonations,
+        // ── enriched ──
+        donationCount: history.length,
+        firstDonationDate,
+        lastDonationDate,
+        donationType,
+        typeBreakdown,
       }
     });
   } catch(err) {

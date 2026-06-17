@@ -86,6 +86,34 @@ const deleteS3Object = async (key) => {
   }
 };
 
+// Extract the S3 object key from a stored URL, but ONLY for our own bucket —
+// returns null for external URLs (e.g. unsplash) so callers never try to delete
+// something that isn't ours.
+const keyFromUrl = (url) => {
+  if (!url || typeof url !== "string") return null;
+  const bucket = process.env.S3_BUCKET_NAME;
+  if (!bucket) return null;
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const pathKey = decodeURIComponent(u.pathname.replace(/^\/+/, ""));
+  // virtual-hosted-style: <bucket>.s3.<region>.amazonaws.com/<key>
+  if (u.hostname === bucket || u.hostname.startsWith(`${bucket}.`)) return pathKey || null;
+  // path-style: <host>/<bucket>/<key>
+  if (pathKey.startsWith(`${bucket}/`)) return pathKey.slice(bucket.length + 1) || null;
+  return null;
+};
+
+// Delete an S3 object given its public URL (no-op for non-bucket URLs).
+const deleteByUrl = async (url) => {
+  const key = keyFromUrl(url);
+  if (!key) return false;
+  return deleteS3Object(key);
+};
+
 // Configure multer for Branding/logo uploads
 const brandingUpload = multer({
   storage: multerS3(createUploadConfig("branding")),
@@ -209,10 +237,27 @@ const donationUpdatesUpload = multer({
   },
 });
 
+// Configure multer for support-ticket attachments (images + PDFs)
+const ticketUpload = multer({
+  storage: multerS3(createUploadConfig("support-tickets")),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB — matches the "max 10MB" shown in every support form
+  fileFilter: function (req, file, cb) {
+    const filetypes = /jpeg|jpg|png|gif|webp|pdf/;
+    const mimetype = /image\/(jpeg|jpg|png|gif|webp)|application\/pdf/.test(file.mimetype);
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error("Only images and PDFs are allowed!"));
+  },
+});
+
 module.exports = {
   upload: eventsUpload, // For backward compatibility
   s3Client,
   deleteS3Object,
+  keyFromUrl,
+  deleteByUrl,
   eventsUpload,
   productUpload,
   brandingUpload,
@@ -222,4 +267,5 @@ module.exports = {
   donationUpdatesUpload,
   avatarUpload,
   partnerLogoUpload,
+  ticketUpload,
 };

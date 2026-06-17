@@ -1,10 +1,9 @@
 // controllers/newsletterCampaignController.js
 const NewsletterCampaign = require("../models/newsletterCampaign");
 const NewsletterSubscription = require("../models/newsletter");
-const Organisation = require("../models/organisation");
+const CampaignRecipient = require("../models/CampaignRecipient");
 const { sendCampaign, countAudience } = require("../services/newsletterSender");
 const { sendEmail } = require("../services/emailUtil");
-const mc = require("../services/mailchimp");
 
 const plain = (html) =>
   String(html || "")
@@ -119,7 +118,33 @@ exports.remove = async (req, res) => {
     if (orgId) filter.organisationId = orgId;
     const campaign = await NewsletterCampaign.findOneAndDelete(filter);
     if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+    await CampaignRecipient.deleteMany({ campaignId: campaign._id }); // cleanup per-recipient rows
     res.json({ message: "Campaign deleted", id: req.params.id });
+  } catch (e) {
+    console.log(e);
+    res.status(400).json({ error: e.message });
+  }
+};
+
+// GET /:id/failures — the recipients that didn't get the campaign (failed,
+// bounced or skipped), so the admin can see why and clean the list.
+exports.failures = async (req, res) => {
+  try {
+    const orgId = orgOf(req);
+    const filter = { _id: req.params.id };
+    if (orgId) filter.organisationId = orgId;
+    const campaign = await NewsletterCampaign.findOne(filter).select("_id");
+    if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+
+    const rows = await CampaignRecipient.find({
+      campaignId: campaign._id,
+      status: { $in: ["failed", "bounced", "skipped"] },
+    })
+      .select("email status failureCode failureReason attempts")
+      .sort({ status: 1, email: 1 })
+      .limit(1000)
+      .lean();
+    res.json(rows);
   } catch (e) {
     console.log(e);
     res.status(400).json({ error: e.message });
@@ -241,13 +266,6 @@ exports.unsubscribe = async (req, res) => {
     if (sub.status !== "unsubscribed") {
       sub.status = "unsubscribed";
       await sub.save();
-      // Mirror the unsubscribe into Mailchimp (non-fatal).
-      try {
-        const org = await Organisation.findById(sub.organisationId);
-        mc.syncMemberSafe(org, sub.email, "unsubscribed");
-      } catch (_) {
-        /* ignore */
-      }
     }
     res.json({ ok: true, email: sub.email });
   } catch (e) {

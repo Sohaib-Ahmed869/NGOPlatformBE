@@ -42,7 +42,6 @@ const {
   scheduleSubscriptionChecks,
 } = require("./services/subscriptionScheduler");
 const { setupCampaignScheduler } = require("./jobs/processCampaigns");
-const mailchimpSvc = require("./services/mailchimp");
 const { initSocket } = require("./services/socket");
 const app = express();
 
@@ -128,6 +127,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'public/uploads'), {
 app.use("/api/users", userRoutes);
 app.use("/api/saas", saasRoutes);
 app.use("/api/superadmin", superAdminRoutes);
+// Platform settings + branding (public read for the marketing site; superadmin writes)
+app.use("/api/platform", require("./routes/platformRoutes"));
 
 // Public SaaS contact form (no auth) — separate path to avoid collision with tenant /api/contact
 const superAdminController = require("./controllers/superAdminController");
@@ -139,16 +140,6 @@ app.post("/api/saas/contact", superAdminController.submitContactQuery);
 const newsletterCampaignController = require("./controllers/newsletterCampaignController");
 app.post("/api/newsletter/unsubscribe", newsletterCampaignController.unsubscribe);
 app.get("/api/newsletter/unsubscribe", newsletterCampaignController.unsubscribe);
-
-// Public: Mailchimp posts subscribe/unsubscribe/clean events here (form-encoded).
-// The token in the URL self-identifies the org, so no auth/tenant context.
-const mailchimpController = require("./controllers/mailchimpController");
-app.get("/api/newsletter/mailchimp-webhook", mailchimpController.webhookVerify);
-app.post(
-  "/api/newsletter/mailchimp-webhook",
-  express.urlencoded({ extended: true }),
-  mailchimpController.webhook
-);
 
 // Per-tenant donation webhook — Stripe calls this directly with the tenant slug
 // in the path; verified against that organisation's own webhook signing secret.
@@ -178,6 +169,7 @@ tenantRouter.use("/api/admin/donors", donorController);
 tenantRouter.use("/api/admin/subscriptions", subscriptionRoutesAdmin);
 tenantRouter.use("/api/admin/events", eventRoutesAdmin);
 tenantRouter.use("/api/join", joinRoutes);
+tenantRouter.use("/api/support-tickets", require("./routes/supportTicketRoutes"));
 tenantRouter.use("/api/partners", require("./routes/partnerRoutes"));
 tenantRouter.use("/api/products", productRoutes);
 tenantRouter.use("/api/donationtypes", donationtyperoute);
@@ -189,9 +181,9 @@ tenantRouter.use("/api/pages", pageRoutes);
 tenantRouter.use("/api/admin/pages", adminPageRoutes);
 tenantRouter.use("/api/admin/payment-config", require("./routes/admin/paymentConfig.routes"));
 tenantRouter.use("/api/admin/email-config", require("./routes/admin/emailConfig.routes"));
+tenantRouter.use("/api/admin/mailboxes", require("./routes/admin/mailbox.routes"));
 tenantRouter.use("/api/admin/paypal-config", require("./routes/admin/paypalConfig.routes"));
 tenantRouter.use("/api/paypal", require("./routes/paypalRoutes"));
-tenantRouter.use("/api/admin/mailchimp", require("./routes/admin/mailchimp.routes"));
 
 // Inline newsletter routes (tenant-scoped)
 tenantRouter.post("/api/newsletter", async (req, res) => {
@@ -202,7 +194,6 @@ tenantRouter.post("/api/newsletter", async (req, res) => {
     return res.status(400).json({ message: "You are already subscribed" });
   }
   const subscriber = await newsLetter.create({ email, organisationId: orgId });
-  mailchimpSvc.syncMemberSafe(req.organisation, email, "active"); // → Mailchimp
   return res
     .status(201)
     .json({ message: "You have been subscribed successfully" });
@@ -231,11 +222,6 @@ tenantRouter.patch("/api/newsletters/:id", isAdmin, async (req, res) => {
     if (!subscriber) {
       return res.status(404).json({ message: "Subscriber not found" });
     }
-    mailchimpSvc.syncMemberSafe(
-      req.organisation,
-      subscriber.email,
-      status === "unsubscribed" ? "unsubscribed" : "active"
-    ); // → Mailchimp
     res.json(subscriber);
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -251,7 +237,6 @@ tenantRouter.delete("/api/newsletters/:id", isAdmin, async (req, res) => {
     if (!subscriber) {
       return res.status(404).json({ message: "Subscriber not found" });
     }
-    mailchimpSvc.syncMemberSafe(req.organisation, subscriber.email, "deleted"); // → Mailchimp
     res.json({ message: "Subscriber deleted", id: req.params.id });
   } catch (error) {
     res.status(400).json({ message: error.message });

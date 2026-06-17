@@ -21,4 +21,7 @@ router.get("/organisations/slug/:slug", registrationController.getBySlug);
 // Plan limits (public, for pricing page)
 router.get("/plans", registrationController.getPlans);
 
+// Validate a discount coupon (public, for the registration/pricing page)
+router.get("/coupon/:code", require("../../controllers/couponController").validateCoupon);
+
 module.exports = router;

@@ -317,26 +317,111 @@ exports.getDashboardStats = async (req, res) => {
     const successRate = totalCount > 0 ? (completedDonationsCount / totalCount) * 100 : 0;
     const averageDonation = totalCount > 0 ? totalDonated / totalCount : 0;
 
-    // Monthly trend data (last 6 months)
+    // Money actually received on an order (no Stripe round-trips — mirrors the
+    // donations-list actualAmount logic). Used for the enriched aggregations.
+    const orderReceived = (o) => {
+      const st = (o.paymentStatus || "").toLowerCase();
+      if (o.paymentType === "installments" && o.installmentDetails) {
+        const hist = o.installmentDetails.installmentHistory || [];
+        if (hist.length)
+          return hist
+            .filter((h) => ["completed", "succeeded"].includes(h.status))
+            .reduce((s, h) => s + (h.amount || 0), 0);
+        return (o.installmentDetails.installmentsPaid || 0) * (o.installmentDetails.installmentAmount || 0);
+      }
+      if (o.paymentType === "recurring" && o.recurringDetails) {
+        const hist = o.recurringDetails.paymentHistory || [];
+        if (hist.length)
+          return hist
+            .filter((p) => ["succeeded", "completed"].includes(p.status))
+            .reduce((s, p) => s + (p.amount || 0), 0);
+        if (["active", "completed"].includes(st)) return (o.recurringDetails.totalPayments || 0) * (o.recurringDetails.amount || 0);
+        return 0;
+      }
+      return ["completed", "succeeded", "active", "ended"].includes(st) ? (o.totalAmount || 0) : 0;
+    };
+    const typeOf = (o) =>
+      o.paymentType === "recurring"
+        ? "recurring"
+        : o.installmentDetails || o.paymentType === "installments"
+          ? "installments"
+          : "oneTime";
+
+    // Monthly trend (last 12 months) — committed + received + per-type received.
     const monthlyMap = {};
     const now = new Date();
-    for (let i = 5; i >= 0; i--) {
+    for (let i = 11; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      monthlyMap[key] = { month: key, amount: 0, count: 0 };
+      monthlyMap[key] = {
+        month: key,
+        label: d.toLocaleString("default", { month: "short" }),
+        amount: 0,
+        received: 0,
+        count: 0,
+        oneTime: 0,
+        recurring: 0,
+        installments: 0,
+      };
     }
     for (const order of validOrders) {
       const d = new Date(order.createdAt);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      if (monthlyMap[key]) {
-        monthlyMap[key].amount += order.totalAmount || 0;
-        monthlyMap[key].count += 1;
-      }
+      const bucket = monthlyMap[key];
+      if (!bucket) continue;
+      const rec = orderReceived(order);
+      bucket.amount += order.totalAmount || 0;
+      bucket.received += rec;
+      bucket.count += 1;
+      // Stack by type using the committed order amount so the bars are visible
+      // regardless of how much has been collected yet (received can be 0 while a
+      // donation is still pending). The three types sum to `amount`.
+      bucket[typeOf(order)] += order.totalAmount || 0;
     }
     const monthlyTrend = Object.values(monthlyMap);
 
+    // Status breakdown over ALL orders (incl. failed) — for the status donut.
+    const statusBreakdown = {};
+    for (const o of allOrders) {
+      const s = (o.paymentStatus || "unknown").toLowerCase();
+      statusBreakdown[s] = (statusBreakdown[s] || 0) + 1;
+    }
+
+    // Unique donors across valid orders.
+    const donorSet = new Set();
+    validOrders.forEach((o) => {
+      const id = (o.user && o.user.toString()) || o.donorDetails?.email || o.donorDetails?.name;
+      if (id) donorSet.add(id);
+    });
+    const uniqueDonors = donorSet.size;
+
+    // Payment-method breakdown (by received amount).
+    const methodMap = {};
+    validOrders.forEach((o) => {
+      const m = (o.paymentMethod || "other").toLowerCase();
+      const e = methodMap[m] || { method: m, count: 0, amount: 0 };
+      e.count += 1;
+      e.amount += orderReceived(o);
+      methodMap[m] = e;
+    });
+    const paymentMethods = Object.values(methodMap).sort((a, b) => b.amount - a.amount);
+
+    // Top causes / projects (by received amount).
+    const causeMap = {};
+    validOrders.forEach((o) => {
+      const title = o.items?.[0]?.title || o.donationType || "General";
+      const e = causeMap[title] || { title, count: 0, amount: 0 };
+      e.count += 1;
+      e.amount += orderReceived(o);
+      causeMap[title] = e;
+    });
+    const topCauses = Object.values(causeMap)
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 6);
+
     // Recent donations (last 10)
     const recentDonations = validOrders
+      .slice()
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 10)
       .map((o) => ({
@@ -370,6 +455,12 @@ exports.getDashboardStats = async (req, res) => {
         actualTotalAmount: paidDonated,
         monthlyTrend,
         recentDonations,
+        // ── enriched ──────────────────────────────────────────────
+        uniqueDonors,
+        completedDonations: completedDonationsCount,
+        statusBreakdown,
+        paymentMethods,
+        topCauses,
       },
     });
   } catch (error) {

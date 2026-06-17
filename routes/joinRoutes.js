@@ -2,9 +2,17 @@ const express = require("express");
 const router = express.Router();
 const joinController = require("../controllers/joinTeamController");
 const isAdmin = require("../middleware/isAdmin");
+const { checkLimit, requireFeature } = require("../middleware/planEnforcement");
 
 // ── Public: website volunteer application form ──
-router.post("/", joinController.createJoin);
+// Plan-gated: the volunteer module must be enabled and within the volunteer cap
+// (effective limits = dynamic plan + per-tenant override).
+router.post(
+  "/",
+  requireFeature("volunteerEnabled", "Volunteer applications"),
+  checkLimit("volunteers"),
+  joinController.createJoin
+);
 router.get("/form", joinController.getForm); // public: questions to render
 
 // ── Admin: collection reads (static paths before any ":id" routes) ──

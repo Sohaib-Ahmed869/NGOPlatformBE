@@ -216,6 +216,8 @@ const OrderSchema = new Schema(
                 enum: ["succeeded", "failed", "pending"],
               },
               failureReason: String,
+              // Stripe's hosted receipt URL for this individual charge.
+              receiptUrl: String,
             },
           ],
         },
@@ -246,7 +248,10 @@ const OrderSchema = new Schema(
               amount: Number,
               status: String,
               transactionId: String,
+              invoiceId: String,
               failureReason: String,
+              // Stripe's hosted receipt URL for this individual installment charge.
+              receiptUrl: String,
             },
           ],
           paymentIntervalDays: Number,
@@ -282,6 +287,18 @@ const OrderSchema = new Schema(
       date: Date,
       reason: String,
       cancelledBy: Schema.Types.ObjectId, // User or admin ID
+      // Cancellation request → admin moderation audit trail. (Previously these
+      // were set by the controllers but dropped by strict mode — now persisted.)
+      requestedBy: Schema.Types.ObjectId, // donor who requested the cancellation
+      status: {
+        type: String,
+        enum: ["pending", "approved", "denied"],
+      },
+      approvedBy: Schema.Types.ObjectId,
+      approvalDate: Date,
+      deniedBy: Schema.Types.ObjectId,
+      denialDate: Date,
+      denialReason: String,
     },
     receiptUrl: {
       type: String,

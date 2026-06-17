@@ -3,6 +3,7 @@ const Order = require("../models/order");
 const Organisation = require("../models/organisation");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
 const { getTenantStripe, getTenantWebhookSecret } = require("../services/tenantStripe");
+const { clampNextPaymentDate } = require("../services/recurringDates");
 
 exports.getActiveSubscriptions = async (req, res) => {
   try {
@@ -363,33 +364,42 @@ exports.cancelSubscription = async (req, res) => {
       subscription.transactionDetails?.stripeSubscriptionId
     ) {
       try {
-        // Get all paid invoices for this subscription
+        // Get all paid invoices for this subscription (expand the charge so we
+        // can keep each payment's hosted receipt URL).
         const invoices = await stripe.invoices.list({
           subscription: subscription.transactionDetails.stripeSubscriptionId,
           status: 'paid',
           limit: 100,
+          expand: ["data.charge"],
         });
-        
+
         // Record all payments in our local payment history
         if (subscription.recurringDetails) {
           subscription.recurringDetails.paymentHistory = subscription.recurringDetails.paymentHistory || [];
-          
+
           // Add any payments from Stripe not already in our history
           for (const invoice of invoices.data) {
             const paymentDate = new Date(invoice.status_transitions.paid_at * 1000);
             const paymentAmount = invoice.amount_paid / 100; // Convert from cents
-            
+            const receiptUrl =
+              (invoice.charge && typeof invoice.charge === "object"
+                ? invoice.charge.receipt_url
+                : null) || "";
+
             // Check if we already have this payment recorded
-            const paymentExists = subscription.recurringDetails.paymentHistory.some(p => 
+            const existing = subscription.recurringDetails.paymentHistory.find(p =>
               p.invoiceId === invoice.id);
-            
-            if (!paymentExists) {
+
+            if (!existing) {
               subscription.recurringDetails.paymentHistory.push({
                 date: paymentDate,
                 amount: paymentAmount,
                 invoiceId: invoice.id,
                 status: "succeeded",
+                receiptUrl,
               });
+            } else if (!existing.receiptUrl && receiptUrl) {
+              existing.receiptUrl = receiptUrl; // backfill a missing receipt
             }
           }
           
@@ -780,6 +790,35 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
         });
       }
 
+      // Capture the Stripe receipt for this installment charge (trail + latest).
+      try {
+        const orgForStripe = order.organisationId
+          ? await Organisation.findById(order.organisationId)
+          : null;
+        const stripeClient = getTenantStripe(orgForStripe);
+        let receiptUrl =
+          paymentIntent.latest_charge &&
+          typeof paymentIntent.latest_charge === "object"
+            ? paymentIntent.latest_charge.receipt_url
+            : null;
+        if (!receiptUrl) {
+          const pi = await stripeClient.paymentIntents.retrieve(paymentIntent.id, {
+            expand: ["latest_charge"],
+          });
+          receiptUrl = pi?.latest_charge?.receipt_url || null;
+        }
+        if (receiptUrl) {
+          order.stripeReceiptUrl = receiptUrl;
+          const idx = order.installmentDetails.installmentHistory.findIndex(
+            (h) => h.transactionId === paymentIntent.id
+          );
+          if (idx >= 0)
+            order.installmentDetails.installmentHistory[idx].receiptUrl = receiptUrl;
+        }
+      } catch (recErr) {
+        console.error("Failed to capture installment receipt URL:", recErr.message);
+      }
+
       // Update installment paid count if needed
       if (order.installmentDetails.installmentsPaid < installmentNumber) {
         order.installmentDetails.installmentsPaid = installmentNumber;
@@ -1029,10 +1068,12 @@ async function handleInvoicePaymentSucceeded(invoice) {
             status: "succeeded",
           });
 
-          // Update next payment date
-          order.recurringDetails.nextPaymentDate = calculateNextPaymentDate(
-            new Date(),
-            order.recurringDetails.frequency
+          // Update next payment date — null once it's past the end date, so the
+          // donor isn't shown a charge that won't happen (the sub will cancel).
+          // calculateNextPaymentDate takes the order doc (reads its frequency).
+          order.recurringDetails.nextPaymentDate = clampNextPaymentDate(
+            calculateNextPaymentDate(order),
+            order.recurringDetails.endDate
           );
         } else if (
           order.paymentType === "installments" &&
@@ -1091,7 +1132,16 @@ async function handleInvoicePaymentSucceeded(invoice) {
             );
             receiptUrl = pi?.latest_charge?.receipt_url || null;
           }
-          if (receiptUrl) order.stripeReceiptUrl = receiptUrl;
+          if (receiptUrl) {
+            order.stripeReceiptUrl = receiptUrl;
+            // Also attach it to the history entry we just pushed above, so the
+            // trail keeps a receipt for every renewal / installment charge.
+            const hist =
+              order.paymentType === "recurring"
+                ? order.recurringDetails?.paymentHistory
+                : order.installmentDetails?.installmentHistory;
+            if (hist && hist.length) hist[hist.length - 1].receiptUrl = receiptUrl;
+          }
         } catch (recErr) {
           console.error(
             "Failed to capture renewal receipt URL:",
@@ -1407,12 +1457,36 @@ exports.retryPayment = async (req, res) => {
           status: "succeeded",
         });
 
-        // Update next payment date
-        subscription.recurringDetails.nextPaymentDate =
-          calculateNextPaymentDate(
-            new Date(),
-            subscription.recurringDetails.frequency
-          );
+        // Capture the Stripe receipt for this retried charge (trail + latest).
+        try {
+          let receiptUrl = null;
+          if (retryResult.charge) {
+            const charge = await stripe.charges.retrieve(retryResult.charge);
+            receiptUrl = charge?.receipt_url || null;
+          } else if (retryResult.payment_intent) {
+            const piId =
+              typeof retryResult.payment_intent === "string"
+                ? retryResult.payment_intent
+                : retryResult.payment_intent.id;
+            const pi = await stripe.paymentIntents.retrieve(piId, {
+              expand: ["latest_charge"],
+            });
+            receiptUrl = pi?.latest_charge?.receipt_url || null;
+          }
+          if (receiptUrl) {
+            subscription.stripeReceiptUrl = receiptUrl;
+            const ph = subscription.recurringDetails.paymentHistory;
+            if (ph.length) ph[ph.length - 1].receiptUrl = receiptUrl;
+          }
+        } catch (recErr) {
+          console.error("Failed to capture retry receipt URL:", recErr.message);
+        }
+
+        // Update next payment date — null once past the end date (no further charge).
+        subscription.recurringDetails.nextPaymentDate = clampNextPaymentDate(
+          calculateNextPaymentDate(subscription),
+          subscription.recurringDetails.endDate
+        );
       }
 
       await subscription.save();

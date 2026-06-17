@@ -12,40 +12,48 @@ const syncSubscriptionPaymentHistory = async (subscription, stripe) => {
   try {
     const subscriptionId = subscription.transactionDetails.stripeSubscriptionId;
 
-    // Get all paid invoices for this subscription from Stripe
+    // Get all paid invoices for this subscription from Stripe. Expand the charge
+    // so we can persist its hosted receipt URL alongside each payment.
     const invoices = await stripe.invoices.list({
       subscription: subscriptionId,
       status: "paid",
       limit: 100,
+      expand: ["data.charge"],
     });
 
-    // Get existing payment history invoice IDs
-    const existingInvoiceIds = new Set(
-      (subscription.recurringDetails.paymentHistory || [])
-        .map((p) => p.invoiceId)
-        .filter((id) => id)
-    );
+    if (!subscription.recurringDetails.paymentHistory) {
+      subscription.recurringDetails.paymentHistory = [];
+    }
 
     let newPaymentsAdded = 0;
 
     // Process each invoice from Stripe
     for (const invoice of invoices.data) {
-      // Skip if we already have this payment recorded
-      if (existingInvoiceIds.has(invoice.id)) {
+      const receiptUrl =
+        (invoice.charge && typeof invoice.charge === "object"
+          ? invoice.charge.receipt_url
+          : null) || "";
+      const existing = subscription.recurringDetails.paymentHistory.find(
+        (p) => p.invoiceId === invoice.id
+      );
+
+      if (existing) {
+        // Backfill the receipt on an already-recorded payment if it's missing,
+        // so the trail fills in for charges captured before this change.
+        if (!existing.receiptUrl && receiptUrl) {
+          existing.receiptUrl = receiptUrl;
+          newPaymentsAdded++;
+        }
         continue;
       }
 
-      // Initialize payment history if it doesn't exist
-      if (!subscription.recurringDetails.paymentHistory) {
-        subscription.recurringDetails.paymentHistory = [];
-      }
-
-      // Add the payment to history
+      // Add the payment to history (with its Stripe receipt).
       subscription.recurringDetails.paymentHistory.push({
         date: new Date(invoice.status_transitions.paid_at * 1000),
         amount: invoice.amount_paid / 100, // Convert from cents
         invoiceId: invoice.id,
         status: "succeeded",
+        receiptUrl,
       });
 
       newPaymentsAdded++;

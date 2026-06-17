@@ -1,6 +1,6 @@
 /**
  * Seed sample newsletter campaigns for a tenant so the Campaigns tab has
- * realistic data (draft, scheduled, sent via SMTP, sent via Mailchimp, failed).
+ * realistic data (draft, scheduled, sent, failed).
  *
  * Idempotent: upserted by (organisationId, subject), so re-running updates them
  * in place rather than creating duplicates. No documents are deleted.
@@ -47,7 +47,7 @@ function buildSamples(orgId, createdBy) {
       sentAt: day(-6),
       stats: { recipients: 128, sent: 126, failed: 2 },
     },
-    // 2. Sent via Mailchimp
+    // 2. Sent (clean delivery)
     {
       ...base,
       subject: "Our February impact, in numbers",
@@ -56,8 +56,7 @@ function buildSamples(orgId, createdBy) {
         ["1,240 meals provided", "38 new volunteers", "$14,800 raised"],
       ),
       status: "sent",
-      provider: "mailchimp",
-      mailchimpCampaignId: "demo-mc-0001",
+      provider: "smtp",
       sentAt: day(-13),
       stats: { recipients: 131, sent: 131, failed: 0 },
     },
@@ -94,8 +93,8 @@ function buildSamples(orgId, createdBy) {
         ["Your generosity changed lives", "Here's to the year ahead"],
       ),
       status: "failed",
-      provider: "mailchimp",
-      error: "From email is not verified in this Mailchimp account.",
+      provider: "smtp",
+      error: "SMTP authentication failed — check the From address / credentials.",
       stats: { recipients: 0, sent: 0, failed: 0 },
     },
   ];

@@ -12,6 +12,12 @@ router.post("/forgot-password", userController.forgotPassword);
 router.post("/reset-password/:token", userController.resetPassword);
 router.post("/auth/google", userController.googleAuth);
 
+// Two-factor authentication (authenticated user manages their own 2FA)
+router.get("/mfa/status", auth, userController.mfaStatus);
+router.get("/mfa/setup", auth, userController.mfaSetup);
+router.post("/mfa/enable", auth, userController.mfaEnable);
+router.post("/mfa/disable", auth, userController.mfaDisable);
+
 router.get("/me", auth, userController.getMe);
 router.get("/check-password-status", auth, userController.checkPasswordStatus);
 router.put("/update", auth, userController.updateUser);

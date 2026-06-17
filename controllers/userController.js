@@ -164,21 +164,54 @@ exports.loginAdmin = async (req, res) => {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
 
+    // Generic message everywhere to avoid email enumeration.
     if (!user) {
-      throw new Error("Invalid login credentials");
+      return res.status(401).json({ error: "Invalid login credentials" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
+    // Account lockout — 5 failed attempts → locked 15 minutes (per-account).
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      const mins = Math.ceil((user.lockedUntil - new Date()) / 60000);
+      return res.status(423).json({ error: `Account locked. Try again in ${mins} minute(s).` });
+    }
+
+    const isMatch = user.password ? await bcrypt.compare(password, user.password) : false;
 
     if (!isMatch) {
-      throw new Error("Invalid login credentials");
+      user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+      if (user.failedLoginAttempts >= 5) {
+        user.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+        user.failedLoginAttempts = 0;
+      }
+      await user.save();
+      return res.status(401).json({ error: "Invalid login credentials" });
     }
 
     if (user.role !== "admin" && user.role !== "superadmin") {
-      throw new Error("Unauthorized");
+      return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // Update last login time
+    // Two-factor challenge (if enabled for this account).
+    if (user.twoFactorEnabled) {
+      const { code } = req.body;
+      if (!code) {
+        return res.json({ mfaRequired: true, email: user.email });
+      }
+      const totp = require("../utils/totp");
+      if (!totp.verifyToken(user.twoFactorSecret, code)) {
+        user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+        if (user.failedLoginAttempts >= 5) {
+          user.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+          user.failedLoginAttempts = 0;
+        }
+        await user.save();
+        return res.status(401).json({ error: "Invalid authentication code" });
+      }
+    }
+
+    // Success — clear lockout counters, stamp login.
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = null;
     user.lastLogin = new Date();
     await user.save();
 
@@ -193,6 +226,72 @@ exports.loginAdmin = async (req, res) => {
     });
   } catch (error) {
     res.status(401).json({ error: error.message });
+  }
+};
+
+// ── Two-factor authentication (TOTP) management ──────────────────────────────
+
+exports.mfaStatus = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select("twoFactorEnabled");
+    res.json({ enabled: !!user?.twoFactorEnabled });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to read 2FA status" });
+  }
+};
+
+// Generate a new secret and return it (+ otpauth URL) for the user to add to
+// their authenticator app. Not enabled until verified via /mfa/enable.
+exports.mfaSetup = async (req, res) => {
+  try {
+    const totp = require("../utils/totp");
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    const secret = totp.generateSecret();
+    user.twoFactorSecret = secret;
+    user.twoFactorEnabled = false;
+    await user.save();
+    res.json({ secret, otpauthUrl: totp.otpauthURL(secret, user.email) });
+  } catch (err) {
+    console.error("mfaSetup error:", err);
+    res.status(500).json({ error: "Failed to start 2FA setup" });
+  }
+};
+
+exports.mfaEnable = async (req, res) => {
+  try {
+    const totp = require("../utils/totp");
+    const { code } = req.body;
+    const user = await User.findById(req.user._id);
+    if (!user?.twoFactorSecret) return res.status(400).json({ error: "Run setup first" });
+    if (!totp.verifyToken(user.twoFactorSecret, code)) {
+      return res.status(400).json({ error: "Invalid authentication code" });
+    }
+    user.twoFactorEnabled = true;
+    await user.save();
+    res.json({ message: "Two-factor authentication enabled" });
+  } catch (err) {
+    console.error("mfaEnable error:", err);
+    res.status(500).json({ error: "Failed to enable 2FA" });
+  }
+};
+
+exports.mfaDisable = async (req, res) => {
+  try {
+    const totp = require("../utils/totp");
+    const { code } = req.body;
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.twoFactorEnabled && !totp.verifyToken(user.twoFactorSecret, code)) {
+      return res.status(400).json({ error: "Invalid authentication code" });
+    }
+    user.twoFactorEnabled = false;
+    user.twoFactorSecret = undefined;
+    await user.save();
+    res.json({ message: "Two-factor authentication disabled" });
+  } catch (err) {
+    console.error("mfaDisable error:", err);
+    res.status(500).json({ error: "Failed to disable 2FA" });
   }
 };
 

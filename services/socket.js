@@ -51,6 +51,8 @@ function initSocket(server) {
     const orgId = socket.user?.organisationId;
     if (orgId) socket.join(`org:${orgId}`);
     socket.join(`user:${socket.user._id}`);
+    // Platform operators share a room for cross-tenant events (e.g. new tickets).
+    if (socket.user?.role === "superadmin") socket.join("platform:superadmins");
   });
 
   return io;
@@ -68,4 +70,8 @@ function emitToUser(userId, event, payload) {
   if (io && userId) io.to(`user:${userId}`).emit(event, payload);
 }
 
-module.exports = { initSocket, getIO, emitToOrg, emitToUser };
+function emitToSuperAdmins(event, payload) {
+  if (io) io.to("platform:superadmins").emit(event, payload);
+}
+
+module.exports = { initSocket, getIO, emitToOrg, emitToUser, emitToSuperAdmins };

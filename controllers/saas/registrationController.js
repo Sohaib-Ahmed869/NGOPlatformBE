@@ -28,7 +28,7 @@ exports.uploadRegistrationLogo = async (req, res) => {
  */
 exports.register = async (req, res) => {
   try {
-    const { orgName, slug, adminName, adminEmail, adminPassword, plan, billingCycle, revenueRange, theme, logoUrl } = req.body;
+    const { orgName, slug, adminName, adminEmail, adminPassword, plan, billingCycle, revenueRange, theme, logoUrl, isMuslimCharity } = req.body;
 
     // Validate required fields
     if (!orgName || !slug || !adminName || !adminEmail || !adminPassword || !plan || !billingCycle) {
@@ -74,6 +74,7 @@ exports.register = async (req, res) => {
       revenueRange,
       subscriptionStatus: "pending",
       isActive: false,
+      isMuslimCharity: !!isMuslimCharity,
       branding: {
         theme: theme || "default",
         primaryColor: selectedTheme.primaryColor,
@@ -94,11 +95,27 @@ exports.register = async (req, res) => {
     organisation.stripeCustomerId = customer.id;
     await organisation.save();
 
-    // Seed default website pages for the new org (best-effort).
+    // Seed default website pages for the new org (best-effort). The Islamic
+    // giving pages are seeded enabled only when isMuslimCharity is set.
     try {
       await require("../../services/pageService").seedPagesForOrg(organisation._id);
     } catch (e) {
       console.error("Failed to seed pages for new org:", e.message);
+    }
+
+    // Seed a default set of donation types, tailored to the charity type
+    // (Islamic categories for Muslim charities, general causes otherwise).
+    try {
+      const DonationType = require("../../models/donationtypes");
+      const defaultTypes = isMuslimCharity
+        ? ["Zakat ul Maal", "Zakat ul Fitr", "Sadaqah", "Sadaqah Jariyah", "Lillah", "Fidya & Kaffarah", "General Donation"]
+        : ["General Donation", "Education Fund", "Water Fund", "Food Fund", "Emergency Fund", "Healthcare Fund"];
+      await DonationType.insertMany(
+        defaultTypes.map((donationType, order) => ({ organisationId: organisation._id, donationType, order })),
+        { ordered: false },
+      );
+    } catch (e) {
+      console.error("Failed to seed donation types for new org:", e.message);
     }
 
     // Look up the Stripe price ID
@@ -107,11 +124,29 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: "Invalid plan or billing cycle" });
     }
 
+    // Optional discount coupon (validated against the Coupon collection).
+    let discounts;
+    if (req.body.couponCode) {
+      try {
+        const Coupon = require("../../models/coupon");
+        const coupon = await Coupon.findOne({ code: String(req.body.couponCode).toUpperCase().trim(), isActive: true });
+        const okPlan = coupon && (!coupon.planCodes?.length || coupon.planCodes.includes(plan));
+        const okExpiry = coupon && (!coupon.redeemBy || new Date(coupon.redeemBy) > new Date());
+        const okRedemptions = coupon && (!coupon.maxRedemptions || coupon.timesRedeemed < coupon.maxRedemptions);
+        if (coupon && coupon.stripeCouponId && okPlan && okExpiry && okRedemptions) {
+          discounts = [{ coupon: coupon.stripeCouponId }];
+        }
+      } catch (e) {
+        console.error("Coupon apply failed:", e.message);
+      }
+    }
+
     // Create Stripe Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: customer.id,
       line_items: [{ price: priceId, quantity: 1 }],
+      ...(discounts ? { discounts } : {}),
       success_url: `${process.env.CLIENT_URL}/register/success?session_id={CHECKOUT_SESSION_ID}&slug=${slug}`,
       cancel_url: `${process.env.CLIENT_URL}/plans`,
       metadata: {
@@ -195,7 +230,7 @@ exports.getBySlug = async (req, res) => {
     const { slug } = req.params;
 
     const org = await Organisation.findOne({ slug, isActive: true }).select(
-      "name slug plan billingCycle subscriptionStatus branding contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences"
+      "name slug plan billingCycle subscriptionStatus branding design contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences isMuslimCharity"
     );
 
     if (!org) {

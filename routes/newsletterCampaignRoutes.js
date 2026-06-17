@@ -11,6 +11,7 @@ router.post("/", isAdmin, ctrl.create);
 router.post("/test", isAdmin, ctrl.testSend);
 
 router.get("/:id", isAdmin, ctrl.get);
+router.get("/:id/failures", isAdmin, ctrl.failures);
 router.put("/:id", isAdmin, ctrl.update);
 router.delete("/:id", isAdmin, ctrl.remove);
 router.post("/:id/send", isAdmin, ctrl.sendNow);

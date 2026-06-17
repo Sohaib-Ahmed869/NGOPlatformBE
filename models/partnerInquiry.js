@@ -38,11 +38,29 @@ const partnerInquirySchema = new mongoose.Schema(
     },
     adminNotes: { type: String, default: "" },
 
+    // ── Public website listing (the partner logo wall) ──
+    // `status` is the CRM pipeline; `showOnWebsite` is a SEPARATE publish flag so
+    // an approved relationship isn't auto-published (and a partner can be shown
+    // without ever being "approved" in the pipeline). Publishing is gated on
+    // `consentToList` + a logo in the controller.
+    consentToList: { type: Boolean, default: false }, // applicant/admin authorised public listing
+    showOnWebsite: { type: Boolean, default: false }, // live on the public partners wall
+    displayOrder: { type: Number, default: 0 }, // lower shows first on the wall
+
+    // Public-facing overrides so the wall never has to expose the contact person
+    // or the originally-submitted logo. Wall uses publicName||organisationName||name
+    // and publicLogoUrl||logoUrl.
+    publicName: { type: String, default: "", trim: true },
+    publicLogoUrl: { type: String, default: "" },
+    publicLogoKey: { type: String, default: "" }, // S3 object key (for cleanup)
+
     source: { type: String, default: "website" },
   },
   { timestamps: true }
 );
 
 partnerInquirySchema.index({ organisationId: 1, status: 1, createdAt: -1 });
+// Public wall query: approved + published, ordered.
+partnerInquirySchema.index({ organisationId: 1, showOnWebsite: 1, status: 1, displayOrder: 1 });
 
 module.exports = mongoose.model("PartnerInquiry", partnerInquirySchema);

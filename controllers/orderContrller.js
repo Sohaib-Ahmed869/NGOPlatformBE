@@ -5,6 +5,7 @@ const Program = require("../models/program");
 const Organisation = require("../models/organisation");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
 const { getTenantStripe } = require("../services/tenantStripe");
+const { cancelAtUnix, clampNextPaymentDate } = require("../services/recurringDates");
 const { sendReceiptEmail } = require("../services/recieptUtils");
 const { sendEmail } = require("../services/emailUtil");
 const crypto = require("crypto");
@@ -493,6 +494,84 @@ exports.requestCancellation = async (req, res) => {
   }
 };
 
+/**
+ * Resolve a usable Stripe customer for charging the given payment method.
+ *
+ * Reuses the payment method's existing customer when it still exists. If that
+ * customer is gone (e.g. a saved card whose customer was deleted — a removed
+ * sandbox test clock, or otherwise stale data), it creates a fresh customer and
+ * attaches the PM, so a stale saved card never fails the donation.
+ *
+ * @returns {Promise<{ customer: object, paymentMethodType: string }>}
+ */
+const resolveCustomerForPaymentMethod = async (stripe, paymentMethodId, donorDetails) => {
+  let pm;
+  try {
+    pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+  } catch (e) {
+    throw new Error("Your saved card is no longer valid. Please re-enter your card details.");
+  }
+  const paymentMethodType = pm.type || "card";
+
+  // Reuse the PM's customer only if it still exists (not deleted).
+  let customer = null;
+  if (pm.customer) {
+    try {
+      const existing = await stripe.customers.retrieve(pm.customer);
+      if (existing && !existing.deleted) customer = existing;
+    } catch (e) {
+      customer = null; // stale reference — the customer no longer exists
+    }
+  }
+
+  // No valid customer → create one and attach the PM.
+  if (!customer) {
+    customer = await stripe.customers.create({
+      email: donorDetails.email,
+      name: donorDetails.name,
+      phone: donorDetails.phone,
+    });
+    try {
+      await stripe.paymentMethods.attach(paymentMethodId, { customer: customer.id });
+    } catch (attachErr) {
+      // The PM may already be attached to a different LIVE customer — reuse it.
+      let live = null;
+      try {
+        const repm = await stripe.paymentMethods.retrieve(paymentMethodId);
+        if (repm.customer) {
+          const c = await stripe.customers.retrieve(repm.customer);
+          if (c && !c.deleted) live = c;
+        }
+      } catch (e) {
+        /* ignore — customer is gone */
+      }
+      if (live) {
+        customer = live;
+      } else {
+        // PM is stuck on a dead customer. Detach + re-attach to the fresh one
+        // (works for normal cards). Link PMs can't be moved between customers,
+        // so this may still fail → surface a clean re-enter message.
+        try {
+          await stripe.paymentMethods.detach(paymentMethodId);
+          await stripe.paymentMethods.attach(paymentMethodId, { customer: customer.id });
+        } catch (e2) {
+          throw new Error("Your saved card is no longer valid. Please re-enter your card details.");
+        }
+      }
+    }
+  }
+
+  try {
+    await stripe.customers.update(customer.id, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+  } catch (e) {
+    console.error("Failed to set default payment method:", e.message);
+  }
+
+  return { customer, paymentMethodType };
+};
+
 exports.createOrder = async (req, res) => {
   try {
     const {
@@ -628,10 +707,13 @@ exports.createOrder = async (req, res) => {
           ? new Date(recurringDetails.endDate)
           : null,
         status: "active",
-        nextPaymentDate: calculateNextPaymentDate(
-          new Date(),
-          recurringDetails.frequency,
-          billingDay // Pass billing day to function
+        nextPaymentDate: clampNextPaymentDate(
+          calculateNextPaymentDate(
+            new Date(),
+            recurringDetails.frequency,
+            billingDay // Pass billing day to function
+          ),
+          recurringDetails.endDate
         ),
         billingDay: billingDay, // Store the billing day
         totalPayments: 0,
@@ -798,73 +880,16 @@ exports.createOrder = async (req, res) => {
           await savedOrder.save();
         } else if (paymentType === "recurring") {
           // Recurring payment processing
-          let customer;
-          try {
-            const paymentMethodObj = await stripe.paymentMethods.retrieve(
-              stripePaymentMethodId
+          // Resolve a valid Stripe customer for this card. Reuses the saved
+          // card's customer when it still exists, else creates a fresh one
+          // (tolerates a deleted/stale customer). paymentMethodType drives the
+          // subscription's allowed payment_method_types (card vs Link).
+          const { customer, paymentMethodType } =
+            await resolveCustomerForPaymentMethod(
+              stripe,
+              stripePaymentMethodId,
+              donorDetails
             );
-            if (paymentMethodObj.customer) {
-              console.log(
-                `Payment method ${stripePaymentMethodId} is already attached to customer ${paymentMethodObj.customer}`
-              );
-              customer = await stripe.customers.retrieve(
-                paymentMethodObj.customer
-              );
-              console.log(`Using existing customer ${customer.id}`);
-            } else {
-              customer = await stripe.customers.create({
-                email: donorDetails.email,
-                name: donorDetails.name,
-                phone: donorDetails.phone,
-              });
-              console.log(`Created new customer ${customer.id}`);
-              await stripe.paymentMethods.attach(stripePaymentMethodId, {
-                customer: customer.id,
-              });
-              console.log(
-                `Attached payment method ${stripePaymentMethodId} to customer ${customer.id}`
-              );
-            }
-
-            await stripe.customers.update(customer.id, {
-              invoice_settings: {
-                default_payment_method: stripePaymentMethodId,
-              },
-            });
-            console.log(
-              `Set payment method ${stripePaymentMethodId} as default for customer ${customer.id}`
-            );
-          } catch (stripeError) {
-            console.error("Error handling payment method:", stripeError);
-            if (
-              stripeError.code === "payment_method_in_use" ||
-              stripeError.message.includes("already been attached")
-            ) {
-              try {
-                console.log("Handling 'already attached' error");
-                const paymentMethodObj = await stripe.paymentMethods.retrieve(
-                  stripePaymentMethodId
-                );
-                if (paymentMethodObj.customer) {
-                  customer = await stripe.customers.retrieve(
-                    paymentMethodObj.customer
-                  );
-                  console.log(
-                    `Using existing customer ${customer.id} that payment method is attached to`
-                  );
-                } else {
-                  throw new Error(
-                    "Payment method is reported as already attached but no customer found"
-                  );
-                }
-              } catch (secondError) {
-                console.error("Error in special handling:", secondError);
-                throw secondError;
-              }
-            } else {
-              throw stripeError;
-            }
-          }
 
           let interval;
           switch (recurringDetails.frequency) {
@@ -908,22 +933,14 @@ exports.createOrder = async (req, res) => {
             ],
             payment_settings: {
               save_default_payment_method: "on_subscription",
-              payment_method_types: ["card"],
+              // Include the actual PM type (e.g. "link" for a saved Link card)
+              // so Stripe accepts it as the subscription's default payment method.
+              payment_method_types: Array.from(new Set(["card", paymentMethodType])),
             },
             default_payment_method: stripePaymentMethodId,
             expand: ["latest_invoice.payment_intent"],
             proration_behavior: "none",
           };
-
-          if (recurringDetails.endDate) {
-            const cancelAtTimestamp = Math.floor(
-              new Date(recurringDetails.endDate).getTime() / 1000
-            );
-            subscriptionData.cancel_at = cancelAtTimestamp;
-            console.log(
-              `Subscription will cancel at ${recurringDetails.endDate}`
-            );
-          }
 
           const subscription = await stripe.subscriptions.create({
             customer: customer.id,
@@ -943,20 +960,14 @@ exports.createOrder = async (req, res) => {
             ],
             payment_settings: {
               save_default_payment_method: "on_subscription",
-              payment_method_types: ["card"],
+              // Include the actual PM type (e.g. "link" for a saved Link card)
+              // so Stripe accepts it as the subscription's default payment method.
+              payment_method_types: Array.from(new Set(["card", paymentMethodType])),
             },
             default_payment_method: stripePaymentMethodId,
             expand: ["latest_invoice.payment_intent"],
             // Removed billing_cycle_anchor to allow immediate first payment
             proration_behavior: "none",
-            // Add metadata to track billing day
-            ...(recurringDetails.endDate
-              ? {
-                  cancel_at: Math.floor(
-                    new Date(recurringDetails.endDate).getTime() / 1000
-                  ),
-                }
-              : {}),
             metadata: {
               billingDay: billingDay.toString(),
               donationId: savedOrder.donationId,
@@ -974,6 +985,40 @@ exports.createOrder = async (req, res) => {
               subscription.latest_invoice?.payment_intent?.client_secret ||
               null,
           };
+
+          // Anchor the order to the subscription's ACTUAL billing dates as Stripe
+          // reports them — never the app server's clock. They can differ (e.g. a
+          // sandbox test clock), which otherwise leaves our startDate / next
+          // payment / cancel date out of sync with Stripe's real schedule.
+          const subStart = subscription.current_period_start
+            ? new Date(subscription.current_period_start * 1000)
+            : new Date();
+          savedOrder.recurringDetails.startDate = subStart;
+          if (subscription.current_period_end) {
+            savedOrder.recurringDetails.nextPaymentDate = clampNextPaymentDate(
+              new Date(subscription.current_period_end * 1000),
+              recurringDetails.endDate
+            );
+          }
+          // Schedule cancellation on the first billing boundary AFTER the end
+          // date, computed from the REAL anchor so it lands exactly on one of
+          // Stripe's billing dates (full final charge, no proration).
+          if (recurringDetails.endDate) {
+            try {
+              await stripe.subscriptions.update(subscription.id, {
+                cancel_at: cancelAtUnix(
+                  subStart,
+                  recurringDetails.frequency,
+                  recurringDetails.endDate
+                ),
+              });
+            } catch (cancelErr) {
+              console.error(
+                "Failed to schedule subscription cancellation:",
+                cancelErr.message
+              );
+            }
+          }
 
           if (subscription.status === "active") {
             savedOrder.paymentStatus = "active";
@@ -1021,20 +1066,20 @@ exports.createOrder = async (req, res) => {
                 },
               ];
 
-              // Set next payment date using billing anchor for monthly
-              if (interval === "month") {
-                savedOrder.recurringDetails.nextPaymentDate = new Date(
-                  calculateBillingAnchor(billingDay) * 1000
-                );
-              }
+              // (nextPaymentDate is set from the subscription's real
+              // current_period_end above — no app-clock billing anchor.)
 
-              // Capture Stripe's hosted receipt URL for the first charge.
+              // Capture Stripe's hosted receipt URL for the first charge —
+              // on the order (latest) and on this payment-history entry (trail).
               const recurringReceiptUrl = await fetchStripeReceiptUrl(
                 stripe,
                 paymentIntent
               );
-              if (recurringReceiptUrl)
+              if (recurringReceiptUrl) {
                 savedOrder.stripeReceiptUrl = recurringReceiptUrl;
+                savedOrder.recurringDetails.paymentHistory[0].receiptUrl =
+                  recurringReceiptUrl;
+              }
 
               try {
                 await sendReceiptEmail(savedOrder);
@@ -1068,19 +1113,19 @@ exports.createOrder = async (req, res) => {
                       },
                     ];
 
-                    if (interval === "month") {
-                      savedOrder.recurringDetails.nextPaymentDate = new Date(
-                        calculateBillingAnchor(billingDay) * 1000
-                      );
-                    }
+                    // (nextPaymentDate is set from current_period_end above.)
 
-                    // Capture Stripe's hosted receipt URL for the first charge.
+                    // Capture Stripe's hosted receipt URL for the first charge —
+                    // on the order (latest) and on the history entry (trail).
                     const confirmedReceiptUrl = await fetchStripeReceiptUrl(
                       stripe,
                       confirmedPI
                     );
-                    if (confirmedReceiptUrl)
+                    if (confirmedReceiptUrl) {
                       savedOrder.stripeReceiptUrl = confirmedReceiptUrl;
+                      savedOrder.recurringDetails.paymentHistory[0].receiptUrl =
+                        confirmedReceiptUrl;
+                    }
 
                     try {
                       await sendReceiptEmail(savedOrder);
@@ -1105,74 +1150,14 @@ exports.createOrder = async (req, res) => {
 
           await savedOrder.save();
         } else if (paymentType === "installments") {
-          // Installment processing
-          let customer;
-          try {
-            const paymentMethodObj = await stripe.paymentMethods.retrieve(
-              stripePaymentMethodId
-            );
-            if (paymentMethodObj.customer) {
-              console.log(
-                `Payment method ${stripePaymentMethodId} is already attached to customer ${paymentMethodObj.customer}`
-              );
-              customer = await stripe.customers.retrieve(
-                paymentMethodObj.customer
-              );
-              console.log(`Using existing customer ${customer.id}`);
-            } else {
-              customer = await stripe.customers.create({
-                email: donorDetails.email,
-                name: donorDetails.name,
-                phone: donorDetails.phone,
-              });
-              console.log(`Created new customer ${customer.id}`);
-              await stripe.paymentMethods.attach(stripePaymentMethodId, {
-                customer: customer.id,
-              });
-              console.log(
-                `Attached payment method ${stripePaymentMethodId} to customer ${customer.id}`
-              );
-            }
-
-            await stripe.customers.update(customer.id, {
-              invoice_settings: {
-                default_payment_method: stripePaymentMethodId,
-              },
-            });
-            console.log(
-              `Set payment method ${stripePaymentMethodId} as default for customer ${customer.id}`
-            );
-          } catch (stripeError) {
-            console.error("Error handling payment method:", stripeError);
-            if (
-              stripeError.code === "payment_method_in_use" ||
-              stripeError.message.includes("already been attached")
-            ) {
-              try {
-                console.log("Handling 'already attached' error");
-                const paymentMethodObj = await stripe.paymentMethods.retrieve(
-                  stripePaymentMethodId
-                );
-                if (paymentMethodObj.customer) {
-                  customer = await stripe.customers.retrieve(
-                    paymentMethodObj.customer
-                  );
-                  console.log(
-                    `Using existing customer ${customer.id} that payment method is attached to`
-                  );
-                } else {
-                  throw new Error(
-                    "Payment method is reported as already attached but no customer found"
-                  );
-                }
-              } catch (secondError) {
-                console.error("Error in special handling:", secondError);
-                throw secondError;
-              }
-            } else {
-              throw stripeError;
-            }
-          }
+          // Installment processing — resolve a valid customer (reuses the saved
+          // card's customer when present, else creates a fresh one; tolerates a
+          // deleted/stale customer rather than failing the donation).
+          const { customer } = await resolveCustomerForPaymentMethod(
+            stripe,
+            stripePaymentMethodId,
+            donorDetails
+          );
 
           const paymentIntent = await stripe.paymentIntents.create({
             amount: Math.round(installmentDetails.installmentAmount * 100),
@@ -1222,13 +1207,17 @@ exports.createOrder = async (req, res) => {
           }
 
           if (paymentIntent.status === "succeeded") {
-            // Capture Stripe's hosted receipt URL for the first installment.
+            // Capture Stripe's hosted receipt URL for the first installment —
+            // on the order (latest) and on this installment entry (trail).
             const installmentReceiptUrl = await fetchStripeReceiptUrl(
               stripe,
               paymentIntent
             );
-            if (installmentReceiptUrl)
+            if (installmentReceiptUrl) {
               savedOrder.stripeReceiptUrl = installmentReceiptUrl;
+              const hist = savedOrder.installmentDetails.installmentHistory;
+              if (hist.length) hist[hist.length - 1].receiptUrl = installmentReceiptUrl;
+            }
 
             try {
               await sendReceiptEmail(savedOrder);
@@ -1402,7 +1391,10 @@ exports.updateOrderStatus = async (req, res) => {
         order.recurringDetails = {
           status: "active", // Default status for new recurring donations
           startDate: new Date(),
-          nextPaymentDate: calculateNextPaymentDate(new Date(), order.recurringDetails?.frequency || 'monthly')
+          nextPaymentDate: clampNextPaymentDate(
+            calculateNextPaymentDate(new Date(), order.recurringDetails?.frequency || 'monthly'),
+            order.recurringDetails?.endDate
+          )
         };
       }
 
@@ -2076,7 +2068,9 @@ exports.processNextInstallment = async (orderId) => {
       payment_method: order.transactionDetails.stripePaymentMethodId,
       off_session: true,
       confirm: true,
-      payment_method_types: ["card"],
+      // Let Stripe accept the PM's own type (card or Link), no redirects —
+      // matches how the first installment is charged.
+      automatic_payment_methods: { enabled: true, allow_redirects: "never" },
       description: `Installment ${installmentNumber}/${order.installmentDetails.numberOfInstallments} for Donation ${order.donationId}`,
       metadata: {
         donationId: order.donationId,
@@ -2111,13 +2105,18 @@ exports.processNextInstallment = async (orderId) => {
       transactionId: paymentIntent.id,
     });
 
-    // Keep the order's latest Stripe hosted receipt URL up to date.
+    // Keep the order's latest Stripe hosted receipt URL up to date, and record
+    // it on this installment's history entry so the trail keeps every receipt.
     if (paymentIntent.status === "succeeded") {
       const installmentReceiptUrl = await fetchStripeReceiptUrl(
         stripe,
         paymentIntent
       );
-      if (installmentReceiptUrl) order.stripeReceiptUrl = installmentReceiptUrl;
+      if (installmentReceiptUrl) {
+        order.stripeReceiptUrl = installmentReceiptUrl;
+        const hist = order.installmentDetails.installmentHistory;
+        if (hist.length) hist[hist.length - 1].receiptUrl = installmentReceiptUrl;
+      }
     }
 
     await order.save();

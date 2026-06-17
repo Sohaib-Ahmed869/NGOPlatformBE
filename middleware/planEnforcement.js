@@ -1,5 +1,4 @@
-const planLimits = require("../config/planLimits");
-const User = require("../models/user");
+const { getEffectiveLimits } = require("../utils/effectiveLimits");
 
 const planHierarchy = { basic: 1, professional: 2, enterprise: 3 };
 
@@ -28,44 +27,37 @@ const requirePlan = (minPlan) => (req, res, next) => {
 };
 
 /**
- * Checks if org has hit its limit for a given resource.
- * Usage: checkLimit('campaigns') or checkLimit('volunteers')
+ * Blocks creation when the org has reached its EFFECTIVE limit (dynamic plan
+ * limits + per-tenant override) for a resource. A limit of null / Infinity /
+ * undefined means unlimited.
+ *   checkLimit('campaigns')  → counts active Program documents
+ *   checkLimit('volunteers') → counts Join (volunteer application) documents
  */
 const checkLimit = (resource) => async (req, res, next) => {
   if (!req.organisation) {
     return res.status(400).json({ error: "No organisation context" });
   }
 
-  const limits = planLimits[req.organisation.plan];
-  if (!limits) {
-    return res.status(500).json({ error: "Unknown plan" });
-  }
-
-  const limit = limits[resource];
-  if (limit === undefined) {
-    return next(); // No limit defined for this resource
-  }
-
-  if (limit === Infinity) {
-    return next();
-  }
-
   try {
-    let currentCount = 0;
+    const limits = await getEffectiveLimits(req.organisation);
+    const limit = limits[resource];
+
+    // Unlimited / undefined / non-finite → allow.
+    if (limit === undefined || limit === null || !Number.isFinite(limit)) {
+      return next();
+    }
+
     const orgId = req.organisation._id;
+    let currentCount = 0;
 
     if (resource === "campaigns") {
-      // Lazy-require to avoid circular dependency (Program model created in Phase 3)
       const Program = require("../models/program");
-      currentCount = await Program.countDocuments({
-        organisationId: orgId,
-        status: "active",
-      });
+      currentCount = await Program.countDocuments({ organisationId: orgId, status: "active" });
     } else if (resource === "volunteers") {
-      currentCount = await User.countDocuments({
-        organisationId: orgId,
-        role: "donor",
-      });
+      const Join = require("../models/join");
+      currentCount = await Join.countDocuments({ organisationId: orgId });
+    } else {
+      return next(); // no known collection for this resource
     }
 
     if (currentCount >= limit) {
@@ -84,4 +76,25 @@ const checkLimit = (resource) => async (req, res, next) => {
   }
 };
 
-module.exports = { requirePlan, checkLimit };
+/**
+ * Blocks a request when a boolean feature flag is OFF in the org's EFFECTIVE
+ * limits (dynamic plan + override). Usage: requireFeature('volunteerEnabled')
+ */
+const requireFeature = (flag, label) => async (req, res, next) => {
+  if (!req.organisation) {
+    return res.status(400).json({ error: "No organisation context" });
+  }
+  try {
+    const limits = await getEffectiveLimits(req.organisation);
+    if (limits[flag]) return next();
+    return res.status(403).json({
+      error: `${label || flag} is not available on your ${req.organisation.plan} plan`,
+      upgradeRequired: true,
+    });
+  } catch (error) {
+    console.error("Feature gate error:", error);
+    res.status(500).json({ error: "Server error checking plan features" });
+  }
+};
+
+module.exports = { requirePlan, checkLimit, requireFeature };

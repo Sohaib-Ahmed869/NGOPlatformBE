@@ -42,10 +42,22 @@ const pageSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    // Per-template structured content (see config/pageTemplates.js).
+    // Per-template structured content (see config/pageTemplates.js). This is the
+    // PUBLISHED copy — what the public site renders.
     content: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
+    },
+    // Unpublished working copy. The admin editor edits this; "Publish" copies it
+    // into `content`. Null means there's no pending draft (edit starts from the
+    // published content).
+    draftContent: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    publishedAt: {
+      type: Date,
+      default: null,
     },
     seo: {
       title: { type: String, default: "" },

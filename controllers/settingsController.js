@@ -1,4 +1,5 @@
 const Organisation = require("../models/organisation");
+const { applyVerticalDefaults } = require("../services/pageService");
 
 // Compose a single-line address from structured parts (kept for legacy consumers).
 function composeAddress(a = {}) {
@@ -54,7 +55,7 @@ exports.getSettings = async (req, res) => {
     }
 
     const org = await Organisation.findById(orgId).select(
-      "name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences"
+      "name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences isMuslimCharity"
     );
     if (!org) {
       return res.status(404).json({ error: "Organisation not found" });
@@ -65,6 +66,7 @@ exports.getSettings = async (req, res) => {
     res.json({
       name: org.name,
       slug: org.slug,
+      isMuslimCharity: !!org.isMuslimCharity,
       eventAudiences: (org.eventAudiences || []).map((x) => ({
         key: x.key,
         label: x.label,
@@ -107,11 +109,23 @@ exports.updateSettings = async (req, res) => {
       return res.status(400).json({ error: "Organisation context required" });
     }
 
-    const { contactEmail, contactPhone, address, addressDetails, socialLinks, website, bankDetails, eventAudiences } = req.body;
+    const { contactEmail, contactPhone, address, addressDetails, socialLinks, website, bankDetails, eventAudiences, isMuslimCharity } = req.body;
 
     const updateFields = {};
     if (contactEmail !== undefined) updateFields.contactEmail = contactEmail.trim();
     if (eventAudiences !== undefined) updateFields.eventAudiences = normalizeAudiences(eventAudiences);
+
+    // Charity-type flag. Only re-apply the Islamic page defaults when it actually
+    // changes, so a manual page override isn't clobbered on every settings save.
+    let muslimCharityChanged = false;
+    if (isMuslimCharity !== undefined) {
+      const current = await Organisation.findById(orgId).select("isMuslimCharity").lean();
+      const next = !!isMuslimCharity;
+      if (!!current?.isMuslimCharity !== next) {
+        updateFields.isMuslimCharity = next;
+        muslimCharityChanged = true;
+      }
+    }
     if (contactPhone !== undefined) updateFields.contactPhone = contactPhone.trim();
     if (website !== undefined) updateFields.website = website.trim();
 
@@ -149,7 +163,16 @@ exports.updateSettings = async (req, res) => {
       orgId,
       { $set: updateFields },
       { new: true }
-    ).select("name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences");
+    ).select("name slug contactEmail contactPhone address addressDetails socialLinks website bankDetails eventAudiences isMuslimCharity");
+
+    // When the charity type flips, turn the Islamic giving pages on/off to match.
+    if (muslimCharityChanged) {
+      try {
+        await applyVerticalDefaults(orgId);
+      } catch (e) {
+        console.error("Failed to apply vertical page defaults:", e.message);
+      }
+    }
 
     res.json({
       message: "Settings updated successfully",
@@ -162,6 +185,7 @@ exports.updateSettings = async (req, res) => {
         website: org.website,
         bankDetails: org.bankDetails,
         eventAudiences: org.eventAudiences || [],
+        isMuslimCharity: !!org.isMuslimCharity,
       },
     });
   } catch (error) {

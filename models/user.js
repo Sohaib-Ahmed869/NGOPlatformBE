@@ -65,6 +65,9 @@ const userSchema = new mongoose.Schema(
 
     twoFactorEnabled: { type: Boolean, default: false },
     twoFactorSecret: String,
+    // Admin / super-admin login lockout (see controllers/userController.loginAdmin)
+    failedLoginAttempts: { type: Number, default: 0 },
+    lockedUntil: { type: Date, default: null },
     passwordLastChanged: { type: Date, default: Date.now },
     tokenVersion: { type: Number, default: 0 },
     resetCode: String,

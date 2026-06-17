@@ -44,9 +44,10 @@ const organisationSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
+    // Plan code — references models/plan.js `code`. Free-form (not an enum) so
+    // operators can create custom dynamic plans beyond the original 3 tiers.
     plan: {
       type: String,
-      enum: ["basic", "professional", "enterprise"],
       default: "basic",
     },
     billingCycle: {
@@ -103,6 +104,12 @@ const organisationSchema = new mongoose.Schema(
       },
       tagline: { type: String, default: "" },
     },
+    // Per-tenant DESIGN system (fonts + shape + — later — layout variants).
+    // `design` is the PUBLISHED copy the public site reads; `draftDesign` is the
+    // admin work-in-progress. Empty = the baseline (current) look. Shape is free-
+    // form (Mixed) so partial updates merge cleanly over the FE baseline.
+    design: { type: mongoose.Schema.Types.Mixed, default: {} },
+    draftDesign: { type: mongoose.Schema.Types.Mixed, default: null },
     // Organisation contact & details (managed by org admin)
     contactEmail: { type: String, default: "" },
     contactPhone: { type: String, default: "" },
@@ -159,24 +166,6 @@ const organisationSchema = new mongoose.Schema(
       accountLabel: { type: String, default: "" },
       lastVerifiedAt: { type: Date },
     },
-    // Per-tenant Mailchimp (the tenant's OWN Mailchimp account) for newsletter
-    // campaign delivery. API key is AES-256-GCM encrypted (utils/crypto.js) and
-    // never returned to any client.
-    mailchimp: {
-      connected: { type: Boolean, default: false },
-      apiKeyEnc: { type: String, default: "" },
-      serverPrefix: { type: String, default: "" }, // datacenter, e.g. "us21"
-      audienceId: { type: String, default: "" },
-      audienceName: { type: String, default: "" },
-      fromName: { type: String, default: "" },
-      fromEmail: { type: String, default: "" }, // verified sender in their account
-      accountLabel: { type: String, default: "" },
-      lastVerifiedAt: { type: Date },
-      // Two-way sync: Mailchimp posts subscribe/unsubscribe/clean events to our
-      // webhook (secret guards it); webhookId is the registered hook.
-      webhookSecret: { type: String, default: "" },
-      webhookId: { type: String, default: "" },
-    },
     // Per-tenant transactional email (the tenant's OWN SMTP account) for
     // receipts, welcome and notification emails. The SMTP password is stored
     // AES-256-GCM encrypted (utils/crypto.js) and never returned to any client.
@@ -199,9 +188,35 @@ const organisationSchema = new mongoose.Schema(
     // Audience segments for events (label + colour). Drives the public Events
     // calendar's audience filter, colour coding and legend. Empty = feature off.
     eventAudiences: { type: [eventAudienceSchema], default: [] },
+    // Whether this tenant is a Muslim charity. Drives the Islamic giving pages
+    // (Giving hub, Zakat calculator, Ramadan) — seeded enabled only for Muslim
+    // charities — and the default donation types. See pageService.applyVerticalDefaults.
+    isMuslimCharity: {
+      type: Boolean,
+      default: false,
+    },
     isActive: {
       type: Boolean,
       default: false,
+    },
+    // ── Platform-operator lifecycle controls (managed from the SuperAdmin portal) ──
+    // Free (comped) subscription — skips platform billing.
+    isComp: { type: Boolean, default: false },
+    compReason: { type: String, default: "" },
+    // Trial window (informational + future gating).
+    trialEndsAt: { type: Date, default: null },
+    pausedUntil: { type: Date, default: null },
+    // Per-tenant override of plan limits/pricing. `limits` values: a number, or
+    // null = unlimited. Empty/absent override = the plan's own limits apply.
+    override: {
+      limits: { type: mongoose.Schema.Types.Mixed, default: null },
+      pricing: {
+        monthly: { type: Number, default: null },
+        annual: { type: Number, default: null },
+      },
+      reason: { type: String, default: "" },
+      setBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      setAt: { type: Date, default: null },
     },
   },
   {

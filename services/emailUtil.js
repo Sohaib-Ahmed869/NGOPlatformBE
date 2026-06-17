@@ -25,7 +25,9 @@ const sendEmail = async (
       from: `"${fromName}" <${fromEmail}>`,
       to: recipientEmail,
       subject: emailSubject,
-      text: String(emailBody || "").replace(/<[^>]*>/g, ""), // plain-text fallback
+      // Prefer a caller-supplied plain-text part (better deliverability than an
+      // auto-stripped one); otherwise fall back to stripping the HTML.
+      text: options.text || String(emailBody || "").replace(/<[^>]*>/g, ""),
       html: `
         <div>
           ${emailBody}
@@ -34,6 +36,8 @@ const sendEmail = async (
       attachments,
     };
     if (replyTo) mailOptions.replyTo = replyTo;
+    // Extra headers (e.g. List-Unsubscribe / List-Unsubscribe-Post for campaigns).
+    if (options.headers) mailOptions.headers = options.headers;
 
     const info = await transport.sendMail(mailOptions);
     console.log("Email sent: ", info.response);

@@ -20,4 +20,10 @@ router.delete("/asset/:type", protect, admin, brandingController.deleteAsset);
 router.post("/request", protect, admin, brandingController.submitRequest);
 router.get("/requests", protect, admin, brandingController.getMyRequests);
 
+// Design system (fonts + shape + layout) — draft/publish, like the page CMS.
+router.get("/design", protect, admin, brandingController.getDesign);
+router.put("/design", protect, admin, brandingController.updateDesign);
+router.post("/design/publish", protect, admin, brandingController.publishDesign);
+router.post("/design/discard", protect, admin, brandingController.discardDesign);
+
 module.exports = router;

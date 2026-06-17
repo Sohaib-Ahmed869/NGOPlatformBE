@@ -1,5 +1,11 @@
 const Organisation = require("../models/organisation");
 const { brandingUpload, deleteS3Object } = require("../config/s3");
+const { sanitizeDesign, DEFAULT_DESIGN } = require("../config/designTokens");
+
+// Published design for an org doc (falls back to the baseline when unset).
+const publishedDesign = (org) =>
+  org?.design && Object.keys(org.design).length ? org.design : DEFAULT_DESIGN;
+const designsDiffer = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
 
 /**
  * GET /api/branding
@@ -388,5 +394,87 @@ exports.getMyRequests = async (req, res) => {
   } catch (error) {
     console.error("Get branding requests error:", error);
     res.status(500).json({ error: "Failed to fetch branding requests" });
+  }
+};
+
+/* ── Design system (fonts + shape + — later — layout variants) ──────────────
+ * Draft → Publish, mirroring the page CMS. The editor works on `draftDesign`;
+ * the public site reads the published `design`.
+ */
+
+// GET /api/branding/design — the editable (draft, falling back to published) design.
+exports.getDesign = async (req, res) => {
+  try {
+    const orgId = req.organisation?._id;
+    if (!orgId) return res.status(400).json({ error: "Organisation context required" });
+    const org = await Organisation.findById(orgId).select("design draftDesign");
+    const published = publishedDesign(org);
+    const draft = org?.draftDesign != null ? org.draftDesign : published;
+    res.json({
+      design: draft,
+      published,
+      hasUnpublishedChanges: org?.draftDesign != null && designsDiffer(org.draftDesign, published),
+    });
+  } catch (error) {
+    console.error("Get design error:", error);
+    res.status(500).json({ error: "Failed to fetch design" });
+  }
+};
+
+// PUT /api/branding/design — save the DRAFT design (does not change the live site).
+exports.updateDesign = async (req, res) => {
+  try {
+    const orgId = req.organisation?._id;
+    if (!orgId) return res.status(400).json({ error: "Organisation context required" });
+    const draft = sanitizeDesign(req.body?.design || req.body);
+    const org = await Organisation.findByIdAndUpdate(orgId, { $set: { draftDesign: draft } }, { new: true }).select("design draftDesign");
+    res.json({ message: "Design draft saved", design: org.draftDesign, hasUnpublishedChanges: designsDiffer(org.draftDesign, publishedDesign(org)) });
+  } catch (error) {
+    console.error("Update design error:", error);
+    res.status(500).json({ error: "Failed to save design" });
+  }
+};
+
+// POST /api/branding/design/publish — make the draft live.
+exports.publishDesign = async (req, res) => {
+  try {
+    const orgId = req.organisation?._id;
+    if (!orgId) return res.status(400).json({ error: "Organisation context required" });
+    const org = await Organisation.findById(orgId).select("design draftDesign branding");
+    if (!org) return res.status(404).json({ error: "Organisation not found" });
+    if (org.draftDesign == null) {
+      return res.json({ message: "Nothing to publish", design: publishedDesign(org), hasUnpublishedChanges: false });
+    }
+    org.design = sanitizeDesign(org.draftDesign);
+    org.draftDesign = null;
+    org.markModified("design");
+    org.markModified("draftDesign");
+    // A template can bundle a colour palette — apply it to branding (the colour
+    // home the public site reads) on publish.
+    if (org.design.colors && org.branding) {
+      org.branding.primaryColor = org.design.colors.primary;
+      org.branding.accentColor = org.design.colors.accent;
+      org.branding.backgroundColor = org.design.colors.bg;
+      if (org.design.colorThemeId) org.branding.theme = org.design.colorThemeId;
+      org.markModified("branding");
+    }
+    await org.save();
+    res.json({ message: "Design published", design: org.design, hasUnpublishedChanges: false });
+  } catch (error) {
+    console.error("Publish design error:", error);
+    res.status(500).json({ error: "Failed to publish design" });
+  }
+};
+
+// POST /api/branding/design/discard — drop the draft, revert to the live design.
+exports.discardDesign = async (req, res) => {
+  try {
+    const orgId = req.organisation?._id;
+    if (!orgId) return res.status(400).json({ error: "Organisation context required" });
+    const org = await Organisation.findByIdAndUpdate(orgId, { $set: { draftDesign: null } }, { new: true }).select("design");
+    res.json({ message: "Draft discarded", design: publishedDesign(org), hasUnpublishedChanges: false });
+  } catch (error) {
+    console.error("Discard design error:", error);
+    res.status(500).json({ error: "Failed to discard draft" });
   }
 };

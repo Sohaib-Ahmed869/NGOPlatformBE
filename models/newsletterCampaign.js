@@ -36,9 +36,8 @@ const newsletterCampaignSchema = new mongoose.Schema(
     scheduledAt: { type: Date, default: null },
     sentAt: { type: Date, default: null },
 
-    // How it was delivered. "mailchimp" campaigns also store the Mailchimp id.
-    provider: { type: String, enum: ["smtp", "mailchimp"], default: "smtp" },
-    mailchimpCampaignId: { type: String, default: "" },
+    // How it was delivered (campaigns send over the tenant's/platform SMTP).
+    provider: { type: String, enum: ["smtp"], default: "smtp" },
     error: { type: String, default: "" }, // last failure reason (for the admin)
 
     // Tenant front-end origin captured at send/schedule time, used to build the
