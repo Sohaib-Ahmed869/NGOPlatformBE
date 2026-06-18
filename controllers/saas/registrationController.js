@@ -65,7 +65,9 @@ exports.register = async (req, res) => {
     const { getThemeColors } = require("../../config/themePresets");
     const selectedTheme = getThemeColors(theme);
 
-    // Create Organisation (inactive until payment completes)
+    // Create Organisation (inactive until payment completes). The admin
+    // credentials are stashed in `pendingAdmin` so the webhook can materialise
+    // the admin User once the first invoice is paid (in-house checkout).
     const organisation = await Organisation.create({
       name: orgName,
       slug,
@@ -75,6 +77,11 @@ exports.register = async (req, res) => {
       subscriptionStatus: "pending",
       isActive: false,
       isMuslimCharity: !!isMuslimCharity,
+      pendingAdmin: {
+        name: adminName,
+        email: adminEmail.toLowerCase(),
+        passwordHash: hashedPassword,
+      },
       branding: {
         theme: theme || "default",
         primaryColor: selectedTheme.primaryColor,
@@ -118,8 +125,11 @@ exports.register = async (req, res) => {
       console.error("Failed to seed donation types for new org:", e.message);
     }
 
-    // Look up the Stripe price ID
-    const priceId = stripePrices[plan]?.[billingCycle];
+    // Resolve the Stripe price ID from the DYNAMIC plan (SuperAdmin-managed),
+    // falling back to the static config for legacy/seeded plans.
+    const Plan = require("../../models/plan");
+    const planDoc = await Plan.findOne({ code: plan, isActive: true });
+    const priceId = planDoc?.stripePriceIds?.[billingCycle] || stripePrices[plan]?.[billingCycle];
     if (!priceId) {
       return res.status(400).json({ error: "Invalid plan or billing cycle" });
     }
@@ -141,26 +151,38 @@ exports.register = async (req, res) => {
       }
     }
 
-    // Create Stripe Checkout Session
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
+    // Create a Subscription with an INCOMPLETE first invoice so we can collect
+    // the card in-house (Stripe Elements) — returns the invoice PaymentIntent's
+    // client secret instead of redirecting to hosted Checkout.
+    const subscription = await stripe.subscriptions.create({
       customer: customer.id,
-      line_items: [{ price: priceId, quantity: 1 }],
-      ...(discounts ? { discounts } : {}),
-      success_url: `${process.env.CLIENT_URL}/register/success?session_id={CHECKOUT_SESSION_ID}&slug=${slug}`,
-      cancel_url: `${process.env.CLIENT_URL}/plans`,
+      items: [{ price: priceId }],
+      ...(discounts ? { coupon: discounts[0].coupon } : {}),
+      payment_behavior: "default_incomplete",
+      payment_settings: { save_default_payment_method: "on_subscription" },
+      expand: ["latest_invoice.payment_intent"],
       metadata: {
         type: "saas_subscription",
         orgId: organisation._id.toString(),
         plan,
         billingCycle,
-        adminName,
-        adminEmail,
-        hashedPassword,
       },
     });
 
-    res.json({ checkoutUrl: session.url });
+    organisation.stripeSubscriptionId = subscription.id;
+    await organisation.save();
+
+    const clientSecret = subscription.latest_invoice?.payment_intent?.client_secret;
+    if (!clientSecret) {
+      return res.status(500).json({ error: "Could not initialise payment. Please try again." });
+    }
+
+    res.json({
+      clientSecret,
+      subscriptionId: subscription.id,
+      slug,
+      orgId: organisation._id.toString(),
+    });
   } catch (error) {
     console.error("Registration error:", error);
     res.status(500).json({ error: "Registration failed. Please try again." });
@@ -188,6 +210,28 @@ exports.checkSlug = async (req, res) => {
     res.json({ available: !existing });
   } catch (error) {
     console.error("Check slug error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+/**
+ * GET /api/saas/register/check-email?email=xxx
+ * Check if an admin email is already in use (an account exists).
+ */
+exports.checkEmail = async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+    const normalized = String(email).trim().toLowerCase();
+    if (!/\S+@\S+\.\S+/.test(normalized)) {
+      return res.status(400).json({ error: "Invalid email" });
+    }
+    const existing = await User.findOne({ email: normalized });
+    res.json({ available: !existing });
+  } catch (error) {
+    console.error("Check email error:", error);
     res.status(500).json({ error: "Server error" });
   }
 };
@@ -275,4 +319,23 @@ exports.getBySlug = async (req, res) => {
 exports.getPlans = async (req, res) => {
   const planLimits = require("../../config/planLimits");
   res.json(planLimits);
+};
+
+/**
+ * GET /api/saas/plans/public
+ * Public list of sellable plans (SuperAdmin-managed) for the pricing /
+ * registration pages — safe projection (no Stripe IDs).
+ */
+exports.getPublicPlans = async (req, res) => {
+  try {
+    const Plan = require("../../models/plan");
+    const plans = await Plan.find({ isActive: true, isPublic: true })
+      .sort({ sortOrder: 1, "price.monthly": 1 })
+      .select("code name description currency price features color limits sortOrder")
+      .lean();
+    res.json(plans);
+  } catch (err) {
+    console.error("getPublicPlans error:", err);
+    res.status(500).json({ error: "Failed to load plans" });
+  }
 };

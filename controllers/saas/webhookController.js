@@ -109,16 +109,86 @@ async function upsertInvoice(invoice, organisation, status) {
 }
 
 /**
- * Handle invoice.paid — mirror the paid invoice locally and ensure the org reads
- * as active (self-heals a missed subscription.updated).
+ * Activate an org after its first successful subscription payment: create the
+ * admin User from `pendingAdmin` (if not already), flip the org active, and send
+ * the welcome email. Idempotent — safe to call from invoice.paid AND
+ * subscription.updated (whichever Stripe fires first).
+ */
+async function activateOrgWithAdmin(organisation, { subscriptionId, customerId } = {}) {
+  const setActive = () => {
+    organisation.isActive = true;
+    organisation.subscriptionStatus = "active";
+    if (subscriptionId) organisation.stripeSubscriptionId = subscriptionId;
+    if (customerId) organisation.stripeCustomerId = customerId;
+  };
+
+  // Already has an admin → just ensure the active flags are set.
+  if (organisation.adminUserId) {
+    setActive();
+    await organisation.save();
+    return;
+  }
+
+  const pending = organisation.pendingAdmin || {};
+  if (!pending.email || !pending.passwordHash) {
+    setActive();
+    await organisation.save();
+    return;
+  }
+
+  // Materialise the admin user (guard against a race / event re-run).
+  let adminUser = await User.findOne({ email: pending.email.toLowerCase() });
+  if (!adminUser) {
+    adminUser = await User.create({
+      name: pending.name,
+      email: pending.email.toLowerCase(),
+      password: pending.passwordHash,
+      role: "admin",
+      organisationId: organisation._id,
+    });
+  }
+
+  setActive();
+  organisation.adminUserId = adminUser._id;
+  organisation.pendingAdmin = undefined;
+  await organisation.save();
+
+  const subdomainUrl = process.env.CLIENT_URL
+    ? `${organisation.slug}.${process.env.CLIENT_URL.replace(/^https?:\/\//, "")}`
+    : `${organisation.slug}.${process.env.CORS_DOMAIN || "localhost"}`;
+  const emailBody = `
+    <h2>Welcome to the Platform, ${pending.name}!</h2>
+    <p>Your organisation <strong>${organisation.name}</strong> has been set up successfully.</p>
+    <p>Your portal is ready at: <a href="http://${subdomainUrl}">http://${subdomainUrl}</a></p>
+    <h3>Your Admin Account</h3>
+    <ul>
+      <li><strong>Email:</strong> ${pending.email}</li>
+      <li><strong>Plan:</strong> ${organisation.plan}</li>
+      <li><strong>Billing:</strong> ${organisation.billingCycle}</li>
+    </ul>
+    <p>Log in at <a href="http://${subdomainUrl}/admin/login">http://${subdomainUrl}/admin/login</a> to start setting up your portal.</p>
+  `;
+  try {
+    await sendEmail(pending.email, emailBody, `Welcome to ${organisation.name} - Your Portal is Ready!`);
+  } catch (e) {
+    console.error("Welcome email failed:", e.message);
+  }
+
+  console.log(`Organisation ${organisation.slug} activated (in-house checkout)`);
+}
+
+/**
+ * Handle invoice.paid / invoice.payment_succeeded — mirror the invoice, and on the
+ * FIRST successful payment create the admin + activate the org (in-house checkout).
  */
 async function handleInvoicePaid(invoice) {
   const organisation = await findOrgForInvoice(invoice);
   await upsertInvoice(invoice, organisation, "paid");
-  if (organisation && organisation.subscriptionStatus === "past_due") {
-    organisation.subscriptionStatus = "active";
-    organisation.isActive = true;
-    await organisation.save();
+  if (organisation && (!organisation.isActive || organisation.subscriptionStatus !== "active")) {
+    await activateOrgWithAdmin(organisation, {
+      subscriptionId: invoice.subscription || organisation.stripeSubscriptionId,
+      customerId: invoice.customer || organisation.stripeCustomerId,
+    });
   }
   console.log(`Invoice ${invoice.id} mirrored (paid) for ${organisation?.slug || "unknown org"}`);
 }
@@ -211,6 +281,15 @@ async function handleSubscriptionUpdated(subscription) {
   };
 
   const newStatus = statusMap[subscription.status] || "pending";
+
+  // First time the subscription becomes active → create admin + activate (the
+  // in-house checkout's PaymentIntent succeeding fires this and/or invoice.paid).
+  if (newStatus === "active" && !organisation.adminUserId) {
+    await activateOrgWithAdmin(organisation, { subscriptionId: subscription.id, customerId: subscription.customer });
+    console.log(`Organisation ${organisation.slug} activated via subscription.updated`);
+    return;
+  }
+
   organisation.subscriptionStatus = newStatus;
   organisation.isActive = newStatus === "active";
   await organisation.save();

@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const SupportTicket = require("../models/supportTicket");
 const Organisation = require("../models/organisation");
 const { emitToOrg, emitToSuperAdmins } = require("../services/socket");
@@ -20,6 +21,51 @@ function userDisplayName(u) {
 // Map an uploaded file (multer-s3) to a ticket attachment subdoc.
 function fileToAttachment(file) {
   return { key: file.key, name: file.originalname, size: file.size, url: file.location };
+}
+
+// Classify who a ticket is from, for the platform operator console:
+//   "admin"    → the tenant's own NGO staff (admin/superadmin)
+//   "customer" → a donor / end-user (customer) of the tenant
+//   "public"   → an anonymous public-form submission (no signed-in user)
+// Derived from the requester's actual role so it's accurate regardless of which
+// endpoint they happen to hit (e.g. a logged-in donor using the public form is
+// still a "customer", not "public").
+function reporterKind(user) {
+  if (!user) return "public";
+  return ["admin", "superadmin"].includes(user.role) ? "admin" : "customer";
+}
+
+// Minimal HTML escaping for user-supplied text dropped into an email body.
+function escapeHtml(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// The tenant's own front-end origin (where the public feedback page lives). The
+// admin resolving the ticket is on that origin, so its Origin header is the
+// most reliable base; fall back to the org website / a configured URL.
+function tenantBaseUrl(req) {
+  return req.headers?.origin || req.organisation?.website || process.env.FRONTEND_URL || "";
+}
+
+// Email the reporter a one-time "How did we do?" CSAT link, sent through the
+// tenant's own email identity. Fire-and-forget — never blocks the response.
+async function sendCsatEmail(ticket, link) {
+  const name = ticket.reporter?.name || "there";
+  const safeSummary = escapeHtml(ticket.summary);
+  const html = `
+    <p>Hi ${escapeHtml(name)},</p>
+    <p>Your support request <strong>#${ticket.ticketNumber}</strong> — “${safeSummary}” — has been resolved.</p>
+    <p>We'd love to know how we did. It only takes a few seconds:</p>
+    <p style="margin:24px 0">
+      <a href="${link}" style="background:#10b981;color:#ffffff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">Rate your support experience</a>
+    </p>
+    <p style="color:#888;font-size:12px">Or paste this link into your browser:<br>${link}</p>
+  `;
+  const text = `Hi ${name},\n\nYour support request #${ticket.ticketNumber} ("${ticket.summary}") has been resolved.\n\nWe'd love your feedback — rate your support experience here:\n${link}\n`;
+  return sendEmail(ticket.reporter.email, html, `How did we do? [#${ticket.ticketNumber}] ${ticket.summary}`, [], {
+    organisationId: ticket.organisationId,
+    text,
+  });
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -96,7 +142,7 @@ exports.createTicket = async (req, res) => {
     const ticket = await SupportTicket.create({
       organisationId: orgId(req),
       ticketNumber: count + 1,
-      reporter: { userId: req.user._id, name: userDisplayName(req.user), email: req.user.email || "", isExternal: false },
+      reporter: { userId: req.user._id, name: userDisplayName(req.user), email: req.user.email || "", isExternal: false, kind: reporterKind(req.user) },
       summary,
       description: description || "",
       priority: priority || "medium",
@@ -159,16 +205,30 @@ exports.updateStatus = async (req, res) => {
     const ticket = await SupportTicket.findOne({ _id: req.params.id, organisationId: orgId(req) });
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
     ticket.status = status;
+    let csatLink = null;
     if (status === "solved" || status === "declined") {
       ticket.resolution = {
         notes: resolutionNotes || ticket.resolution?.notes || "",
         resolvedBy: req.user._id,
         resolvedAt: new Date(),
       };
+      // On first resolution, mint a one-time CSAT token and queue the "rate us"
+      // email — but only once (requestedAt guard), only if we have a reporter
+      // email and a usable front-end base, and only if they haven't already rated.
+      const base = tenantBaseUrl(req);
+      if (ticket.reporter?.email && base && !ticket.satisfactionRequestedAt && ticket.satisfactionRating == null) {
+        ticket.satisfactionToken = crypto.randomBytes(24).toString("hex");
+        ticket.satisfactionRequestedAt = new Date();
+        csatLink = `${base.replace(/\/$/, "")}/support/feedback/${ticket._id}?token=${ticket.satisfactionToken}`;
+      }
     }
     await ticket.save();
     emitToOrg(orgId(req), "ticket:update", { id: ticket._id });
     emitToSuperAdmins("ticket:update", { id: ticket._id, organisationId: orgId(req) });
+    // Fire-and-forget: a failed CSAT email must never fail the status change.
+    if (csatLink) {
+      sendCsatEmail(ticket, csatLink).catch((e) => console.error("CSAT email error:", e?.message || e));
+    }
     res.json({ ticket });
   } catch (err) {
     console.error("Update status error:", err);
@@ -289,7 +349,7 @@ exports.createMyTicket = async (req, res) => {
     const ticket = await SupportTicket.create({
       organisationId: orgId(req),
       ticketNumber: count + 1,
-      reporter: { userId: req.user._id, name: userDisplayName(req.user), email: req.user.email || "", isExternal: false },
+      reporter: { userId: req.user._id, name: userDisplayName(req.user), email: req.user.email || "", isExternal: false, kind: reporterKind(req.user) },
       summary,
       description: description || "",
       category: category || "general",
@@ -324,7 +384,12 @@ exports.addMyMessage = async (req, res) => {
     const ticket = await SupportTicket.findOne({ ...myTicketMatch(req), _id: req.params.id });
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
     // Claim the ticket to this account on first reply (public-form tickets have no userId yet).
-    if (!ticket.reporter.userId) ticket.reporter.userId = req.user._id;
+    // Once claimed it's no longer anonymous — reclassify a "public" ticket by the
+    // claiming account's role so the operator console reflects the real source.
+    if (!ticket.reporter.userId) {
+      ticket.reporter.userId = req.user._id;
+      if (!ticket.reporter.kind || ticket.reporter.kind === "public") ticket.reporter.kind = reporterKind(req.user);
+    }
     ticket.comments.push({ message, createdBy: req.user._id, authorName: userDisplayName(req.user), isInternal: false });
     if (["solved", "declined"].includes(ticket.status)) ticket.status = "in_progress"; // a reply re-opens it
     await ticket.save();
@@ -335,6 +400,31 @@ exports.addMyMessage = async (req, res) => {
   } catch (err) {
     console.error("Add my message error:", err);
     res.status(500).json({ error: "Failed to send message" });
+  }
+};
+
+// Logged-in customer rates their own ticket (no token needed — ownership is
+// proven by myTicketMatch). Powers the in-portal "Rate your support" prompt.
+exports.mySatisfaction = async (req, res) => {
+  try {
+    const { rating, feedback } = req.body;
+    const r = Number(rating);
+    if (!(r >= 1 && r <= 5)) return res.status(400).json({ error: "Rating must be 1–5" });
+    const ticket = await SupportTicket.findOne({ ...myTicketMatch(req), _id: req.params.id });
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    if (ticket.satisfactionRating != null) {
+      return res.json({ ticket: customerView(ticket), alreadyRated: true });
+    }
+    ticket.satisfactionRating = r;
+    ticket.satisfactionFeedback = feedback || "";
+    ticket.satisfactionRatedAt = new Date();
+    await ticket.save();
+    emitToOrg(orgId(req), "ticket:update", { id: ticket._id });
+    emitToSuperAdmins("ticket:update", { id: ticket._id, organisationId: orgId(req) });
+    res.json({ ticket: customerView(ticket) });
+  } catch (err) {
+    console.error("My satisfaction error:", err);
+    res.status(500).json({ error: "Failed to submit feedback" });
   }
 };
 
@@ -365,7 +455,9 @@ exports.publicSubmit = async (req, res) => {
       ticketNumber: count + 1,
       // `optionalAuth` sets req.user when the submitter is logged in → link their
       // account so it appears in their portal; otherwise it's a true external submit.
-      reporter: { userId: req.user?._id || null, name, email: String(email).toLowerCase().trim(), isExternal: !req.user },
+      // A logged-in submitter is classified by their role (donor → "customer",
+      // staff → "admin"); a logged-out one is "public".
+      reporter: { userId: req.user?._id || null, name, email: String(email).toLowerCase().trim(), isExternal: !req.user, kind: reporterKind(req.user) },
       summary,
       description: description || "",
       category: category || "general",
@@ -381,16 +473,51 @@ exports.publicSubmit = async (req, res) => {
   }
 };
 
+// Public CSAT page bootstrap — validates the one-time token and returns just
+// enough to render the "How did we do?" page (and whether it's already rated).
+exports.getPublicSatisfaction = async (req, res) => {
+  try {
+    const { token } = req.query;
+    const ticket = await SupportTicket.findOne({ _id: req.params.id, organisationId: orgId(req) })
+      .select("ticketNumber summary satisfactionRating satisfactionToken");
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    if (!ticket.satisfactionToken || !token || token !== ticket.satisfactionToken) {
+      return res.status(403).json({ error: "This feedback link is invalid or has expired." });
+    }
+    res.json({
+      ticketNumber: ticket.ticketNumber,
+      summary: ticket.summary,
+      alreadyRated: ticket.satisfactionRating != null,
+      rating: ticket.satisfactionRating || 0,
+    });
+  } catch (err) {
+    console.error("Get satisfaction error:", err);
+    res.status(500).json({ error: "Failed to load" });
+  }
+};
+
+// Public CSAT submit — gated by the one-time token from the "rate us" email so
+// only the real recipient can rate, and the score can't be spoofed/overwritten.
 exports.publicSatisfaction = async (req, res) => {
   try {
-    const { rating, feedback } = req.body;
+    const { rating, feedback, token } = req.body;
     const r = Number(rating);
     if (!(r >= 1 && r <= 5)) return res.status(400).json({ error: "Rating must be 1–5" });
     const ticket = await SupportTicket.findOne({ _id: req.params.id, organisationId: orgId(req) });
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+    if (!ticket.satisfactionToken || !token || token !== ticket.satisfactionToken) {
+      return res.status(403).json({ error: "This feedback link is invalid or has expired." });
+    }
+    // One rating only — a re-submit must not overwrite an existing score.
+    if (ticket.satisfactionRating != null) {
+      return res.json({ message: "You've already rated this — thank you!", alreadyRated: true });
+    }
     ticket.satisfactionRating = r;
     ticket.satisfactionFeedback = feedback || "";
+    ticket.satisfactionRatedAt = new Date();
     await ticket.save();
+    emitToOrg(ticket.organisationId, "ticket:update", { id: ticket._id });
+    emitToSuperAdmins("ticket:update", { id: ticket._id, organisationId: ticket.organisationId });
     res.json({ message: "Thank you for your feedback" });
   } catch (err) {
     console.error("Satisfaction error:", err);
@@ -404,13 +531,14 @@ exports.publicSatisfaction = async (req, res) => {
 
 exports.listAllTickets = async (req, res) => {
   try {
-    const { tenant, triage, status, priority, kanban, search, limit = 200 } = req.query;
+    const { tenant, triage, status, priority, kanban, source, search, limit = 200 } = req.query;
     const filter = {};
     if (tenant) filter.organisationId = tenant;
     if (triage && triage !== "all") filter.triage = triage;
     if (status && status !== "all") filter.status = status;
     if (priority && priority !== "all") filter.priority = priority;
     if (kanban && kanban !== "all") filter.kanbanStatus = kanban;
+    if (source && source !== "all") filter["reporter.kind"] = source; // tenant (admin) | customer | public
     if (search) filter.summary = { $regex: search, $options: "i" };
 
     const tickets = await SupportTicket.find(filter)

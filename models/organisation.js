@@ -74,6 +74,14 @@ const organisationSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    // Admin credentials captured at registration, before payment completes.
+    // The admin User row is created (and this is cleared) by the subscription
+    // webhook once the first invoice is paid (in-house checkout).
+    pendingAdmin: {
+      name: { type: String },
+      email: { type: String },
+      passwordHash: { type: String },
+    },
     branding: {
       // Primary logo — the light/white variant, shown on DARK backgrounds
       // (admin sidebar, footer, over dark headers).

@@ -26,7 +26,17 @@ const supportTicketSchema = new mongoose.Schema(
       userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
       name: { type: String, default: "" },
       email: { type: String, default: "" },
-      isExternal: { type: Boolean, default: false }, // submitted via the public form
+      isExternal: { type: Boolean, default: false }, // submitted via the public form (i.e. while logged out)
+      // Who the ticket is from, from the platform operator's point of view:
+      //   "admin"    → the tenant's own NGO staff (admin/superadmin)
+      //   "customer" → a donor / end-user (customer) of the tenant
+      //   "public"   → an anonymous public-form submission (no account)
+      // Stamped from the authenticated user's role at creation (see the
+      // controller's reporterKind()). No `default` on purpose: tickets created
+      // before this field shipped read as undefined, and the UI/backfill
+      // (`npm run backfill:tickets`) resolve those from `isExternal` + the
+      // linked user's role rather than being silently mislabelled.
+      kind: { type: String, enum: ["admin", "customer", "public"] },
     },
 
     summary: { type: String, required: true },
@@ -50,6 +60,13 @@ const supportTicketSchema = new mongoose.Schema(
 
     satisfactionRating: { type: Number, min: 1, max: 5, default: null },
     satisfactionFeedback: { type: String, default: "" },
+    // CSAT delivery: a one-time secret embedded in the "How did we do?" email link
+    // (so only the real recipient can rate, and they can't be spoofed). Set when
+    // the ticket is first resolved; `requestedAt` is the send-once guard and
+    // `ratedAt` records when the reporter actually submitted a rating.
+    satisfactionToken: { type: String, default: "" },
+    satisfactionRequestedAt: { type: Date, default: null },
+    satisfactionRatedAt: { type: Date, default: null },
 
     resolution: {
       notes: { type: String, default: "" },

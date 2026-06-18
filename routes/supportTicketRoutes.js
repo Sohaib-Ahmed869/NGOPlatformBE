@@ -10,6 +10,8 @@ const { ticketUpload } = require("../config/s3");
 router.get("/public/org", c.getPublicOrg);
 // optionalAuth: links the ticket to the submitter's account when they're logged in.
 router.post("/public/submit", optionalAuth, ticketUpload.single("attachment"), c.publicSubmit);
+// CSAT from the "How did we do?" email link — gated by a one-time token, not auth.
+router.get("/public/satisfaction/:id", c.getPublicSatisfaction);
 router.post("/public/satisfaction/:id", c.publicSatisfaction);
 
 // ── Tenant customer (logged-in donor/user) — their own tickets.
@@ -18,6 +20,7 @@ router.get("/my", auth, c.listMyTickets);
 router.post("/my", auth, ticketUpload.single("attachment"), c.createMyTicket);
 router.get("/my/:id", auth, c.getMyTicket);
 router.post("/my/:id/messages", auth, c.addMyMessage);
+router.post("/my/:id/satisfaction", auth, c.mySatisfaction);
 
 // ── Tenant admin ──
 router.get("/", isAdmin, c.listTickets);

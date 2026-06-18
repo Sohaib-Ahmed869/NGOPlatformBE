@@ -18,6 +18,7 @@
     "backfill:sections": "node scripts/backfillAboutSections.js",
     "fix:home-hero": "node scripts/fixHomeHero.js",
     "backfill:events": "node scripts/backfillEvents.js",
+    "backfill:tickets": "node scripts/backfillTicketSource.js",
     "seed:sample-events": "node scripts/seedSampleEvents.js",
     "seed:campaigns": "node scripts/seedCampaigns.js",
     "seed:mailboxes": "node scripts/seedMailboxesFromOrgEmail.js",

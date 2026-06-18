@@ -12,6 +12,9 @@ router.post("/register", registrationController.register);
 // Slug availability check
 router.get("/register/check-slug", registrationController.checkSlug);
 
+// Email availability check
+router.get("/register/check-email", registrationController.checkEmail);
+
 // Organisation status (polling for registration success page)
 router.get("/organisations/status", registrationController.getStatus);
 
@@ -20,6 +23,9 @@ router.get("/organisations/slug/:slug", registrationController.getBySlug);
 
 // Plan limits (public, for pricing page)
 router.get("/plans", registrationController.getPlans);
+
+// Public list of sellable plans (dynamic, SuperAdmin-managed)
+router.get("/plans/public", registrationController.getPublicPlans);
 
 // Validate a discount coupon (public, for the registration/pricing page)
 router.get("/coupon/:code", require("../../controllers/couponController").validateCoupon);

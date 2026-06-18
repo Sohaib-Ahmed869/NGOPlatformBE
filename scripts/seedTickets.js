@@ -207,6 +207,52 @@ const TICKETS = [
       { who: "agent", hrs: 3, message: "This is spam bots rather than a fault. Enable the spam-protection toggle in Settings → Contact, and the rate limiter will throttle them. Marking as resolved, but reopen if it continues.", internal: false },
     ],
   },
+
+  // ── Tickets from the tenant's own donors/customers (kind: "customer") ──
+  {
+    summary: "My monthly donation didn't go through this month",
+    description: "I'm a monthly donor and this month's gift didn't come out of my account. I don't want my giving to lapse — how do I update the card on file?",
+    category: "billing", priority: "medium", status: "in_progress", ageDays: 2,
+    reporter: { name: "Rebecca Cole", email: "rebecca.cole@gmail.com" }, kind: "customer",
+    comments: [
+      { who: "reporter", hrs: 0, message: "I got an email saying my payment failed. How do I fix my card?" },
+      { who: "agent", hrs: 3, message: "Hi Rebecca — your giving hasn't lapsed, no worries. You can update your card under My Subscriptions → Manage; I've also emailed you a secure link. Thank you for your continued support!", internal: false },
+    ],
+  },
+  {
+    summary: "Can't download my annual tax receipt",
+    description: "I'm trying to download my 2025 giving statement from my donor account but the button just spins. I need it for my tax return.",
+    category: "account", priority: "low", status: "solved", ageDays: 6,
+    reporter: { name: "James Whitfield", email: "jwhitfield@outlook.com" }, kind: "customer",
+    assign: true, resolved: true, resolutionNotes: "Donor's pop-up blocker was stopping the PDF tab; advised to allow pop-ups and the statement downloaded fine.",
+    csat: { rating: 5, feedback: "Friendly and sorted it in minutes." },
+    comments: [
+      { who: "reporter", hrs: 0, message: "The download just spins forever — am I doing something wrong?" },
+      { who: "agent", hrs: 2, message: "Hi James — your browser's pop-up blocker was stopping the receipt opening in a new tab. Allowing pop-ups for our site fixed it. Happy to email it to you instead if that's easier.", internal: false },
+    ],
+  },
+
+  // ── Anonymous public-form submissions (kind: "public") ──
+  {
+    summary: "I donated as a guest but never received a receipt",
+    description: "I made a one-off donation last night without creating an account and never got an email receipt. I'd like confirmation for my records.",
+    category: "billing", priority: "medium", status: "new", ageDays: 1,
+    reporter: { name: "Daniel Harper", email: "d.harper92@gmail.com" }, kind: "public",
+    comments: [
+      { who: "reporter", hrs: 0, message: "Can you confirm my donation went through and resend the receipt? Thank you." },
+    ],
+  },
+  {
+    summary: "Is my donation tax-deductible before I give?",
+    description: "Before I donate I wanted to check whether gifts made through your site are tax-deductible and whether I'll receive a receipt.",
+    category: "general", priority: "low", status: "solved", ageDays: 4,
+    reporter: { name: "Lauren Santos", email: "lauren.k.santos@gmail.com" }, kind: "public",
+    assign: true, resolved: true, resolutionNotes: "Prospective donor (no account) — confirmed tax-deductibility and that a receipt is emailed automatically after giving.",
+    csat: { rating: 5, feedback: "" },
+    comments: [
+      { who: "agent", hrs: 1, message: "Hi Lauren — yes, donations are tax-deductible and you'll receive an emailed receipt immediately after giving. Happy to answer anything else before you donate!", internal: false },
+    ],
+  },
 ];
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -247,14 +293,27 @@ async function seed() {
       const agentName = admin?.name || "Support Team";
       const createdAt = new Date(now - t.ageDays * DAY - (i % 5) * 2 * HOUR);
 
+      // Source bucket (reporter.kind) for the operator console:
+      //   admin    → the tenant's own NGO staff   (internal, or an org-domain sender)
+      //   customer → a donor / end-user of the tenant
+      //   public   → an anonymous public-form submission
+      // Defaults to "admin" so the existing org-voiced demo tickets read as the
+      // tenant contacting support; new entries set `kind` explicitly.
       const reporter = t.reporter?.internal
         ? {
             userId: admin?._id || null,
             name: admin?.name || "Team Member",
             email: admin?.email || `team@${org.slug}.org`,
             isExternal: false,
+            kind: t.kind || "admin",
           }
-        : { userId: null, name: t.reporter.name, email: t.reporter.email, isExternal: true };
+        : {
+            userId: null,
+            name: t.reporter.name,
+            email: t.reporter.email,
+            isExternal: (t.kind || "admin") === "public", // only true anonymous submits are external
+            kind: t.kind || "admin",
+          };
 
       const reporterName = reporter.name;
 
@@ -310,9 +369,14 @@ async function seed() {
       { $group: { _id: "$status", n: { $sum: 1 } } },
     ]);
     const kanban = await SupportTicket.countDocuments({ summary: { $in: summaries }, triage: { $in: ["bug", "feature"] } });
+    const bySource = await SupportTicket.aggregate([
+      { $match: { summary: { $in: summaries } } },
+      { $group: { _id: "$reporter.kind", n: { $sum: 1 } } },
+    ]);
 
     console.log(`\nSeeded ${created} support tickets across ${orgs.length} organisation(s).`);
     console.log("  By status:", byStatus.map((r) => `${r._id}=${r.n}`).join("  "));
+    console.log("  By source:", bySource.map((r) => `${r._id || "—"}=${r.n}`).join("  "), "(admin=tenant · customer=tenant customer · public=anonymous)");
     console.log(`  On the Kanban board (bug/feature): ${kanban}`);
     console.log("\nView them in SuperAdmin → Support Tickets and Kanban, and per-tenant under Admin → Support Tickets.\n");
   } catch (error) {
