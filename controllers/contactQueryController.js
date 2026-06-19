@@ -19,7 +19,7 @@ exports.list = async (req, res) => {
       ];
     }
     const docs = await ContactQuery.find(filter)
-      .populate("assignee.userId", "name email")
+      .populate("assignee.userId", "name email profileImage")
       .sort({ lastMessageAt: -1, createdAt: -1 })
       .limit(500)
       .lean();
@@ -72,7 +72,7 @@ exports.getStaff = async (req, res) => {
 exports.get = async (req, res) => {
   try {
     const query = await ContactQuery.findById(req.params.id)
-      .populate("assignee.userId", "name email")
+      .populate("assignee.userId", "name email profileImage")
       .populate("thread.author", "name email");
     if (!query) return res.status(404).json({ error: "Query not found" });
 
@@ -122,7 +122,7 @@ exports.addMessage = async (req, res) => {
     await query.save();
 
     const populated = await ContactQuery.findById(query._id)
-      .populate("assignee.userId", "name email")
+      .populate("assignee.userId", "name email profileImage")
       .populate("thread.author", "name email");
     emitToSuperAdmins("contactQuery:message", { id: String(query._id), status: query.status });
 
@@ -147,7 +147,7 @@ exports.updateStatus = async (req, res) => {
       req.params.id,
       { $set: { status } },
       { new: true }
-    ).populate("assignee.userId", "name email");
+    ).populate("assignee.userId", "name email profileImage");
     if (!query) return res.status(404).json({ error: "Query not found" });
     emitToSuperAdmins("contactQuery:updated", { id: String(query._id), status });
     res.json({ query });
@@ -172,7 +172,7 @@ exports.assign = async (req, res) => {
       query.assignee = { userId: null, name: "", assignedAt: null };
     }
     await query.save();
-    const populated = await ContactQuery.findById(query._id).populate("assignee.userId", "name email");
+    const populated = await ContactQuery.findById(query._id).populate("assignee.userId", "name email profileImage");
     emitToSuperAdmins("contactQuery:assigned", { id: String(query._id) });
     res.json({ query: populated });
   } catch (err) {

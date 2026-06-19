@@ -2,16 +2,34 @@ const Plan = require("../models/plan");
 const Organisation = require("../models/organisation");
 const writeAudit = require("../utils/writeAudit");
 const stripePlanService = require("../services/stripePlanService");
+const planPricing = require("../config/planPricing");
+const { GROUPS, FEATURES, METER_KEYS, FLAG_KEYS } = require("../config/featureCatalog");
+const PlatformSettings = require("../models/platformSettings");
 
-// null = unlimited; blank/undefined → null; otherwise a number.
+// One platform billing currency (no per-plan currency — see PLATFORM_CURRENCY).
+const PLATFORM_CURRENCY = (planPricing.currency || "aud").toLowerCase();
+
+// Mixed/Map/subdoc → plain object.
+const toPlain = (v) =>
+  !v ? {} : typeof v.toObject === "function" ? v.toObject() : v instanceof Map ? Object.fromEntries(v) : { ...v };
+
+// Keep only valid catalog meter keys; "" / null / undefined → null (= unlimited).
 function sanitizeLimits(limits = {}) {
-  const num = (v) =>
-    v === null || v === "" || v === undefined ? null : Number(v);
-  return {
-    campaigns: num(limits.campaigns),
-    volunteers: num(limits.volunteers),
-    volunteerEnabled: !!limits.volunteerEnabled,
-  };
+  const num = (v) => (v === null || v === "" || v === undefined ? null : Number(v));
+  const out = {};
+  for (const k of METER_KEYS) {
+    if (limits[k] !== undefined) out[k] = num(limits[k]);
+  }
+  return out;
+}
+
+// Keep only valid catalog flag keys, coerced to booleans.
+function sanitizeFlags(flags = {}) {
+  const out = {};
+  for (const k of FLAG_KEYS) {
+    if (flags[k] !== undefined) out[k] = !!flags[k];
+  }
+  return out;
 }
 
 // { code: { total, active } } subscriber counts across all organisations.
@@ -56,7 +74,7 @@ exports.listPlans = async (req, res) => {
 /** POST /api/superadmin/plans */
 exports.createPlan = async (req, res) => {
   try {
-    const { code, name, description, currency, price, limits, features, color, isPublic, sortOrder } =
+    const { code, name, description, price, limits, featureFlags, features, color, isPublic, isPopular, sortOrder } =
       req.body;
     if (!code || !name) {
       return res.status(400).json({ error: "code and name are required" });
@@ -70,12 +88,14 @@ exports.createPlan = async (req, res) => {
       code: normCode,
       name,
       description: description || "",
-      currency: (currency || "usd").toLowerCase(),
+      currency: PLATFORM_CURRENCY, // single platform currency
       price: { monthly: Number(price?.monthly) || 0, annual: Number(price?.annual) || 0 },
       limits: sanitizeLimits(limits),
+      featureFlags: sanitizeFlags(featureFlags),
       features: Array.isArray(features) ? features.filter(Boolean) : [],
       color: color || "#10b981",
       isPublic: isPublic !== false,
+      isPopular: !!isPopular,
       sortOrder: Number(sortOrder) || 0,
     });
 
@@ -107,22 +127,42 @@ exports.updatePlan = async (req, res) => {
     const plan = await Plan.findOne({ code: req.params.code });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
-    const { name, description, currency, price, limits, features, color, isPublic, isActive, sortOrder } =
+    const { name, description, price, limits, featureFlags, features, color, isPublic, isPopular, isActive, sortOrder } =
       req.body;
+
+    const prevName = plan.name;
+    const prevDescription = plan.description;
 
     if (name !== undefined) plan.name = name;
     if (description !== undefined) plan.description = description;
-    if (currency !== undefined) plan.currency = String(currency).toLowerCase();
-    if (limits !== undefined) plan.limits = sanitizeLimits(limits);
+    // currency is platform-wide (PLATFORM_CURRENCY) — intentionally not editable.
+    if (limits !== undefined) {
+      plan.limits = { ...toPlain(plan.limits), ...sanitizeLimits(limits) };
+      plan.markModified("limits");
+    }
+    if (featureFlags !== undefined) {
+      plan.featureFlags = { ...toPlain(plan.featureFlags), ...sanitizeFlags(featureFlags) };
+      plan.markModified("featureFlags");
+    }
     if (features !== undefined) {
       plan.features = Array.isArray(features) ? features.filter(Boolean) : plan.features;
     }
     if (color !== undefined) plan.color = color;
     if (isPublic !== undefined) plan.isPublic = !!isPublic;
+    if (isPopular !== undefined) plan.isPopular = !!isPopular;
     if (sortOrder !== undefined) plan.sortOrder = Number(sortOrder) || 0;
     if (isActive !== undefined) {
       plan.isActive = !!isActive;
       if (isActive) plan.archivedAt = null;
+    }
+
+    // Push name/description edits to the Stripe Product (best-effort).
+    if (plan.stripeProductId && (plan.name !== prevName || plan.description !== prevDescription)) {
+      try {
+        await stripePlanService.syncProduct(plan);
+      } catch (e) {
+        console.error("Stripe product sync failed:", e.message);
+      }
     }
 
     // Detect amount changes per cycle.
@@ -225,5 +265,112 @@ exports.migrateSubscribers = async (req, res) => {
   } catch (err) {
     console.error("Migrate subscribers error:", err);
     res.status(500).json({ error: "Failed to migrate subscribers" });
+  }
+};
+
+/** POST /api/superadmin/plans/:code/resync — (re)provision/repair Stripe. */
+exports.resyncPlan = async (req, res) => {
+  try {
+    const plan = await Plan.findOne({ code: req.params.code });
+    if (!plan) return res.status(404).json({ error: "Plan not found" });
+    if (!stripePlanService.isStripeEnabled()) {
+      return res.status(400).json({ error: "Stripe is not configured" });
+    }
+    const synced = await stripePlanService.resyncPlan(plan);
+    plan.stripeProductId = synced.stripeProductId;
+    plan.stripePriceIds = synced.stripePriceIds;
+    await plan.save();
+    await writeAudit(req, "plan.resynced", {
+      targetType: "plan",
+      targetId: plan.code,
+      meta: { stripeProductId: plan.stripeProductId },
+    });
+    res.json({ plan });
+  } catch (err) {
+    console.error("Resync plan error:", err);
+    res.status(500).json({ error: err.message || "Failed to resync plan with Stripe" });
+  }
+};
+
+/** GET /api/superadmin/feature-catalog — rows + groups for the matrix screen. */
+exports.getFeatureCatalog = async (_req, res) => {
+  res.json({ groups: GROUPS, features: FEATURES });
+};
+
+/** GET /api/superadmin/plan-bullets — the editable pricing-card bullet library. */
+exports.getPlanBullets = async (_req, res) => {
+  try {
+    const settings = await PlatformSettings.getSingleton();
+    res.json({ bullets: settings.planBulletLibrary || [] });
+  } catch (err) {
+    console.error("Get plan bullets error:", err);
+    res.status(500).json({ error: "Failed to fetch bullet library" });
+  }
+};
+
+/** PUT /api/superadmin/plan-bullets  { bullets:[string] } — replace the library. */
+exports.updatePlanBullets = async (req, res) => {
+  try {
+    const incoming = Array.isArray(req.body?.bullets) ? req.body.bullets : [];
+    // Trim, drop blanks, de-dupe (case-insensitive), cap length.
+    const seen = new Set();
+    const bullets = [];
+    incoming.forEach((b) => {
+      const v = String(b || "").trim().slice(0, 80);
+      const k = v.toLowerCase();
+      if (v && !seen.has(k)) {
+        seen.add(k);
+        bullets.push(v);
+      }
+    });
+    const settings = await PlatformSettings.getSingleton();
+    settings.planBulletLibrary = bullets.slice(0, 50);
+    await settings.save();
+    res.json({ bullets: settings.planBulletLibrary });
+  } catch (err) {
+    console.error("Update plan bullets error:", err);
+    res.status(500).json({ error: "Failed to save bullet library" });
+  }
+};
+
+/**
+ * PUT /api/superadmin/entitlements — bulk-save the feature matrix.
+ * Body: { plans: { [code]: { features?: {flag:bool}, limits?: {meter:num|null} } } }
+ */
+exports.bulkUpdateEntitlements = async (req, res) => {
+  try {
+    const incoming = req.body?.plans || {};
+    const codes = Object.keys(incoming);
+    if (!codes.length) return res.status(400).json({ error: "No plans provided" });
+
+    const plans = await Plan.find({ code: { $in: codes } });
+    const byCode = Object.fromEntries(plans.map((p) => [p.code, p]));
+    const updated = [];
+
+    for (const code of codes) {
+      const plan = byCode[code];
+      if (!plan) continue;
+      const patch = incoming[code] || {};
+      if (patch.features !== undefined) {
+        plan.featureFlags = { ...toPlain(plan.featureFlags), ...sanitizeFlags(patch.features) };
+        plan.markModified("featureFlags");
+      }
+      if (patch.limits !== undefined) {
+        plan.limits = { ...toPlain(plan.limits), ...sanitizeLimits(patch.limits) };
+        plan.markModified("limits");
+      }
+      await plan.save();
+      updated.push(plan.code);
+    }
+
+    await writeAudit(req, "plan.entitlements_updated", {
+      targetType: "plan",
+      targetId: updated.join(","),
+      meta: { plans: updated },
+    });
+    res.json({ updated, plans });
+  } catch (err) {
+    console.error("Bulk entitlements error:", err);
+    res.status(500).json({ error: "Failed to update entitlements" });
   }
 };

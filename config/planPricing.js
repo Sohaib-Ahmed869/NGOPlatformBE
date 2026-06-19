@@ -12,7 +12,8 @@
  * existing organisations.
  */
 module.exports = {
-  currency: "usd",
+  // Platform billing currency. Overridable via PLATFORM_CURRENCY in .env.
+  currency: (process.env.PLATFORM_CURRENCY || "aud").toLowerCase(),
   basic: { monthly: 200, annual: 1920 },
   professional: { monthly: 500, annual: 4800 },
   enterprise: { monthly: 1000, annual: 9600 },

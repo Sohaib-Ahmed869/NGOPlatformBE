@@ -281,19 +281,8 @@ exports.getBySlug = async (req, res) => {
       return res.status(404).json({ error: "Organisation not found" });
     }
 
-    // Site config: which pages exist + nav structure (drives the public
-    // navbar and route gating). Auto-seeds defaults for orgs created before
-    // the CMS feature existed.
-    let pages = [];
-    try {
-      const { getNavPages } = require("../../services/pageService");
-      pages = await getNavPages(org._id);
-    } catch (e) {
-      console.error("Failed to load site pages for org", slug, e.message);
-    }
-
     // Public payment info — only the publishable key + enabled flag (never secrets).
-    const fullOrg = await Organisation.findById(org._id).select("payment paypal");
+    const fullOrg = await Organisation.findById(org._id).select("payment paypal override");
     const payment = {
       enabled: !!(fullOrg?.payment?.enabled && fullOrg?.payment?.publishableKey),
       publishableKey: fullOrg?.payment?.publishableKey || "",
@@ -305,7 +294,44 @@ exports.getBySlug = async (req, res) => {
       mode: fullOrg?.paypal?.mode || "sandbox",
     };
 
-    res.json({ ...org.toObject(), pages, payment, paypal });
+    // Resolved plan entitlements (feature flags + metered limits, with any
+    // per-tenant override merged) — the single source both the admin portal and
+    // the public site read to gate features.
+    let entitlements = { features: {}, limits: {} };
+    try {
+      const { getEffectiveEntitlements } = require("../../utils/effectiveLimits");
+      entitlements = await getEffectiveEntitlements({
+        _id: org._id,
+        plan: org.plan,
+        override: fullOrg?.override,
+      });
+    } catch (e) {
+      console.error("Failed to resolve entitlements for org", slug, e.message);
+    }
+
+    // Site config: which pages exist + nav structure (drives the public navbar
+    // and route gating). Auto-seeds defaults for orgs created before the CMS
+    // feature existed. Plan gating is folded into `enabled` HERE so the existing
+    // PageGate/navbar/footer/⌘K cascade (which all read page.enabled) follows
+    // the plan with no extra client logic: a page whose controlling plan flag is
+    // OFF is forced enabled:false + showInNav:false (tenant toggle can't re-enable
+    // beyond what the plan allows).
+    let pages = [];
+    try {
+      const { getNavPages } = require("../../services/pageService");
+      const { PAGE_TO_FLAG } = require("../../config/featureCatalog");
+      const raw = await getNavPages(org._id);
+      pages = raw.map((p) => {
+        const obj = p.toObject ? p.toObject() : p;
+        const flag = PAGE_TO_FLAG[obj.key];
+        const planAllows = !flag || entitlements.features[flag] !== false;
+        return planAllows ? obj : { ...obj, enabled: false, showInNav: false };
+      });
+    } catch (e) {
+      console.error("Failed to load site pages for org", slug, e.message);
+    }
+
+    res.json({ ...org.toObject(), pages, payment, paypal, entitlements });
   } catch (error) {
     console.error("Get by slug error:", error);
     res.status(500).json({ error: "Server error" });
@@ -331,7 +357,7 @@ exports.getPublicPlans = async (req, res) => {
     const Plan = require("../../models/plan");
     const plans = await Plan.find({ isActive: true, isPublic: true })
       .sort({ sortOrder: 1, "price.monthly": 1 })
-      .select("code name description currency price features color limits sortOrder")
+      .select("code name description currency price features color limits featureFlags isPopular sortOrder")
       .lean();
     res.json(plans);
   } catch (err) {

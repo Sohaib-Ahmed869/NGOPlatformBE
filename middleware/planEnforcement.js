@@ -1,19 +1,31 @@
-const { getEffectiveLimits } = require("../utils/effectiveLimits");
+const mongoose = require("mongoose");
+const { getEffectiveLimits, getEffectiveEntitlements } = require("../utils/effectiveLimits");
+const { METER_MAP } = require("../config/featureCatalog");
 
-const planHierarchy = { basic: 1, professional: 2, enterprise: 3 };
+// Legacy flag names → canonical catalog flag keys.
+const FLAG_ALIASES = { volunteerEnabled: "volunteers" };
+
+// Resolve a Mongoose model by its registered name without guessing file paths.
+// Returns null if the model isn't registered (→ enforcement safely no-ops).
+function getModel(name) {
+  try {
+    return mongoose.model(name);
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Blocks request if org's plan is below the minimum required plan.
- * Usage: requirePlan('professional')
+ * @deprecated Tier hierarchy gating doesn't understand custom dynamic plans.
+ * Prefer capability gating via requireFeature(flag). Kept for any legacy callers.
  */
+const planHierarchy = { basic: 1, professional: 2, enterprise: 3 };
 const requirePlan = (minPlan) => (req, res, next) => {
   if (!req.organisation) {
     return res.status(400).json({ error: "No organisation context" });
   }
-
   const orgLevel = planHierarchy[req.organisation.plan] || 0;
   const requiredLevel = planHierarchy[minPlan] || 0;
-
   if (orgLevel < requiredLevel) {
     return res.status(403).json({
       error: `This feature requires the ${minPlan} plan or higher`,
@@ -22,16 +34,18 @@ const requirePlan = (minPlan) => (req, res, next) => {
       requiredPlan: minPlan,
     });
   }
-
   next();
 };
 
 /**
  * Blocks creation when the org has reached its EFFECTIVE limit (dynamic plan
- * limits + per-tenant override) for a resource. A limit of null / Infinity /
- * undefined means unlimited.
- *   checkLimit('campaigns')  → counts active Program documents
- *   checkLimit('volunteers') → counts Join (volunteer application) documents
+ * limits + per-tenant override) for a metered resource. A limit of
+ * null / Infinity / undefined means unlimited.
+ *
+ * Counting is driven by config/featureCatalog.js `count` metadata, so any new
+ * meter is enforced automatically — no code change here.
+ *   checkLimit('campaigns')  → Program { status:'active' }
+ *   checkLimit('volunteers') → Join
  */
 const checkLimit = (resource) => async (req, res, next) => {
   if (!req.organisation) {
@@ -47,18 +61,13 @@ const checkLimit = (resource) => async (req, res, next) => {
       return next();
     }
 
-    const orgId = req.organisation._id;
-    let currentCount = 0;
+    const meta = METER_MAP[resource];
+    const Model = meta && meta.count ? getModel(meta.count.model) : null;
+    if (!Model) return next(); // no known counter → don't block
 
-    if (resource === "campaigns") {
-      const Program = require("../models/program");
-      currentCount = await Program.countDocuments({ organisationId: orgId, status: "active" });
-    } else if (resource === "volunteers") {
-      const Join = require("../models/join");
-      currentCount = await Join.countDocuments({ organisationId: orgId });
-    } else {
-      return next(); // no known collection for this resource
-    }
+    const orgField = (meta.count && meta.count.orgField) || "organisationId";
+    const filter = { [orgField]: req.organisation._id, ...(meta.count.filter || {}) };
+    const currentCount = await Model.countDocuments(filter);
 
     if (currentCount >= limit) {
       return res.status(403).json({
@@ -77,16 +86,18 @@ const checkLimit = (resource) => async (req, res, next) => {
 };
 
 /**
- * Blocks a request when a boolean feature flag is OFF in the org's EFFECTIVE
- * limits (dynamic plan + override). Usage: requireFeature('volunteerEnabled')
+ * Blocks a request when a boolean capability flag is OFF in the org's EFFECTIVE
+ * entitlements (dynamic plan featureFlags + override).
+ * Usage: requireFeature('events') / requireFeature('newsletter', 'Newsletter')
  */
 const requireFeature = (flag, label) => async (req, res, next) => {
   if (!req.organisation) {
     return res.status(400).json({ error: "No organisation context" });
   }
   try {
-    const limits = await getEffectiveLimits(req.organisation);
-    if (limits[flag]) return next();
+    const { features } = await getEffectiveEntitlements(req.organisation);
+    const key = FLAG_ALIASES[flag] || flag;
+    if (features[key]) return next();
     return res.status(403).json({
       error: `${label || flag} is not available on your ${req.organisation.plan} plan`,
       upgradeRequired: true,

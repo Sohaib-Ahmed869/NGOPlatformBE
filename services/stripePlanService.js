@@ -45,6 +45,75 @@ async function provisionPlan(plan) {
   return { stripeProductId: product.id, stripePriceIds: { monthly, annual } };
 }
 
+/** Push name/description edits to the existing Stripe Product (best-effort). */
+async function syncProduct(plan) {
+  if (!stripe || !plan.stripeProductId) return;
+  await stripe.products.update(plan.stripeProductId, {
+    name: plan.name,
+    description: plan.description || undefined,
+  });
+}
+
+/**
+ * Resolve (or create) the Stripe Product for a plan, retrying from an existing
+ * Price when the product id is missing. Returns the product id or "".
+ */
+async function resolveProductId(plan) {
+  if (!stripe) return "";
+  if (plan.stripeProductId) return plan.stripeProductId;
+  const anyPrice = plan.stripePriceIds?.monthly || plan.stripePriceIds?.annual;
+  if (anyPrice) {
+    try {
+      const pr = await stripe.prices.retrieve(anyPrice);
+      if (pr?.product) return pr.product;
+    } catch {
+      /* fall through to create */
+    }
+  }
+  const product = await stripe.products.create({
+    name: plan.name,
+    description: plan.description || undefined,
+    metadata: { planCode: plan.code },
+  });
+  return product.id;
+}
+
+/**
+ * (Re)sync a plan with Stripe. Use after a create that saved "unsynced" (Stripe
+ * was down/unconfigured) or to repair drift: creates the Product + Prices when
+ * missing, updates the Product's name/description, and mints any missing Price
+ * for a cycle priced > 0. Returns { stripeProductId, stripePriceIds }.
+ */
+async function resyncPlan(plan) {
+  if (!stripe) {
+    return {
+      stripeProductId: plan.stripeProductId || "",
+      stripePriceIds: {
+        monthly: plan.stripePriceIds?.monthly || "",
+        annual: plan.stripePriceIds?.annual || "",
+      },
+    };
+  }
+  const productId = await resolveProductId(plan);
+  await stripe.products.update(productId, {
+    name: plan.name,
+    description: plan.description || undefined,
+    active: plan.isActive !== false,
+  });
+
+  const stripePriceIds = {
+    monthly: plan.stripePriceIds?.monthly || "",
+    annual: plan.stripePriceIds?.annual || "",
+  };
+  for (const cycle of ["monthly", "annual"]) {
+    const amount = Number(plan.price?.[cycle]) || 0;
+    if (!stripePriceIds[cycle] && amount > 0) {
+      stripePriceIds[cycle] = await createPriceForCycle(productId, plan, cycle);
+    }
+  }
+  return { stripeProductId: productId, stripePriceIds };
+}
+
 /**
  * Mint NEW Stripe Prices for the cycles whose amount changed. The caller has
  * already applied the new amounts to `plan`. Returns { stripeProductId,
@@ -143,6 +212,8 @@ async function migrateSubscribers(plan, { proration = "none" } = {}) {
 module.exports = {
   isStripeEnabled,
   provisionPlan,
+  syncProduct,
+  resyncPlan,
   repriceChangedCycles,
   archivePlanStripe,
   migrateSubscribers,

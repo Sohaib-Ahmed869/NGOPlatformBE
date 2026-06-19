@@ -556,6 +556,7 @@ exports.board = async (req, res) => {
   try {
     const tickets = await SupportTicket.find({ triage: { $in: ["bug", "feature"] } })
       .populate("organisationId", "name slug")
+      .populate("assignee.userId", "name email profileImage")
       .sort({ updatedAt: -1 })
       .limit(1000);
     const empty = () => ({ todo: [], in_progress: [], done: [] });
@@ -577,7 +578,8 @@ exports.getOne = async (req, res) => {
   try {
     const ticket = await SupportTicket.findById(req.params.id)
       .populate("organisationId", "name slug")
-      .populate("assignee.userId", "name email")
+      .populate("assignee.userId", "name email profileImage")
+      .populate("reporter.userId", "name email profileImage")
       .populate("comments.createdBy", "name email");
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
     res.json({ ticket });

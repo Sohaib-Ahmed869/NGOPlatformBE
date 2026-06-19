@@ -36,6 +36,7 @@ const sendEmail = async (
       attachments,
     };
     if (replyTo) mailOptions.replyTo = replyTo;
+    if (options.cc) mailOptions.cc = options.cc;
     // Extra headers (e.g. List-Unsubscribe / List-Unsubscribe-Post for campaigns).
     if (options.headers) mailOptions.headers = options.headers;
 

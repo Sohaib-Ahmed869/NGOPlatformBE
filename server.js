@@ -155,6 +155,10 @@ app.post("/api/webhooks/paypal/:slug", paypalController.handleWebhook);
 // ============================================================
 const tenantRouter = express.Router();
 tenantRouter.use(tenantMiddleware);
+// Platform-support impersonation guard + per-action audit (no-op for normal
+// tokens). Sits at the single chokepoint for all tenant API traffic, before any
+// per-route auth, so a revoked/ended/expired support token is rejected here.
+tenantRouter.use(require("./middleware/supportSession"));
 
 tenantRouter.use("/api/orders", orderRoutes);
 tenantRouter.use("/api/contact", contactRoutes);

@@ -5,7 +5,14 @@ const ContactQuery = require("../models/contactQuery");
 const Plan = require("../models/plan");
 const PlatformAuditLog = require("../models/platformAuditLog");
 const PlatformInvoice = require("../models/platformInvoice");
+const SupportSession = require("../models/supportSession");
+const Program = require("../models/program");
+const Event = require("../models/event");
+const Join = require("../models/join");
+const Order = require("../models/order");
+const GoFundMe = require("../models/goFundMe");
 const writeAudit = require("../utils/writeAudit");
+const { sendEmail } = require("../services/emailUtil");
 const { getEffectiveLimits } = require("../utils/effectiveLimits");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
@@ -14,6 +21,45 @@ const { emitToSuperAdmins } = require("./../services/socket");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const stripePrices = require("../config/stripePrices");
 const planPricing = require("../config/planPricing");
+
+// Escape user-supplied text for safe inclusion in notification HTML.
+const escapeHtml = (s) =>
+  String(s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/**
+ * Best-effort tenant notification when a branding request is decided. Sent from
+ * the PLATFORM email account (no `org` option) since it's a platform→tenant
+ * message, and never throws — a mail failure must not fail the review.
+ * Addressed TO the org's primary admin; the requester is CC'd when they're a
+ * different person. `request` needs `requestedBy` + `organisationId.adminUserId`
+ * populated.
+ */
+async function notifyBrandingDecision(request, decision) {
+  try {
+    const org = request.organisationId || {};
+    const primaryAdminEmail = org.adminUserId?.email || null;
+    const requesterEmail = request.requestedBy?.email || null;
+    const to = primaryAdminEmail || requesterEmail; // fall back to requester if no admin linked
+    if (!to) return;
+    const cc = requesterEmail && requesterEmail !== to ? requesterEmail : undefined;
+    const orgName = org.name || "your organisation";
+    const approved = decision === "approved";
+    const noteHtml = request.reviewNote
+      ? `<p style="margin:16px 0 0;color:#475569;font-family:sans-serif;line-height:1.5;"><strong>Note from the team:</strong> ${escapeHtml(request.reviewNote)}</p>`
+      : "";
+    const subject = approved
+      ? `Your branding change for ${orgName} was approved`
+      : `Update on your branding change for ${orgName}`;
+    const body = approved
+      ? `<h2 style="margin:0 0 8px;color:#0f172a;font-family:sans-serif;">Branding change approved ✅</h2>
+         <p style="margin:0;color:#475569;font-family:sans-serif;line-height:1.5;">Good news — the branding changes you requested for <strong>${escapeHtml(orgName)}</strong> have been approved and are now live on your site. You may need to refresh to see them.</p>${noteHtml}`
+      : `<h2 style="margin:0 0 8px;color:#0f172a;font-family:sans-serif;">Branding change not approved</h2>
+         <p style="margin:0;color:#475569;font-family:sans-serif;line-height:1.5;">We reviewed the branding changes you requested for <strong>${escapeHtml(orgName)}</strong>, and they weren't applied this time. You can adjust and submit a new request anytime from your admin settings.</p>${noteHtml}`;
+    await sendEmail(to, body, subject, [], cc ? { cc } : {});
+  } catch (e) {
+    console.error("Branding decision email failed:", e.message);
+  }
+}
 
 /**
  * POST /api/superadmin/auth/bootstrap  (public, secret-gated)
@@ -220,17 +266,60 @@ exports.suspendOrg = async (req, res) => {
  */
 exports.getOrganisationDetail = async (req, res) => {
   try {
-    const org = await Organisation.findById(req.params.id).populate("adminUserId", "name email");
+    const org = await Organisation.findById(req.params.id).populate("adminUserId", "name email profileImage");
     if (!org) return res.status(404).json({ error: "Organisation not found" });
 
-    const [effectiveLimits, plan, audit, invoices] = await Promise.all([
+    const orgId = org._id;
+    const [
+      effectiveLimits,
+      plan,
+      audit,
+      invoices,
+      brandingRequests,
+      supportSessions,
+      campaignsActive,
+      programsTotal,
+      volunteersTotal,
+      usersTotal,
+      eventsTotal,
+      p2pTotal,
+      ordersTotal,
+      donationAgg,
+    ] = await Promise.all([
       getEffectiveLimits(org),
       Plan.findOne({ code: org.plan }).select("code name price color limits"),
-      PlatformAuditLog.find({ organisationId: org._id }).sort({ createdAt: -1 }).limit(20),
-      PlatformInvoice.find({ organisationId: org._id }).sort({ createdAt: -1 }).limit(10),
+      PlatformAuditLog.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(20),
+      PlatformInvoice.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(10),
+      BrandingRequest.find({ organisationId: orgId }).populate("requestedBy", "name email").sort({ createdAt: -1 }).limit(5),
+      SupportSession.find({ organisationId: orgId }).sort({ startedAt: -1 }).limit(5),
+      Program.countDocuments({ organisationId: orgId, status: "active" }),
+      Program.countDocuments({ organisationId: orgId }),
+      Join.countDocuments({ organisationId: orgId }),
+      User.countDocuments({ organisationId: orgId }),
+      Event.countDocuments({ organisationId: orgId }),
+      GoFundMe.countDocuments({ organisationId: orgId }),
+      Order.countDocuments({ organisationId: orgId }),
+      Order.aggregate([
+        { $match: { organisationId: orgId, paymentStatus: { $in: ["completed", "active"] } } },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      ]),
     ]);
 
-    res.json({ organisation: org, plan, effectiveLimits, audit, invoices });
+    // Current usage for the metered limits (mirrors planEnforcement counting:
+    // campaigns = active Programs, volunteers = Join applications).
+    const usage = { campaigns: campaignsActive, volunteers: volunteersTotal };
+    // Tenant-by-the-numbers snapshot.
+    const stats = {
+      users: usersTotal,
+      programs: programsTotal,
+      events: eventsTotal,
+      campaigns: p2pTotal, // P2P fundraisers (GoFundMe)
+      volunteers: volunteersTotal,
+      orders: ordersTotal,
+      donationsRaised: donationAgg[0]?.total || 0,
+    };
+
+    res.json({ organisation: org, plan, effectiveLimits, audit, invoices, brandingRequests, supportSessions, usage, stats });
   } catch (err) {
     console.error("Get organisation detail error:", err);
     res.status(500).json({ error: "Failed to fetch organisation" });
@@ -398,19 +487,74 @@ exports.actAs = async (req, res) => {
   try {
     const org = await Organisation.findById(req.params.id).populate("adminUserId", "name email role");
     if (!org) return res.status(404).json({ error: "Organisation not found" });
-    const admin = org.adminUserId;
-    if (!admin) return res.status(400).json({ error: "This organisation has no admin user to act as" });
+    const orgAdmin = org.adminUserId;
+
+    const mode = req.body?.mode === "website" ? "website" : "admin";
+
+    // Resolve the identity to impersonate.
+    //  - admin mode  → the org's designated admin user.
+    //  - website mode → the specific reported user (when a userId is given and
+    //    belongs to this org), otherwise fall back to the org admin.
+    let target = orgAdmin;
+    if (mode === "website" && req.body?.userId) {
+      const reported = await User.findOne({ _id: req.body.userId, organisationId: org._id }).select(
+        "name email role organisationId"
+      );
+      if (!reported) {
+        return res.status(400).json({ error: "Reported user not found for this organisation" });
+      }
+      target = reported;
+    }
+    if (!target) {
+      return res.status(400).json({ error: "This organisation has no user to act as" });
+    }
+
+    // Default access: view-only for website/donor sessions (safer), full for
+    // admin sessions — unless the operator explicitly chose one.
+    const requested = req.body?.access;
+    const access =
+      requested === "view_only" || requested === "full"
+        ? requested
+        : mode === "website"
+        ? "view_only"
+        : "full";
 
     const sessionId = crypto.randomUUID();
+    const ticketId = req.body?.ticketId || null;
+    const expiresAt = new Date(Date.now() + 3600 * 1000);
+
+    await SupportSession.create({
+      sessionId,
+      organisationId: org._id,
+      orgSlug: org.slug,
+      impersonatorId: req.user._id,
+      impersonatorEmail: req.user.email,
+      targetUserId: target._id,
+      targetEmail: target.email || "",
+      targetRole: target.role || "",
+      mode,
+      access,
+      reason: req.body?.reason || "",
+      ticketId,
+      status: "active",
+      startedAt: new Date(),
+      expiresAt,
+      ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || "",
+      userAgent: req.headers["user-agent"] || "",
+    });
+
     const token = jwt.sign(
       {
-        id: String(admin._id),
+        id: String(target._id),
         orgId: String(org._id),
         slug: org.slug,
-        role: admin.role || "admin",
-        name: admin.name || "",
-        email: admin.email || "",
+        role: target.role || "admin",
+        name: target.name || "",
+        email: target.email || "",
         support_session: true,
+        mode,
+        access,
+        ticketId: ticketId ? String(ticketId) : null,
         impersonatedBy: req.user.email,
         impersonatorId: String(req.user._id),
         sessionId,
@@ -423,10 +567,18 @@ exports.actAs = async (req, res) => {
       organisationId: org._id,
       targetType: "organisation",
       targetId: String(org._id),
-      meta: { sessionId, reason: req.body?.reason || "", actingAs: admin.email },
+      meta: { sessionId, reason: req.body?.reason || "", actingAs: target.email, mode, access, ticketId },
     });
 
-    res.json({ token, slug: org.slug, orgId: String(org._id), sessionId, expiresIn: 3600 });
+    res.json({
+      token,
+      slug: org.slug,
+      orgId: String(org._id),
+      sessionId,
+      mode,
+      access,
+      expiresIn: 3600,
+    });
   } catch (err) {
     console.error("Act-as error:", err);
     res.status(500).json({ error: "Failed to start support session" });
@@ -449,6 +601,15 @@ exports.endSupportSession = async (req, res) => {
     }
     if (!decoded.support_session) {
       return res.status(403).json({ error: "Not a support session" });
+    }
+
+    // Flip the session record closed (the kill switch). Best-effort: only an
+    // already-active row is touched, so re-ending is a no-op.
+    if (decoded.sessionId) {
+      await SupportSession.updateOne(
+        { sessionId: decoded.sessionId, status: "active" },
+        { $set: { status: "ended", endedAt: new Date(), endedBy: decoded.impersonatorId || null } }
+      ).catch((e) => console.error("End support session record update failed:", e.message));
     }
 
     await PlatformAuditLog.create({
@@ -484,7 +645,7 @@ exports.listInvoices = async (req, res) => {
 
     const [invoices, total, paidAgg] = await Promise.all([
       PlatformInvoice.find(filter)
-        .populate("organisationId", "name slug")
+        .populate("organisationId", "name slug branding")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit)),
@@ -512,7 +673,7 @@ exports.listInvoices = async (req, res) => {
  */
 exports.getBillingStats = async (req, res) => {
   try {
-    const [totalOrgs, activeOrgs, planCounts, recentSignups, failedPayments, planDocs] = await Promise.all([
+    const [totalOrgs, activeOrgs, planCounts, recentSignups, failedPayments, planDocs, collectedAgg] = await Promise.all([
       Organisation.countDocuments(),
       Organisation.countDocuments({ isActive: true, subscriptionStatus: "active" }),
       Organisation.aggregate([
@@ -523,9 +684,14 @@ exports.getBillingStats = async (req, res) => {
         .populate("adminUserId", "name email")
         .sort({ createdAt: -1 })
         .limit(10)
-        .select("name slug plan subscriptionStatus createdAt"),
+        .select("name slug plan subscriptionStatus createdAt branding"),
       Organisation.countDocuments({ subscriptionStatus: "past_due" }),
       Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color"),
+      // Lifetime revenue actually collected (paid invoices in the Stripe mirror).
+      PlatformInvoice.aggregate([
+        { $match: { status: "paid" } },
+        { $group: { _id: null, total: { $sum: "$amountPaid" } } },
+      ]),
     ]);
 
     const countByCode = {};
@@ -567,6 +733,7 @@ exports.getBillingStats = async (req, res) => {
       activeSubscriptions: activeOrgs,
       failedPayments,
       mrr,
+      collected: collectedAgg[0]?.total || 0, // lifetime revenue collected
       plans,
       byPlan, // back-compat for any older consumer
       recentSignups,
@@ -574,6 +741,100 @@ exports.getBillingStats = async (req, res) => {
   } catch (error) {
     console.error("Billing stats error:", error);
     res.status(500).json({ error: "Failed to fetch billing stats" });
+  }
+};
+
+/**
+ * GET /api/superadmin/dashboard
+ * Rich platform overview — subscription health (MRR/ARR/plans), a REAL 12-month
+ * tenant-signup trend with month-over-month growth, and cross-tenant footprint
+ * totals (donations processed, accounts, programs, events, campaigns). Everything
+ * is aggregated live — no placeholder numbers.
+ */
+exports.getDashboardStats = async (req, res) => {
+  try {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+    const [
+      totalOrgs, activeOrgs, planCounts, recentSignups, failedPayments, planDocs,
+      collectedAgg, donationsAgg, totalUsers, totalPrograms, totalEvents, totalCampaigns,
+      newThisMonth, newLastMonth, signupBuckets,
+    ] = await Promise.all([
+      Organisation.countDocuments(),
+      Organisation.countDocuments({ isActive: true, subscriptionStatus: "active" }),
+      Organisation.aggregate([
+        { $match: { isActive: true, subscriptionStatus: "active" } },
+        { $group: { _id: "$plan", count: { $sum: 1 } } },
+      ]),
+      Organisation.find()
+        .populate("adminUserId", "name email")
+        .sort({ createdAt: -1 })
+        .limit(8)
+        .select("name slug plan subscriptionStatus createdAt branding"),
+      Organisation.countDocuments({ subscriptionStatus: "past_due" }),
+      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color"),
+      PlatformInvoice.aggregate([{ $match: { status: "paid" } }, { $group: { _id: null, total: { $sum: "$amountPaid" } } }]),
+      Order.aggregate([{ $match: { paymentStatus: "completed" } }, { $group: { _id: null, total: { $sum: "$totalAmount" }, count: { $sum: 1 } } }]),
+      User.countDocuments(),
+      Program.countDocuments(),
+      Event.countDocuments(),
+      GoFundMe.countDocuments(),
+      Organisation.countDocuments({ createdAt: { $gte: startOfMonth } }),
+      Organisation.countDocuments({ createdAt: { $gte: startOfLastMonth, $lt: startOfMonth } }),
+      Organisation.aggregate([
+        { $match: { createdAt: { $gte: twelveMonthsAgo } } },
+        { $group: { _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } }, count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const countByCode = {};
+    planCounts.forEach((p) => { countByCode[p._id] = p.count; });
+    let plans;
+    if (planDocs.length) {
+      plans = planDocs.map((p) => ({ code: p.code, name: p.name, color: p.color || "#10b981", monthly: p.price?.monthly || 0, count: countByCode[p.code] || 0 }));
+    } else {
+      plans = [["basic", "Basic", "#06b6d4"], ["professional", "Professional", "#10b981"], ["enterprise", "Enterprise", "#f59e0b"]].map(([code, name, color]) => ({
+        code, name, color, monthly: planPricing[code]?.monthly || 0, count: countByCode[code] || 0,
+      }));
+    }
+    const mrr = plans.reduce((s, p) => s + p.count * p.monthly, 0);
+
+    // Build a continuous 12-month signup series (zero-filled).
+    const bucketMap = {};
+    signupBuckets.forEach((b) => { bucketMap[`${b._id.y}-${b._id.m}`] = b.count; });
+    const signupSeries = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      signupSeries.push({ month: d.toLocaleString("en-US", { month: "short" }), count: bucketMap[`${d.getFullYear()}-${d.getMonth() + 1}`] || 0 });
+    }
+    const growthPct = newLastMonth ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100) : newThisMonth > 0 ? 100 : 0;
+
+    res.json({
+      totalOrganisations: totalOrgs,
+      activeSubscriptions: activeOrgs,
+      failedPayments,
+      mrr,
+      collected: collectedAgg[0]?.total || 0,
+      plans,
+      recentSignups,
+      // Cross-tenant footprint
+      donationsTotal: donationsAgg[0]?.total || 0,
+      donationsCount: donationsAgg[0]?.count || 0,
+      totalUsers,
+      totalPrograms,
+      totalEvents,
+      totalCampaigns,
+      // Growth
+      newThisMonth,
+      growthPct,
+      signupSeries,
+    });
+  } catch (error) {
+    console.error("Dashboard stats error:", error);
+    res.status(500).json({ error: "Failed to fetch dashboard stats" });
   }
 };
 
@@ -609,12 +870,28 @@ exports.listBrandingRequests = async (req, res) => {
 };
 
 /**
+ * GET /api/superadmin/branding-requests/pending-count
+ * Live count of pending branding requests (powers the sidebar badge).
+ */
+exports.brandingPendingCount = async (req, res) => {
+  try {
+    const count = await BrandingRequest.countDocuments({ status: "pending" });
+    res.json({ count });
+  } catch (error) {
+    console.error("Branding pending count error:", error);
+    res.status(500).json({ error: "Failed to fetch count" });
+  }
+};
+
+/**
  * PATCH /api/superadmin/branding-requests/:id/approve
  * Approve a branding request and apply it to the organisation.
  */
 exports.approveBrandingRequest = async (req, res) => {
   try {
-    const request = await BrandingRequest.findById(req.params.id);
+    const request = await BrandingRequest.findById(req.params.id)
+      .populate("requestedBy", "name email")
+      .populate({ path: "organisationId", select: "name slug adminUserId", populate: { path: "adminUserId", select: "name email" } });
     if (!request) {
       return res.status(404).json({ error: "Request not found" });
     }
@@ -640,7 +917,7 @@ exports.approveBrandingRequest = async (req, res) => {
     if (rb.siteTitle !== undefined)
       updateFields["branding.siteTitle"] = rb.siteTitle;
 
-    await Organisation.findByIdAndUpdate(request.organisationId, {
+    await Organisation.findByIdAndUpdate(request.organisationId._id || request.organisationId, {
       $set: updateFields,
     });
 
@@ -650,6 +927,8 @@ exports.approveBrandingRequest = async (req, res) => {
     request.reviewedAt = new Date();
     await request.save();
 
+    emitToSuperAdmins("brandingRequest:updated", { id: String(request._id), status: "approved" });
+    notifyBrandingDecision(request, "approved"); // best-effort, non-blocking
     res.json({ message: "Branding request approved and applied", request });
   } catch (error) {
     console.error("Approve branding request error:", error);
@@ -663,7 +942,9 @@ exports.approveBrandingRequest = async (req, res) => {
  */
 exports.rejectBrandingRequest = async (req, res) => {
   try {
-    const request = await BrandingRequest.findById(req.params.id);
+    const request = await BrandingRequest.findById(req.params.id)
+      .populate("requestedBy", "name email")
+      .populate({ path: "organisationId", select: "name slug adminUserId", populate: { path: "adminUserId", select: "name email" } });
     if (!request) {
       return res.status(404).json({ error: "Request not found" });
     }
@@ -677,6 +958,8 @@ exports.rejectBrandingRequest = async (req, res) => {
     request.reviewedAt = new Date();
     await request.save();
 
+    emitToSuperAdmins("brandingRequest:updated", { id: String(request._id), status: "rejected" });
+    notifyBrandingDecision(request, "rejected"); // best-effort, non-blocking
     res.json({ message: "Branding request rejected", request });
   } catch (error) {
     console.error("Reject branding request error:", error);

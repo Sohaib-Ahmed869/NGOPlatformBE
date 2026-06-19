@@ -29,6 +29,25 @@ const platformSettingsSchema = new mongoose.Schema(
       theme: { type: String, default: "modern-emerald" },
     },
 
+    // Editable library of suggested pricing-card bullets, offered as quick-add
+    // chips in the SuperAdmin plan editor (Marketing tab).
+    planBulletLibrary: {
+      type: [String],
+      default: [
+        "Unlimited donations",
+        "Custom branding & logo",
+        "Custom domain",
+        "Tax-deductible receipts",
+        "Donor management & CRM",
+        "Advanced analytics & reports",
+        "Priority email support",
+        "Dedicated account manager",
+        "Remove platform branding",
+        "Bring your own Stripe & email",
+        "Data export",
+      ],
+    },
+
     contactEmail: { type: String, default: "support@ngoplatform.com" },
     contactPhone: { type: String, default: "" },
     address: { type: String, default: "Sydney, NSW, Australia" },

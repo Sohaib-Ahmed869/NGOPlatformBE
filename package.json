@@ -10,6 +10,8 @@
     "seed:platform": "node scripts/seedPlatformSettings.js",
     "seed:tickets": "node scripts/seedTickets.js",
     "seed:plans": "node scripts/seedPlans.js",
+    "enrich:plans": "node scripts/enrichPlans.js",
+    "verify:plans": "node scripts/verifyPlansLive.js",
     "seed:demo": "node scripts/seedDemoData.js",
     "seed:branding": "node scripts/seedBrandingRequests.js",
     "seed:orgs": "node scripts/seedOrganisations.js",

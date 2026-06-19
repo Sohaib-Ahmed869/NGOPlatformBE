@@ -17,9 +17,9 @@ const mongoose = require("mongoose");
 const connectDB = require("../config/db");
 const Plan = require("../models/plan");
 const planPricing = require("../config/planPricing");
-const planLimits = require("../config/planLimits");
 const stripePrices = require("../config/stripePrices");
 const stripePlanService = require("../services/stripePlanService");
+const { FLAG_KEYS } = require("../config/featureCatalog");
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? require("stripe")(process.env.STRIPE_SECRET_KEY)
@@ -31,19 +31,51 @@ const DEFS = [
   { code: "enterprise", name: "Enterprise", color: "#f59e0b", sortOrder: 3, description: "Unlimited scale for large charities." },
 ];
 
-// Infinity (used by config/planLimits.js for enterprise) → null = Unlimited.
-const lim = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+// ── Default entitlement matrix per tier (config/featureCatalog.js keys) ──────
+// Capability flags that are ON for each tier; any flag not listed defaults OFF
+// (enterprise gets every flag). Operators tune these in the Features matrix.
+const TIER_FLAGS_ON = {
+  basic: ["donations", "recurringGiving", "programs", "volunteers", "contacts", "partners", "cmsPages", "initiatives", "islamicGiving", "ownStripe"],
+  professional: ["donations", "recurringGiving", "programs", "p2pCampaigns", "store", "events", "volunteers", "newsletter", "contacts", "supportTickets", "partners", "cmsPages", "initiatives", "sectionBuilder", "islamicGiving", "ownStripe", "paypal", "customEmail", "savedCards"],
+  enterprise: FLAG_KEYS, // everything
+};
+// Metered quotas per tier (null = Unlimited).
+const TIER_LIMITS = {
+  basic: { campaigns: 5, volunteers: 50, eventsQuota: 0, p2pQuota: 0, productsQuota: 0, adminSeats: 2 },
+  professional: { campaigns: 50, volunteers: 500, eventsQuota: 50, p2pQuota: 25, productsQuota: 100, adminSeats: 10 },
+  enterprise: { campaigns: null, volunteers: null, eventsQuota: null, p2pQuota: null, productsQuota: null, adminSeats: null },
+};
+
+const flagsFor = (code) => {
+  const on = new Set(TIER_FLAGS_ON[code] || FLAG_KEYS);
+  return Object.fromEntries(FLAG_KEYS.map((k) => [k, on.has(k)]));
+};
+const limitsFor = (code) => ({ ...(TIER_LIMITS[code] || {}) });
 
 async function run() {
   console.log("\n=== Seeding dynamic plans ===\n");
   for (const def of DEFS) {
-    if (await Plan.findOne({ code: def.code })) {
-      console.log(`= ${def.code} already exists — skipping`);
+    const existing = await Plan.findOne({ code: def.code });
+    if (existing) {
+      // Backfill entitlements onto plans seeded before the featureFlags upgrade,
+      // without clobbering any operator-tuned values.
+      const hasFlags = existing.featureFlags && Object.keys(existing.featureFlags).length > 0;
+      if (!hasFlags) {
+        existing.featureFlags = flagsFor(def.code);
+        if (!existing.limits || Object.keys(existing.limits).length === 0) {
+          existing.limits = limitsFor(def.code);
+        }
+        existing.markModified("featureFlags");
+        existing.markModified("limits");
+        await existing.save();
+        console.log(`~ ${def.code} backfilled featureFlags + limits`);
+      } else {
+        console.log(`= ${def.code} already configured — skipping`);
+      }
       continue;
     }
 
     const pricing = planPricing[def.code] || { monthly: 0, annual: 0 };
-    const limits = planLimits[def.code] || {};
     const envIds = stripePrices[def.code] || {};
 
     const plan = new Plan({
@@ -52,13 +84,10 @@ async function run() {
       description: def.description,
       color: def.color,
       sortOrder: def.sortOrder,
-      currency: planPricing.currency || "usd",
+      currency: planPricing.currency || "aud",
       price: { monthly: pricing.monthly || 0, annual: pricing.annual || 0 },
-      limits: {
-        campaigns: lim(limits.campaigns),
-        volunteers: lim(limits.volunteers),
-        volunteerEnabled: !!limits.volunteerEnabled,
-      },
+      limits: limitsFor(def.code),
+      featureFlags: flagsFor(def.code),
       features: [],
       stripePriceIds: { monthly: envIds.monthly || "", annual: envIds.annual || "" },
     });

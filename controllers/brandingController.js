@@ -326,6 +326,7 @@ exports.getThemes = (req, res) => {
 // ── Branding Change Requests ──
 
 const BrandingRequest = require("../models/brandingRequest");
+const { emitToSuperAdmins } = require("../services/socket");
 
 /**
  * POST /api/branding/request
@@ -363,6 +364,8 @@ exports.submitRequest = async (req, res) => {
       currentBranding: org.branding?.toObject?.() || org.branding,
       message: message || "",
     });
+
+    emitToSuperAdmins("brandingRequest:new", { id: String(request._id), organisationId: String(orgId) });
 
     res.status(201).json({
       message: "Branding change request submitted for review",

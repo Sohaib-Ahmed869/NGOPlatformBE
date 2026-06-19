@@ -7,6 +7,7 @@ const planController = require("../../controllers/planController");
 const supportTicketController = require("../../controllers/supportTicketController");
 const couponController = require("../../controllers/couponController");
 const contactQueryController = require("../../controllers/contactQueryController");
+const supportSessionController = require("../../controllers/supportSessionController");
 
 // Network guard runs BEFORE auth on every operator route (no-op unless
 // SUPERADMIN_IP_ALLOWLIST is set).
@@ -35,7 +36,15 @@ router.put("/organisations/:id/override", superAdminController.setOverride);
 router.delete("/organisations/:id/override", superAdminController.clearOverride);
 router.post("/organisations/:id/trial", superAdminController.setTrial);
 router.get("/billing", superAdminController.getBillingStats);
+router.get("/dashboard", superAdminController.getDashboardStats);
 router.get("/invoices", superAdminController.listInvoices);
+
+// Support-impersonation sessions + the per-action audit they produce, plus the
+// kill switch (revoke) and the global operator audit log.
+router.get("/support-sessions", supportSessionController.listSessions);
+router.get("/support-sessions/:sessionId", supportSessionController.getSession);
+router.post("/support-sessions/:sessionId/revoke", supportSessionController.revokeSession);
+router.get("/audit", supportSessionController.listAudit);
 
 // Discount coupons (Stripe-synced)
 router.get("/coupons", couponController.listCoupons);
@@ -55,9 +64,19 @@ router.post("/plans", planController.createPlan);
 router.patch("/plans/:code", planController.updatePlan);
 router.post("/plans/:code/archive", planController.archivePlan);
 router.post("/plans/:code/migrate-subscribers", planController.migrateSubscribers);
+router.post("/plans/:code/resync", planController.resyncPlan);
+
+// Per-plan feature flags + metered limits (the Features matrix)
+router.get("/feature-catalog", planController.getFeatureCatalog);
+router.put("/entitlements", planController.bulkUpdateEntitlements);
+
+// Editable pricing-card bullet library (plan editor → Marketing quick-add)
+router.get("/plan-bullets", planController.getPlanBullets);
+router.put("/plan-bullets", planController.updatePlanBullets);
 
 // Branding request review
 router.get("/branding-requests", superAdminController.listBrandingRequests);
+router.get("/branding-requests/pending-count", superAdminController.brandingPendingCount);
 router.patch("/branding-requests/:id/approve", superAdminController.approveBrandingRequest);
 router.patch("/branding-requests/:id/reject", superAdminController.rejectBrandingRequest);
 
