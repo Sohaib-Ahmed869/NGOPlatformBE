@@ -26,8 +26,9 @@ const themes = {
   "modern-emerald": { primaryColor: "#0F172A", accentColor: "#10B981", backgroundColor: "#F0FDF4" },
   "modern-slate": { primaryColor: "#0F172A", accentColor: "#6366F1", backgroundColor: "#F8FAFC" },
   // Donexus brand (see FE src/config/themePresets.js for the full 5-colour set)
-  "donexus": { primaryColor: "#182A54", accentColor: "#A8BA70", backgroundColor: "#EEF8FF" },
-  "donexus-lime": { primaryColor: "#182A54", accentColor: "#E4EB99", backgroundColor: "#FEFFE6" },
+  "donexus": { primaryColor: "#102621", accentColor: "#4FB587", backgroundColor: "#F8FCF9" },
+  "donexus-forest": { primaryColor: "#010101", accentColor: "#1C5241", backgroundColor: "#F8FCF9" },
+  "donexus-noir": { primaryColor: "#010101", accentColor: "#4FB587", backgroundColor: "#F8FCF9" },
   // Nature & Earth
   "nature-forest": { primaryColor: "#1B4332", accentColor: "#40916C", backgroundColor: "#F0FFF4" },
   "nature-ocean": { primaryColor: "#0C4A6E", accentColor: "#0284C7", backgroundColor: "#F0F9FF" },
