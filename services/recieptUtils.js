@@ -723,11 +723,18 @@ const sendReceiptEmail = async (
       mailOptions.attachments,
       { organisationId: order.organisationId }
     );
-    console.log("Receipt email sent: ", info.response);
-
     // Cleanup - remove temporary file
     await fs.remove(filePath);
 
+    // sendEmail swallows transport errors and returns { success:false } — don't
+    // report a delivery that never happened.
+    if (!info || !info.success) {
+      const reason = info?.error?.message || "unknown SMTP error";
+      console.error(`Receipt email FAILED for ${order.donorDetails.email}: ${reason}`);
+      return { success: false, message: "Failed to send receipt email", error: info?.error };
+    }
+
+    console.log("Receipt email sent to", order.donorDetails.email);
     return { success: true, message: "Receipt email sent successfully" };
   } catch (error) {
     console.error("Error sending receipt email: ", error);

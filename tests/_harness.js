@@ -62,10 +62,33 @@ class FakeOrder {
   }
 }
 
+const DEFAULT_USER = { _id: "user1", email: "donor@test.com", firstName: "Test", name: "Test Donor" };
+let currentUser = { ...DEFAULT_USER };
+
+// Writes made while healing stale Stripe references (services/stripeCustomers.js)
+// are recorded so tests can assert the repair, not just the charge.
+const userUpdates = [];
+const pmUpdates = [];
+
 const FakeUser = {
   findByIdAndUpdate: async () => null,
   findOne: async () => null,
-  findById: async () => ({ _id: "user1", email: "donor@test.com", firstName: "Test", name: "Test Donor" }),
+  findById: async () => currentUser,
+  updateOne: async (filter, update) => {
+    userUpdates.push({ filter, update });
+    Object.assign(currentUser, update.$set || {});
+    return { acknowledged: true, modifiedCount: 1 };
+  },
+};
+
+const FakePaymentMethod = {
+  // Mongoose-ish: find() is chainable with .select() (that's how it's called).
+  find: () => ({ select: async () => [] }),
+  findOne: async () => null,
+  updateMany: async (filter, update) => {
+    pmUpdates.push({ filter, update });
+    return { acknowledged: true, modifiedCount: 1 };
+  },
 };
 const FakeProgram = { findById: async () => null };
 
@@ -130,11 +153,15 @@ function makeStripe(opts = {}) {
       create: async (a) => rec("customers.create", a) && { id: "cus_x" },
       retrieve: async (id) => {
         rec("customers.retrieve", id);
-        if (opts.customerDeleted) {
+        // customerDeleted kills every customer; deadCustomers/softDeleted target
+        // specific ids (a deleted customer 404s on charge but still retrieves
+        // with deleted:true — both shapes must be handled).
+        if (opts.customerDeleted || (opts.deadCustomers || []).includes(id)) {
           const err = new Error(`No such customer: '${id}'`);
           err.code = "resource_missing";
           throw err;
         }
+        if ((opts.softDeletedCustomers || []).includes(id)) return { id, deleted: true };
         return { id };
       },
       update: async (id, a) => rec("customers.update", { id, a }) && {},
@@ -180,6 +207,7 @@ function inject(spec, exportsObj) {
 }
 inject("models/order", FakeOrder);
 inject("models/user", FakeUser);
+inject("models/paymentMethods", FakePaymentMethod);
 inject("models/program", FakeProgram);
 inject("models/organisation", FakeOrg);
 // multer-like stub: upload.single(...) etc. return a passthrough middleware,
@@ -220,6 +248,15 @@ function makeRes() {
 
 function resetStore() {
   store.length = 0;
+  userUpdates.length = 0;
+  pmUpdates.length = 0;
+  currentUser = { ...DEFAULT_USER };
+}
+
+/** Seed the donor the controllers read back via User.findById. */
+function setUser(u) {
+  currentUser = { ...DEFAULT_USER, ...u };
+  return currentUser;
 }
 function setStripe(s) {
   currentStripe = s;
@@ -237,7 +274,10 @@ module.exports = {
   adminSubCtrl,
   recurringDates,
   store,
+  userUpdates,
+  pmUpdates,
   resetStore,
+  setUser,
   setStripe,
   makeStripe,
   makeReq,

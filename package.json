@@ -25,7 +25,9 @@
     "seed:campaigns": "node scripts/seedCampaigns.js",
     "seed:mailboxes": "node scripts/seedMailboxesFromOrgEmail.js",
     "seed:fundraisers": "node scripts/seedFundraisers.js",
-    "prices:update": "node scripts/updatePlanPrices.js"
+    "prices:update": "node scripts/updatePlanPrices.js",
+    "audit:stripe-customers": "node scripts/auditStripeCustomers.js",
+    "fix:stripe-customers": "node scripts/auditStripeCustomers.js --fix"
   },
   "keywords": [],
   "author": "",

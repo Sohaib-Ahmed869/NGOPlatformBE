@@ -1,4 +1,6 @@
 const PlatformSettings = require("../models/platformSettings");
+const Organisation = require("../models/organisation");
+const Order = require("../models/order");
 const { brandingUpload, deleteS3Object } = require("../config/s3");
 
 // Safe public projection — exactly what the marketing site needs, nothing else.
@@ -25,6 +27,69 @@ const toPublic = (s) => ({
     linkedin: s.socialLinks?.linkedin || "",
   },
 });
+
+/* ── Public platform stats ──────────────────────────────────────────────────
+ * The marketing hero used to ship four invented numbers. These are the real
+ * cross-tenant totals instead — but ONLY the four aggregate figures below.
+ * Nothing here can identify a tenant or a donor, which is what makes it safe to
+ * serve unauthenticated; do not widen this projection without re-checking that.
+ *
+ * Cached in-process: this is an unauthenticated endpoint on the busiest page we
+ * have, and each call runs four collection-wide aggregations. A few minutes of
+ * staleness is invisible on a marketing page and keeps a traffic spike (or a
+ * crawler) off the database.
+ *
+ * `raised` sums Order.totalAmount with no currency conversion, because Order
+ * carries no currency field — the same single-currency assumption the SuperAdmin
+ * dashboard already makes. If per-tenant currencies are ever introduced, this
+ * total becomes meaningless and must be reworked, not just relabelled.
+ */
+const STATS_TTL_MS = 5 * 60 * 1000;
+let _statsCache = null; // { at: epochMs, data: {...} }
+
+async function computePublicStats() {
+  const activeOrg = { isActive: true };
+  const paid = { paymentStatus: "completed" };
+
+  const [raisedAgg, charities, donors, countries] = await Promise.all([
+    Order.aggregate([{ $match: paid }, { $group: { _id: null, total: { $sum: "$totalAmount" } } }]),
+    Organisation.countDocuments(activeOrg),
+    // Distinct donors, not User.countDocuments() — that would count staff and
+    // admin accounts as "donors reached", which is the sort of quiet inflation
+    // this endpoint exists to get away from.
+    Order.distinct("user", paid).then((ids) => ids.filter(Boolean).length),
+    Organisation.distinct("addressDetails.country", activeOrg).then(
+      (list) => list.filter((c) => c && String(c).trim()).length,
+    ),
+  ]);
+
+  return {
+    raised: Math.round(raisedAgg[0]?.total || 0),
+    charities,
+    donors,
+    countries,
+  };
+}
+
+/**
+ * GET /api/platform/stats  (no auth)
+ * Aggregate, non-identifying platform totals for the marketing hero.
+ */
+exports.getPublicStats = async (req, res) => {
+  try {
+    if (_statsCache && Date.now() - _statsCache.at < STATS_TTL_MS) {
+      return res.json(_statsCache.data);
+    }
+    const data = await computePublicStats();
+    _statsCache = { at: Date.now(), data };
+    res.json(data);
+  } catch (error) {
+    console.error("Get public platform stats error:", error);
+    // The hero hides the band rather than inventing numbers, so a failure here
+    // degrades to "no stats shown" — never to placeholder figures.
+    res.status(500).json({ error: "Failed to load platform stats" });
+  }
+};
 
 /**
  * GET /api/platform/public  (no auth)

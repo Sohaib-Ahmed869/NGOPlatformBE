@@ -8,33 +8,17 @@
 const PaymentMethod = require("../models/paymentMethods");
 const User = require("../models/user");
 const { getTenantStripe } = require("../services/tenantStripe");
+const { ensureDonorCustomer } = require("../services/stripeCustomers");
 
 const KNOWN_BRANDS = ["visa", "mastercard", "amex", "discover"];
 
-// Ensure the donor has a (valid) Stripe customer on the tenant's account.
+// Ensure the donor has a (valid) Stripe customer on the tenant's account. A
+// stale id (customer deleted, or the tenant switched Stripe accounts) is
+// replaced rather than reused — see services/stripeCustomers.js.
 async function ensureCustomer(req, stripe) {
   const user = await User.findById(req.user._id);
   if (!user) throw new Error("User not found");
-
-  if (user.stripeCustomerId) {
-    try {
-      const c = await stripe.customers.retrieve(user.stripeCustomerId);
-      if (c && !c.deleted) return user.stripeCustomerId;
-    } catch {
-      // Stale id (e.g. tenant switched Stripe accounts) — fall through + recreate.
-    }
-  }
-  const customer = await stripe.customers.create({
-    email: user.email,
-    name: user.name,
-    metadata: {
-      userId: String(user._id),
-      organisationId: String(req.organisation?._id || ""),
-    },
-  });
-  user.stripeCustomerId = customer.id;
-  await user.save();
-  return customer.id;
+  return ensureDonorCustomer(stripe, user, req.organisation?._id);
 }
 
 // Public shape (never leak internals beyond what the UI needs).

@@ -3,19 +3,47 @@
 // tenant hasn't configured (and enabled) their own, we fall back to the platform
 // SMTP account — exactly like getTenantStripe() falls back to platformStripe —
 // so emails keep sending during rollout.
+const mongoose = require("mongoose");
 const nodemailer = require("nodemailer");
 const { decrypt } = require("../utils/crypto");
 const Organisation = require("../models/organisation");
 
 const PLATFORM_FROM_NAME = process.env.EMAIL_FROM_NAME || "Shahid Afridi Foundation";
 
+// Leaving EMAIL_HOST unset while EMAIL_USER points at another provider sends the
+// right credentials to the wrong server, which the provider rejects as
+// "535 Authentication unsuccessful" — a login error for what is really a host
+// misconfiguration. Infer the host from the address domain instead of assuming.
+const SMTP_BY_DOMAIN = {
+  "gmail.com": "smtp.gmail.com",
+  "googlemail.com": "smtp.gmail.com",
+  "outlook.com": "smtp-mail.outlook.com",
+  "hotmail.com": "smtp-mail.outlook.com",
+  "live.com": "smtp-mail.outlook.com",
+  "yahoo.com": "smtp.mail.yahoo.com",
+  "zoho.com": "smtp.zoho.com",
+};
+const isOutlookHost = (host) => /outlook|hotmail|live|office365/i.test(host || "");
+
+function defaultSmtpHost(user) {
+  const domain = String(user || "").split("@")[1];
+  return SMTP_BY_DOMAIN[(domain || "").toLowerCase()] || "smtp-mail.outlook.com";
+}
+
+const PLATFORM_HOST = process.env.EMAIL_HOST || defaultSmtpHost(process.env.EMAIL_USER);
+if (!process.env.EMAIL_HOST && process.env.EMAIL_USER) {
+  console.warn(`[email] EMAIL_HOST not set — using ${PLATFORM_HOST} for ${process.env.EMAIL_USER}`);
+}
+
 // The platform's own SMTP transport (today's global account).
 const platformTransport = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || "smtp-mail.outlook.com",
+  host: PLATFORM_HOST,
   port: Number(process.env.EMAIL_PORT) || 587,
   secure: process.env.EMAIL_SECURE === "true" || false,
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-  tls: { ciphers: "SSLv3" },
+  // Legacy workaround for Outlook's SMTP only — forcing it on other providers
+  // (Gmail especially) breaks the TLS handshake.
+  ...(isOutlookHost(PLATFORM_HOST) ? { tls: { ciphers: "SSLv3" } } : {}),
 });
 
 // Cache built transports by config signature so we don't rebuild one per send.
@@ -77,7 +105,12 @@ const ORG_TTL_MS = 5 * 60 * 1000;
 
 async function resolveOrg(orgOrId) {
   if (!orgOrId) return null;
-  if (typeof orgOrId === "object") return orgOrId; // already a doc
+  // An ObjectId is an object too — without this check a caller passing
+  // `organisationId` (receipts do) got the id back as the "org", so the tenant's
+  // own SMTP was never used and everything silently fell back to the platform.
+  const isId =
+    typeof orgOrId === "string" || orgOrId instanceof mongoose.Types.ObjectId;
+  if (!isId && typeof orgOrId === "object") return orgOrId; // already a doc
   const id = String(orgOrId);
   const now = Date.now();
   const hit = orgCache.get(id);

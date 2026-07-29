@@ -268,6 +268,77 @@ test("recurring with a stale CARD (customer gone, but PM detachable): recovers v
   assert.ok(stripe.count("paymentMethods.detach") >= 1);
 });
 
+/* ── SAVED CARD on a ONE-TIME donation (customer ids are only a hint) ────── */
+test("one-time with a brand-new card charges without a customer", async () => {
+  const stripe = h.makeStripe();
+  h.setStripe(stripe);
+  await run({
+    items, paymentType: "single", donorDetails: donor, paymentMethod: "visa",
+    totalAmount: 100, stripePaymentMethodId: "pm_new",
+  });
+  assert.equal(stripe.last("paymentIntents.create").customer, undefined, "no customer for a one-off card");
+  assert.equal(stripe.count("customers.create"), 0);
+});
+
+test("one-time with a SAVED card charges on the customer the PM is attached to", async () => {
+  const stripe = h.makeStripe({ pmCustomer: "cus_saved" });
+  h.setStripe(stripe);
+  const res = await run({
+    items, paymentType: "single", donorDetails: donor, paymentMethod: "visa",
+    totalAmount: 100, stripePaymentMethodId: "pm_saved", stripeCustomerId: "cus_saved",
+  });
+  assert.equal(res.body.status, "Success");
+  assert.equal(stripe.last("paymentIntents.create").customer, "cus_saved");
+  assert.equal(stripe.count("customers.create"), 0, "must not mint a customer for a working saved card");
+});
+
+test("one-time with a saved card whose customer was DELETED: re-vaults instead of failing with 'No such customer'", async () => {
+  // Exactly the reported failure: the customer was deleted in Stripe, which
+  // detaches its payment methods — the client still posts the dead customer id.
+  const stripe = h.makeStripe({ deadCustomers: ["cus_dead"] }); // PM now unattached
+  h.setStripe(stripe);
+  const res = await run({
+    items, paymentType: "single", donorDetails: donor, paymentMethod: "visa",
+    totalAmount: 25.5, stripePaymentMethodId: "pm_saved", stripeCustomerId: "cus_dead",
+  });
+  assert.equal(res.body.status, "Success", "a stale customer id must not fail the donation");
+  const pi = stripe.last("paymentIntents.create");
+  assert.notEqual(pi.customer, "cus_dead", "never charges on the dead customer");
+  assert.ok(pi.customer, "charges on the donor's live customer");
+  assert.ok(stripe.count("paymentMethods.attach") >= 1, "re-vaults the card");
+  assert.ok(
+    h.pmUpdates.some((u) => u.update.$set?.stripeCustomerId === pi.customer),
+    "heals the saved-card row so the next donation doesn't repeat the lookup"
+  );
+});
+
+test("one-time with a saved card whose customer id is stale but still live: charges the customer the PM really has", async () => {
+  const stripe = h.makeStripe({ pmCustomer: "cus_real" });
+  h.setStripe(stripe);
+  await run({
+    items, paymentType: "single", donorDetails: donor, paymentMethod: "visa",
+    totalAmount: 100, stripePaymentMethodId: "pm_saved", stripeCustomerId: "cus_stale",
+  });
+  assert.equal(stripe.last("paymentIntents.create").customer, "cus_real", "the PM's own customer wins over the client's");
+  assert.ok(h.pmUpdates.some((u) => u.update.$set?.stripeCustomerId === "cus_real"));
+});
+
+test("one-time with a permanently detached card: clear message and the dead card is retired", async () => {
+  // Stripe burns a payment method once detached ("may not be used again").
+  const stripe = h.makeStripe({ deadCustomers: ["cus_dead"], attachFails: true, detachFails: true });
+  h.setStripe(stripe);
+  const res = await run({
+    items, paymentType: "single", donorDetails: donor, paymentMethod: "visa",
+    totalAmount: 25.5, stripePaymentMethodId: "pm_burned", stripeCustomerId: "cus_dead",
+  });
+  assert.equal(res.statusCode, 400, "responds with an error, not a Stripe stack trace");
+  assert.match(String(res.body.message || ""), /no longer valid|add your card again/i);
+  assert.ok(
+    h.pmUpdates.some((u) => u.update.$set?.isActive === false),
+    "the unusable card is deactivated so it stops appearing at checkout"
+  );
+});
+
 /* ── VALIDATION ─────────────────────────────────────────────────────────── */
 test("recurring without a frequency is rejected", async () => {
   const res = await run({

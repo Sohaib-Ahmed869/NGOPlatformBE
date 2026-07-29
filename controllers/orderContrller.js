@@ -5,6 +5,11 @@ const Program = require("../models/program");
 const Organisation = require("../models/organisation");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
 const { getTenantStripe } = require("../services/tenantStripe");
+const {
+  resolveChargeCustomer,
+  ensureDonorCustomer,
+  healSavedCardCustomer,
+} = require("../services/stripeCustomers");
 const { cancelAtUnix, clampNextPaymentDate } = require("../services/recurringDates");
 const { sendReceiptEmail } = require("../services/recieptUtils");
 const { sendEmail } = require("../services/emailUtil");
@@ -502,9 +507,16 @@ exports.requestCancellation = async (req, res) => {
  * sandbox test clock, or otherwise stale data), it creates a fresh customer and
  * attaches the PM, so a stale saved card never fails the donation.
  *
+ * @param {object} [opts.user] donor User doc — when present their own customer
+ *                 is reused/created (and healed) instead of an anonymous one.
  * @returns {Promise<{ customer: object, paymentMethodType: string }>}
  */
-const resolveCustomerForPaymentMethod = async (stripe, paymentMethodId, donorDetails) => {
+const resolveCustomerForPaymentMethod = async (
+  stripe,
+  paymentMethodId,
+  donorDetails,
+  opts = {}
+) => {
   let pm;
   try {
     pm = await stripe.paymentMethods.retrieve(paymentMethodId);
@@ -524,13 +536,22 @@ const resolveCustomerForPaymentMethod = async (stripe, paymentMethodId, donorDet
     }
   }
 
-  // No valid customer → create one and attach the PM.
+  // No valid customer → reuse/create the donor's own and attach the PM. Signed-in
+  // donors get their existing customer (so repeat donations don't spawn a new
+  // anonymous one each time); guests get an ad-hoc customer as before.
   if (!customer) {
-    customer = await stripe.customers.create({
-      email: donorDetails.email,
-      name: donorDetails.name,
-      phone: donorDetails.phone,
-    });
+    if (opts.user) {
+      // Only the id is ever used downstream — no need to re-fetch the customer.
+      customer = {
+        id: await ensureDonorCustomer(stripe, opts.user, opts.organisationId),
+      };
+    } else {
+      customer = await stripe.customers.create({
+        email: donorDetails.email,
+        name: donorDetails.name,
+        phone: donorDetails.phone,
+      });
+    }
     try {
       await stripe.paymentMethods.attach(paymentMethodId, { customer: customer.id });
     } catch (attachErr) {
@@ -567,6 +588,16 @@ const resolveCustomerForPaymentMethod = async (stripe, paymentMethodId, donorDet
     });
   } catch (e) {
     console.error("Failed to set default payment method:", e.message);
+  }
+
+  // Point the donor's saved-card rows at the customer we actually used, so the
+  // next donation doesn't repeat the same stale lookup.
+  if (opts.user) {
+    await healSavedCardCustomer({
+      userId: opts.user._id,
+      paymentMethodId,
+      customerId: customer.id,
+    });
   }
 
   return { customer, paymentMethodType };
@@ -841,11 +872,23 @@ exports.createOrder = async (req, res) => {
           // payment method is attached to the donor's Stripe customer, so the
           // PaymentIntent MUST include that customer (Stripe rejects an attached
           // PM otherwise). New (one-off) cards have no customer — omit it.
+          //
+          // The customer id the browser sends is only a hint: it can be stale
+          // (customer deleted, or saved while the tenant used different Stripe
+          // keys) and would fail the charge with "No such customer". Verify it
+          // against Stripe — re-vaulting the card if needed — before charging.
+          const chargeCustomerId = await resolveChargeCustomer(stripe, {
+            paymentMethodId: stripePaymentMethodId,
+            requestedCustomerId: stripeCustomerId,
+            user: user ? await User.findById(user._id) : null,
+            organisationId: req.organisation?._id,
+          });
+
           const paymentIntent = await stripe.paymentIntents.create({
             amount: Math.round(totalAmount * 100),
             currency: "aud",
             payment_method: stripePaymentMethodId,
-            ...(stripeCustomerId ? { customer: stripeCustomerId } : {}),
+            ...(chargeCustomerId ? { customer: chargeCustomerId } : {}),
             confirm: true,
             off_session: true,
             description: `Donation ${savedOrder.donationId}`,
@@ -858,6 +901,7 @@ exports.createOrder = async (req, res) => {
 
           savedOrder.transactionDetails = {
             stripePaymentMethodId,
+            ...(chargeCustomerId ? { stripeCustomerId: chargeCustomerId } : {}),
             stripePaymentIntentId: paymentIntent.id,
             stripeStatus: paymentIntent.status,
             clientSecret: paymentIntent.client_secret,
@@ -888,7 +932,11 @@ exports.createOrder = async (req, res) => {
             await resolveCustomerForPaymentMethod(
               stripe,
               stripePaymentMethodId,
-              donorDetails
+              donorDetails,
+              {
+                user: user ? await User.findById(user._id) : null,
+                organisationId: req.organisation?._id,
+              }
             );
 
           let interval;
@@ -1156,7 +1204,11 @@ exports.createOrder = async (req, res) => {
           const { customer } = await resolveCustomerForPaymentMethod(
             stripe,
             stripePaymentMethodId,
-            donorDetails
+            donorDetails,
+            {
+              user: user ? await User.findById(user._id) : null,
+              organisationId: req.organisation?._id,
+            }
           );
 
           const paymentIntent = await stripe.paymentIntents.create({

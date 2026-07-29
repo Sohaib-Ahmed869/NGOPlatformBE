@@ -1158,7 +1158,14 @@ async function handleInvoicePaymentSucceeded(invoice) {
         if (order.paymentType === 'recurring' || order.paymentType === 'installments') {
           try {
             const result = await sendReceiptEmail(order);
-            console.log(`Sent receipt email for order ${order._id}:`, result.message);
+            if (result && result.success === false) {
+              console.error(
+                `Receipt email FAILED for order ${order._id}:`,
+                result.error?.message || result.message
+              );
+            } else {
+              console.log(`Sent receipt email for order ${order._id}`);
+            }
           } catch (emailError) {
             console.error('Failed to send receipt email:', emailError);
           }

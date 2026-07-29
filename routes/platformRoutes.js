@@ -6,6 +6,9 @@ const isSuperAdmin = require("../middleware/isSuperAdmin");
 // Public — the marketing site reads safe branding + contact fields.
 router.get("/public", ctrl.getPublic);
 
+// Public — aggregate, non-identifying platform totals for the marketing hero.
+router.get("/stats", ctrl.getPublicStats);
+
 // Superadmin only — edit the platform settings + branding.
 router.get("/settings", isSuperAdmin, ctrl.getSettings);
 router.put("/settings", isSuperAdmin, ctrl.updateSettings);
