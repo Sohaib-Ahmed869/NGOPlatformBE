@@ -83,6 +83,8 @@ productSchema.pre('findOneAndUpdate', function(next) {
     next();
 });
 
+productSchema.index({ organisationId: 1, createdAt: -1 });
+
 const Product = mongoose.model('Product', productSchema);
 
 module.exports = Product;

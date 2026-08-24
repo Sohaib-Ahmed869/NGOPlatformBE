@@ -46,4 +46,6 @@ goFundMeDonationSchema.index({ stripePaymentIntentId: 1 }, { unique: true });
 goFundMeDonationSchema.index({ goFundMeId: 1, paymentStatus: 1 });
 goFundMeDonationSchema.index({ organisationId: 1, donorEmail: 1 });
 
+goFundMeDonationSchema.index({ organisationId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("GoFundMeDonation", goFundMeDonationSchema);

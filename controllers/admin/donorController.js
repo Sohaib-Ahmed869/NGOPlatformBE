@@ -6,6 +6,192 @@ const Order      = require("../../models/order");
 const User       = require("../../models/user");
 const stripeLib  = require("stripe");
 const { getTenantStripe } = require("../../services/tenantStripe");
+const { escapeRegex } = require("../../utils/operatorInput");
+
+/* ── donor rollup, computed in MongoDB ──────────────────────────────────────
+ * The donor list used to load EVERY non-failed order for the organisation into
+ * Node, group it by donor in JavaScript, then filter, sort and finally slice a
+ * page out of the result. Asking for ten rows did the whole organisation's work,
+ * and every page change did it again.
+ *
+ * The expressions below are a direct port of that JavaScript so the numbers do
+ * not move. Three deliberate differences, all cases where the old code produced
+ * a crash or a NaN rather than a value:
+ *
+ *   - a null `frequency` fell into `frequency.toLowerCase()` and threw; here it
+ *     takes the same path as an unrecognised frequency (`totalPayments || 1`).
+ *   - a missing `amount` / `installmentAmount` produced NaN, which serialises to
+ *     null and renders as an empty cell; here it contributes 0.
+ *   - sorting carries an `_id` tiebreak, without which two donors on equal
+ *     totals could repeat or vanish across page boundaries.
+ */
+
+// getFullYear()/getMonth() read LOCAL time, while $year/$month default to UTC.
+// Passing the server's own zone keeps the monthly and yearly counts identical to
+// what this endpoint returns today. (That the result depends on server timezone
+// at all is a pre-existing quirk — preserved here rather than silently changed.)
+const SERVER_TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+})();
+
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+const MS_PER_WEEK = MS_PER_DAY * 7;
+
+/** JavaScript's `x || 1` — 0, null, false and "" all become 1. */
+const orOne = (expr) => ({
+  $let: { vars: { v: expr }, in: { $cond: [{ $in: ["$$v", [null, 0, false, ""]] }, 1, "$$v"] } },
+});
+
+/** JavaScript's `x || 0`, for numeric fields that may be absent. */
+const orZero = (expr) => ({ $ifNull: [expr, 0] });
+
+const yearOf = (d) => ({ $year: { date: d, timezone: SERVER_TZ } });
+// $month is 1-indexed and getMonth() is 0-indexed, but both are only ever used
+// inside a difference, so the offset cancels.
+const monthOf = (d) => ({ $month: { date: d, timezone: SERVER_TZ } });
+
+/** Port of calculateRecurringTotalAmount(): how many payments a schedule implies. */
+const recurringPaymentCount = {
+  $cond: [
+    { $or: [{ $not: ["$recurringDetails.startDate"] }, { $not: ["$recurringDetails.endDate"] }] },
+    orOne("$recurringDetails.totalPayments"),
+    {
+      $let: {
+        vars: {
+          freq: { $toLower: { $ifNull: ["$recurringDetails.frequency", ""] } },
+          start: "$recurringDetails.startDate",
+          end: "$recurringDetails.endDate",
+        },
+        in: {
+          $switch: {
+            branches: [
+              {
+                case: { $eq: ["$$freq", "daily"] },
+                then: { $add: [{ $ceil: { $divide: [{ $subtract: ["$$end", "$$start"] }, MS_PER_DAY] } }, 1] },
+              },
+              {
+                case: { $eq: ["$$freq", "weekly"] },
+                then: { $add: [{ $ceil: { $divide: [{ $subtract: ["$$end", "$$start"] }, MS_PER_WEEK] } }, 1] },
+              },
+              {
+                case: { $eq: ["$$freq", "monthly"] },
+                then: {
+                  $add: [
+                    { $multiply: [{ $subtract: [yearOf("$$end"), yearOf("$$start")] }, 12] },
+                    { $subtract: [monthOf("$$end"), monthOf("$$start")] },
+                    1,
+                  ],
+                },
+              },
+              {
+                case: { $eq: ["$$freq", "yearly"] },
+                then: { $add: [{ $subtract: [yearOf("$$end"), yearOf("$$start")] }, 1] },
+              },
+            ],
+            default: orOne("$recurringDetails.totalPayments"),
+          },
+        },
+      },
+    },
+  ],
+};
+
+// `!o.paymentType` in the original — missing, null and "" all count as one-time.
+const IS_ONE_TIME = {
+  $or: [
+    { $in: [{ $ifNull: ["$paymentType", ""] }, ["", "single", "one_time"]] },
+  ],
+};
+const IS_INSTALLMENTS = {
+  $and: [{ $eq: ["$paymentType", "installments"] }, { $ne: [{ $ifNull: ["$installmentDetails", null] }, null] }],
+};
+const IS_RECURRING = {
+  $and: [{ $eq: ["$paymentType", "recurring"] }, { $ne: [{ $ifNull: ["$recurringDetails", null] }, null] }],
+};
+
+const INSTALMENTS_PAID_VALUE = {
+  $multiply: [orZero("$installmentDetails.installmentsPaid"), orZero("$installmentDetails.installmentAmount")],
+};
+
+/** What this order is expected to raise in total. */
+const ORDER_EXPECTED = {
+  $switch: {
+    branches: [
+      { case: IS_ONE_TIME, then: orZero("$totalAmount") },
+      {
+        case: IS_INSTALLMENTS,
+        then: {
+          $cond: [
+            { $eq: ["$paymentStatus", "cancelled"] },
+            INSTALMENTS_PAID_VALUE,
+            {
+              $multiply: [
+                orZero("$installmentDetails.numberOfInstallments"),
+                orZero("$installmentDetails.installmentAmount"),
+              ],
+            },
+          ],
+        },
+      },
+      {
+        case: IS_RECURRING,
+        then: { $multiply: [recurringPaymentCount, orZero("$recurringDetails.amount")] },
+      },
+    ],
+    // An order typed "installments"/"recurring" with no matching details block
+    // fell through every branch in the original and contributed nothing.
+    default: 0,
+  },
+};
+
+/** What this order has actually collected. */
+const ORDER_PAID = {
+  $switch: {
+    branches: [
+      {
+        case: IS_ONE_TIME,
+        then: { $cond: [{ $eq: ["$paymentStatus", "completed"] }, orZero("$totalAmount"), 0] },
+      },
+      { case: IS_INSTALLMENTS, then: INSTALMENTS_PAID_VALUE },
+      {
+        case: IS_RECURRING,
+        then: {
+          $sum: {
+            $map: {
+              input: {
+                $filter: {
+                  input: { $ifNull: ["$recurringDetails.paymentHistory", []] },
+                  as: "p",
+                  cond: { $in: ["$$p.status", ["succeeded", "completed"]] },
+                },
+              },
+              as: "p",
+              in: orZero("$$p.amount"),
+            },
+          },
+        },
+      },
+    ],
+    default: 0,
+  },
+};
+
+// Only these can be sorted on. The original subtracted the two values
+// numerically, so any non-numeric field produced NaN and left the order
+// arbitrary; name, email and the two dates now sort for real.
+const SORT_FIELDS = {
+  totalPaid: "totalPaid",
+  totalExpected: "totalExpected",
+  donationCount: "donationCount",
+  firstDonationDate: "firstDonationDate",
+  lastDonationDate: "lastDonationDate",
+  name: "user.name",
+  email: "user.email",
+};
 
 // Helper: calculate full expected amount for recurring orders
 function calculateRecurringTotalAmount(order) {
@@ -150,129 +336,124 @@ router.get("/", isAdmin, async (req, res) => {
   try {
     const page      = parseInt(req.query.page)  || 1;
     const limit     = parseInt(req.query.limit) || 10;
-    const search    = (req.query.search || "").toLowerCase();
+    const search    = (req.query.search || "").trim();
     const sortBy    = req.query.sortBy  || "totalPaid";
     const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
     const type      = req.query.type    || "All";
     const skip      = (page - 1) * limit;
 
-    const donorOrgFilter = { paymentStatus: { $ne: "failed" } };
+    const donorOrgFilter = { paymentStatus: { $ne: "failed" }, user: { $ne: null } };
     if (req.organisation?._id) donorOrgFilter.organisationId = req.organisation._id;
-    const allOrders = await Order.find(donorOrgFilter)
-      .populate("user", "name email phone address country dateOfBirth")
-      .lean();
 
-    const map = new Map();
-    allOrders.forEach(o => {
-      // Skip orders with no linked donor user (anonymous donations).
-      if (!o.user || !o.user._id) return;
-      const uid = o.user._id.toString();
-      if (!map.has(uid)) map.set(uid, { user: o.user, orders: [] });
-      map.get(uid).orders.push(o);
-    });
+    // Post-group filters. Applied after the rollup because both read values that
+    // only exist once an donor's orders have been combined.
+    const postGroup = [];
+    if (type !== "All") {
+      postGroup.push({ $match: { donationType: type === "single" ? "one-time" : type } });
+    }
+    if (search) {
+      const rx = { $regex: escapeRegex(search), $options: "i" };
+      postGroup.push({ $match: { $or: [{ "user.name": rx }, { "user.email": rx }] } });
+    }
 
-    let donors = Array.from(map.values()).map(({ user, orders }) => {
-      // split full name
-      const [ firstName, ...rest ] = (user.name || "").trim().split(" ");
-      const lastName = rest.join(" ");
+    const sortField = SORT_FIELDS[sortBy] || "totalPaid";
+    // MongoDB orders strings by byte value, so "asad" sorts after "Zoe". A
+    // case-insensitive collation is what anyone reading a name column expects.
+    // Applied ONLY for the two string sorts: a collation also changes how string
+    // equality matches elsewhere in the pipeline, and there is no reason to take
+    // that on when ordering by an amount or a date.
+    const stringSort = sortField === "user.name" || sortField === "user.email";
 
-      // build full address
+    const pipeline = [
+      { $match: donorOrgFilter },
+      { $addFields: { _expected: ORDER_EXPECTED, _paid: ORDER_PAID } },
+      {
+        $group: {
+          _id: "$user",
+          totalPaid:         { $sum: "$_paid" },
+          totalExpected:     { $sum: "$_expected" },
+          donationCount:     { $sum: 1 },
+          firstDonationDate: { $min: "$createdAt" },
+          lastDonationDate:  { $max: "$createdAt" },
+          // $push skips missing values, so absent paymentTypes are made explicit
+          // — the original array carried an `undefined` slot, which serialises to
+          // null, and the client counts these.
+          donationTypes:     { $push: { $ifNull: ["$paymentType", null] } },
+        },
+      },
+      {
+        $addFields: {
+          donationType: {
+            $cond: [
+              { $in: ["recurring", "$donationTypes"] },
+              "recurring",
+              { $cond: [{ $in: ["installments", "$donationTypes"] }, "installments", "one-time"] },
+            ],
+          },
+          // Rounded before the sort, exactly as the original did.
+          totalPaid:     { $round: ["$totalPaid", 2] },
+          totalExpected: { $round: ["$totalExpected", 2] },
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "user",
+          pipeline: [{ $project: { name: 1, email: 1, phone: 1, address: 1, country: 1, dateOfBirth: 1 } }],
+        },
+      },
+      // Not preserveNullAndEmptyArrays: an order pointing at a deleted user came
+      // back from populate() as null and was skipped. Same outcome here.
+      { $unwind: "$user" },
+      ...postGroup,
+      {
+        // One pass yields both the page and the count it is a page of. Splitting
+        // them would mean running the whole rollup twice.
+        $facet: {
+          rows: [{ $sort: { [sortField]: sortOrder, _id: 1 } }, { $skip: skip }, { $limit: limit }],
+          total: [{ $count: "n" }],
+        },
+      },
+    ];
+
+    const aggregation = Order.aggregate(pipeline).allowDiskUse(true);
+    if (stringSort) aggregation.collation({ locale: "en", strength: 2 });
+    const [result] = await aggregation;
+
+    const total = result?.total?.[0]?.n || 0;
+
+    // Presentation-only derivations, done for the page rather than the org.
+    const donors = (result?.rows || []).map((d) => {
+      const user = d.user || {};
+      const [firstName, ...rest] = (user.name || "").trim().split(" ");
       const addr = user.address || {};
-      const fullAddress = [
-        addr.street,
-        addr.city,
-        addr.state,
-        addr.postalCode
-      ].filter(Boolean).join(", ");
-
-      let totalPaid     = 0;
-      let totalExpected = 0;
-      let firstDate, lastDate;
-      const types = [];
-
-      orders.forEach(o => {
-        types.push(o.paymentType);
-        const dt = new Date(o.createdAt);
-        if (!firstDate || dt < firstDate) firstDate = dt;
-        if (!lastDate  || dt > lastDate)  lastDate  = dt;
-
-        // one-time
-        if (!o.paymentType || ["single","one_time"].includes(o.paymentType)) {
-          totalExpected += o.totalAmount;
-          if (o.paymentStatus === "completed") {
-            totalPaid += o.totalAmount;
-          }
-        }
-        // installments
-        else if (o.paymentType === "installments" && o.installmentDetails) {
-          const { numberOfInstallments, installmentAmount, installmentsPaid } = o.installmentDetails;
-          const exp = o.paymentStatus === "cancelled"
-            ? (installmentsPaid||0) * installmentAmount
-            : numberOfInstallments * installmentAmount;
-          totalExpected += exp;
-          totalPaid     += (installmentsPaid||0) * installmentAmount;
-        }
-        // recurring
-        else if (o.paymentType === "recurring" && o.recurringDetails) {
-          totalExpected += calculateRecurringTotalAmount(o);
-          if (Array.isArray(o.recurringDetails.paymentHistory)) {
-            totalPaid += o.recurringDetails.paymentHistory
-              .filter(p => ["succeeded","completed"].includes(p.status))
-              .reduce((sum,p) => sum + (p.amount||0), 0);
-          }
-        }
-      });
-
-      let donationType = "one-time";
-      if (types.includes("recurring")) donationType = "recurring";
-      else if (types.includes("installments")) donationType = "installments";
-
       return {
         _id:               user._id,
         name:              user.name,
-        firstName,                             // ← added
-        lastName,                              // ← added
+        firstName,
+        lastName:          rest.join(" "),
         email:             user.email,
         phone:             user.phone,
         address:           user.address,
-        fullAddress,                           // ← added
-        country:           user.country,       // add this line
-        dateOfBirth:               user.dateOfBirth,    // ← added (alias for dateOfBirth)
-        totalPaid:         Number(totalPaid.toFixed(2)),
-        totalExpected:     Number(totalExpected.toFixed(2)),
-        donationCount:     orders.length,
-        firstDonationDate: firstDate?.toISOString(),
-        lastDonationDate:  lastDate?.toISOString(),
-        donationTypes:     types,
-        donationType
+        fullAddress:       [addr.street, addr.city, addr.state, addr.postalCode].filter(Boolean).join(", "),
+        country:           user.country,
+        dateOfBirth:       user.dateOfBirth,
+        totalPaid:         d.totalPaid,
+        totalExpected:     d.totalExpected,
+        donationCount:     d.donationCount,
+        firstDonationDate: d.firstDonationDate?.toISOString(),
+        lastDonationDate:  d.lastDonationDate?.toISOString(),
+        donationTypes:     d.donationTypes,
+        donationType:      d.donationType,
       };
     });
-    console.log(donors);
-
-    // 5) search
-    if (search) {
-      donors = donors.filter(d =>
-        d.name.toLowerCase().includes(search) ||
-        d.email.toLowerCase().includes(search)
-      );
-    }
-    // 6) type filter
-    if (type !== "All") {
-      const tf = type === "single" ? "one-time" : type;
-      donors = donors.filter(d => d.donationType === tf);
-    }
-    // 7) sort
-    donors.sort((a,b) =>
-      ((a[sortBy]||0) - (b[sortBy]||0)) * sortOrder
-    );
-    // 8) paginate
-    const total = donors.length;
-    const paged = donors.slice(skip, skip + limit);
 
     res.json({
       status: "Success",
       data: {
-        donors: paged,
+        donors,
         pagination: {
           total,
           pages:       Math.ceil(total / limit),

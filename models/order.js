@@ -415,6 +415,14 @@ OrderSchema.index({ organisationId: 1, donationId: 1 }, { unique: true });
 // Performance index for org-scoped queries
 OrderSchema.index({ organisationId: 1, paymentStatus: 1 });
 
+// The one that matters most. Orders are the fastest-growing tenant collection
+// and 31 call sites sort them newest-first. Without this the sort is a blocking
+// in-memory sort capped at 32MB — around 34k orders for a single tenant at the
+// current ~940 byte average — after which MongoDB spills it to disk and the
+// query degrades from milliseconds to seconds. Splitting tenants into separate
+// databases would NOT fix that; only this index does.
+OrderSchema.index({ organisationId: 1, createdAt: -1 });
+
 const Order = mongoose.model("Order", OrderSchema);
 
 module.exports = Order;

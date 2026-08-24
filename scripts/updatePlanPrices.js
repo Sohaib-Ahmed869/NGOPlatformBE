@@ -25,7 +25,9 @@
 
 require("dotenv").config();
 const mongoose = require("mongoose");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+// Console-configured key first, then STRIPE_SECRET_KEY — primed after connect.
+const platformStripe = require("../services/platformStripe");
+const stripe = platformStripe.stripe;
 const connectDB = require("../config/db");
 const Organisation = require("../models/organisation");
 const stripePrices = require("../config/stripePrices");
@@ -153,6 +155,7 @@ async function run() {
 (async () => {
   try {
     await connectDB();
+    await platformStripe.prime(); // pick up console-configured credentials
     await run();
   } catch (err) {
     console.error("Price update failed:", err);

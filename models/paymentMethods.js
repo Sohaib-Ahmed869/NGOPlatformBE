@@ -60,4 +60,9 @@ const paymentMethodSchema = new mongoose.Schema(
   }
 );
 
+// `user` is by far the most selective field here — every read is "this donor's
+// cards". The org index exists so tenant-wide sweeps don't fall back to a scan.
+paymentMethodSchema.index({ user: 1, isActive: 1 });
+paymentMethodSchema.index({ organisationId: 1, user: 1 });
+
 module.exports = mongoose.model("PaymentMethod", paymentMethodSchema);

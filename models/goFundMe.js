@@ -69,4 +69,6 @@ goFundMeSchema.pre("save", function (next) {
   next();
 });
 
+goFundMeSchema.index({ organisationId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("GoFundMe", goFundMeSchema);

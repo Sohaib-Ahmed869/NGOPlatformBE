@@ -78,4 +78,10 @@ const programSchema = new Schema(
   }
 );
 
+// Public list filters by status; the admin list takes the whole org and sorts
+// by date. A single compound index can't serve both, because a range on
+// `status` breaks the sort order of anything after it.
+programSchema.index({ organisationId: 1, status: 1 });
+programSchema.index({ organisationId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("Program", programSchema);

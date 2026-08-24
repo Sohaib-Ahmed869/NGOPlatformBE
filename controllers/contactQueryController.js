@@ -2,22 +2,21 @@ const ContactQuery = require("../models/contactQuery");
 const User = require("../models/user");
 const { sendEmail } = require("../services/emailUtil");
 const { emitToSuperAdmins } = require("../services/socket");
+const input = require("../utils/operatorInput");
+const { listAssignableStaff } = require("../utils/platformStaff");
 
 const isUnread = (q) => !q.readAt || new Date(q.lastMessageAt) > new Date(q.readAt);
 
 /** GET /api/superadmin/contact-queries */
 exports.list = async (req, res) => {
   try {
-    const { status, search } = req.query;
     const filter = {};
+    const status = input.filterValue(req.query.status);
     if (status && status !== "all") filter.status = status;
-    if (search) {
-      filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
-        { subject: { $regex: search, $options: "i" } },
-      ];
-    }
+    // The term was interpolated into $regex raw: "(" threw inside Mongo and came
+    // back as a 500, and ".*" matched every query in the inbox.
+    const rx = input.searchRegex(req.query.search);
+    if (rx) filter.$or = [{ name: rx }, { email: rx }, { subject: rx }];
     const docs = await ContactQuery.find(filter)
       .populate("assignee.userId", "name email profileImage")
       .sort({ lastMessageAt: -1, createdAt: -1 })
@@ -60,7 +59,7 @@ exports.unreadCount = async (req, res) => {
 /** GET /api/superadmin/contact-queries/staff — assignable operators */
 exports.getStaff = async (req, res) => {
   try {
-    const staff = await User.find({ role: "superadmin" }).select("name email").sort({ name: 1 });
+    const staff = await listAssignableStaff("support");
     res.json({ staff });
   } catch (err) {
     console.error("Get staff error:", err);
@@ -93,14 +92,19 @@ exports.get = async (req, res) => {
  */
 exports.addMessage = async (req, res) => {
   try {
-    const { kind, body } = req.body;
-    if (!body || !body.trim()) return res.status(400).json({ error: "Message is required" });
+    const { kind } = req.body;
+    // `body.trim()` threw a TypeError — surfacing as a 500 — for anything that
+    // wasn't a string, including a number or an object from a malformed client.
+    const parsed = input.text(req.body?.body, "Message", { max: 20000, required: true, allowEmpty: false });
+    if (parsed.error) return res.status(400).json({ error: "Message is required" });
+    const body = parsed.value;
+
     const query = await ContactQuery.findById(req.params.id);
     if (!query) return res.status(404).json({ error: "Query not found" });
 
     const entry = {
       kind: kind === "reply" ? "reply" : "note",
-      body: body.trim(),
+      body,
       author: req.user._id,
       authorName: req.user.name || req.user.email || "",
       mentions: Array.isArray(req.body.mentions) ? req.body.mentions.filter(Boolean) : [],
@@ -161,6 +165,11 @@ exports.updateStatus = async (req, res) => {
 exports.assign = async (req, res) => {
   try {
     const { userId } = req.body;
+    // A malformed id reached User.findById and came back as a 500 rather than
+    // "Invalid assignee".
+    if (userId && !input.isObjectId(String(userId))) {
+      return res.status(400).json({ error: "Invalid assignee" });
+    }
     const query = await ContactQuery.findById(req.params.id);
     if (!query) return res.status(404).json({ error: "Query not found" });
 
@@ -184,7 +193,10 @@ exports.assign = async (req, res) => {
 /** POST /api/superadmin/contact-queries/:id/read */
 exports.markRead = async (req, res) => {
   try {
-    await ContactQuery.updateOne({ _id: req.params.id }, { $set: { readAt: new Date() } });
+    // This used to answer { ok: true } even when it matched nothing, so the
+    // badge could stay stuck while the console believed it had cleared it.
+    const r = await ContactQuery.updateOne({ _id: req.params.id }, { $set: { readAt: new Date() } });
+    if (!r.matchedCount) return res.status(404).json({ error: "Query not found" });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to mark read" });

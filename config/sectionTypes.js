@@ -877,6 +877,60 @@ function defaultHomeSections() {
   ];
 }
 
+/** Default sections for the standalone FAQ page (hero → FAQ accordion → CTA). */
+function defaultFaqSections() {
+  return [
+    {
+      id: "faq-hero",
+      type: "hero",
+      archived: false,
+      data: {
+        ...getSectionDefaults("hero"),
+        eyebrow: "Support",
+        title: "Frequently Asked Questions",
+        subtitle: "Quick answers to the things people ask us most. Can't find what you need? Get in touch — we're happy to help.",
+        image: "https://images.unsplash.com/photo-1600880292203-757bb62b4baf?w=1600&q=80",
+        icon: "LifeBuoy",
+        primaryCtaText: "Contact us",
+        primaryCtaLink: "/contact-us",
+        secondaryCtaText: "Get support",
+        secondaryCtaLink: "/support/new",
+      },
+    },
+    {
+      id: "faq-list",
+      type: "faq",
+      archived: false,
+      data: {
+        eyebrow: "Good to know",
+        heading: "Frequently asked questions",
+        items: [
+          { question: "How will my donation be used?", answer: "<p>Every contribution goes directly toward our programs and the communities we serve. We publish where funds are directed and keep administrative costs as low as possible.</p>" },
+          { question: "Is my donation tax-deductible?", answer: "<p>Yes. A receipt is emailed automatically as soon as your donation is processed. If you can't find it, contact us with the date and amount and we'll resend it.</p>" },
+          { question: "How do I set up a recurring donation?", answer: "<p>Choose a cause, select \"Recurring\" at checkout, and pick how often you'd like to give. You can update or cancel it any time from your account.</p>" },
+          { question: "Can I change or cancel my subscription?", answer: "<p>Yes — sign in and visit My Subscriptions to pause, change the amount, or cancel a recurring donation at any time.</p>" },
+          { question: "How can I volunteer or fundraise?", answer: "<p>We'd love your help. Visit our Get Involved page to apply as a volunteer or start your own fundraiser.</p>" },
+          { question: "Is my payment information secure?", answer: "<p>Yes. Payments are processed securely and we never store your full card details on our servers.</p>" },
+          { question: "How soon will I hear back if I contact you?", answer: "<p>We usually reply within 1–2 business days. For anything urgent, calling or emailing us directly is the fastest way to reach the team.</p>" },
+        ],
+      },
+    },
+    {
+      id: "faq-cta",
+      type: "ctaBand",
+      archived: false,
+      data: {
+        title: "Still have a question?",
+        text: "Our team is here to help — reach out and we'll get back to you within 1–2 business days.",
+        primaryCtaText: "Contact us",
+        primaryCtaLink: "/contact-us",
+        secondaryCtaText: "Submit a support request",
+        secondaryCtaLink: "/support/new",
+      },
+    },
+  ];
+}
+
 module.exports = {
   SECTION_TYPES,
   getSectionType,
@@ -889,4 +943,5 @@ module.exports = {
   defaultInitiativesSections,
   defaultGetInvolvedSections,
   defaultGivingSections,
+  defaultFaqSections,
 };

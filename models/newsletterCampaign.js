@@ -55,4 +55,10 @@ const newsletterCampaignSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+newsletterCampaignSchema.index({ organisationId: 1, createdAt: -1 });
+// jobs/processCampaigns.js runs this exact query EVERY MINUTE, across all
+// tenants. Without an index that is a full collection scan once a minute
+// forever, and it gets slower with every campaign any tenant has ever sent.
+newsletterCampaignSchema.index({ status: 1, scheduledAt: 1 });
+
 module.exports = mongoose.model("NewsletterCampaign", newsletterCampaignSchema);

@@ -26,8 +26,14 @@
     "seed:mailboxes": "node scripts/seedMailboxesFromOrgEmail.js",
     "seed:fundraisers": "node scripts/seedFundraisers.js",
     "prices:update": "node scripts/updatePlanPrices.js",
+    "audit:mrr": "node scripts/auditMrr.js",
     "audit:stripe-customers": "node scripts/auditStripeCustomers.js",
-    "fix:stripe-customers": "node scripts/auditStripeCustomers.js --fix"
+    "fix:stripe-customers": "node scripts/auditStripeCustomers.js --fix",
+    "diagnose:registration": "node scripts/diagnoseRegistration.js",
+    "fix:registration": "node scripts/diagnoseRegistration.js --activate",
+    "audit:stripe-catalog": "node scripts/reconcileStripeCatalog.js",
+    "fix:stripe-catalog": "node scripts/reconcileStripeCatalog.js --fix",
+    "migrate:platform-roles": "node scripts/migratePlatformRoles.js"
   },
   "keywords": [],
   "author": "",

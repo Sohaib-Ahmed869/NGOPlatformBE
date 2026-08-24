@@ -1,0 +1,157 @@
+const mongoose = require("mongoose");
+
+// A unified thread entry — an internal note (team-only) or a reply emailed to
+// the lead's contact. Same shape as ContactQuery's threadEntrySchema.
+const threadEntrySchema = new mongoose.Schema(
+  {
+    kind: { type: String, enum: ["note", "reply"], default: "note" },
+    body: { type: String, required: true },
+    author: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    authorName: { type: String, default: "" },
+    mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    emailedTo: { type: String, default: "" },
+    emailStatus: { type: String, enum: ["sent", "failed", ""], default: "" },
+  },
+  { timestamps: true }
+);
+
+const stageHistorySchema = new mongoose.Schema(
+  {
+    from: { type: String, default: "" },
+    to: { type: String, required: true },
+    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    changedByName: { type: String, default: "" },
+    note: { type: String, default: "" },
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+// Pipeline stages. "won" and "lost" are terminal — "won" is only ever set by
+// the Convert action (never by the plain stage-change endpoint), so a lead can
+// never read Won without a real convertedOrgId behind it.
+const STAGES = ["new", "contacted", "qualified", "demo_scheduled", "proposal_sent", "won", "lost"];
+
+const leadSchema = new mongoose.Schema(
+  {
+    // ── Organisation info ──
+    orgName: { type: String, required: true, trim: true },
+    orgWebsite: { type: String, default: "" },
+    // Mirrors Organisation.isMuslimCharity 1:1 so conversion is a trivial copy.
+    verticalType: { type: String, enum: ["general", "muslim"], default: "general" },
+    causeAreas: [{ type: String }],
+    country: { type: String, default: "" },
+
+    // ── Contact person ──
+    contactName: { type: String, required: true, trim: true },
+    contactEmail: { type: String, required: true, trim: true, lowercase: true },
+    contactPhone: { type: String, default: "" },
+    contactRole: { type: String, default: "" },
+
+    // ── Size / budget ──
+    staffSize: { type: String, enum: ["1-5", "6-20", "21-50", "51-200", "200+", ""], default: "" },
+    annualBudgetRange: {
+      type: String,
+      enum: ["under_50k", "50k_250k", "250k_1m", "1m_5m", "5m_plus", ""],
+      default: "",
+    },
+    donorDatabaseSize: {
+      type: String,
+      enum: ["under_500", "500_2500", "2500_10000", "10000_plus", "unsure", ""],
+      default: "",
+    },
+
+    // ── Current tools / challenges ──
+    currentTools: [{ type: String }],
+    currentToolsOther: { type: String, default: "" },
+    challenges: [{ type: String }],
+    challengesOther: { type: String, default: "" },
+
+    // ── Intent / timeline ──
+    interestedPlan: { type: String, default: "" },
+    interestedBillingCycle: { type: String, enum: ["monthly", "annual", ""], default: "" },
+    timeline: {
+      type: String,
+      enum: ["immediately", "this_month", "this_quarter", "this_year", "just_researching", ""],
+      default: "",
+    },
+    decisionRole: {
+      type: String,
+      enum: ["decision_maker", "influencer", "researching_for_others", ""],
+      default: "",
+    },
+    message: { type: String, default: "" },
+
+    // ── Source / UTM tracking ──
+    source: {
+      type: String,
+      enum: ["get_started_form", "contact_page", "superadmin_manual", "referral", "other"],
+      default: "get_started_form",
+    },
+    utm: {
+      source: { type: String, default: "" },
+      medium: { type: String, default: "" },
+      campaign: { type: String, default: "" },
+      term: { type: String, default: "" },
+      content: { type: String, default: "" },
+    },
+    referrerUrl: { type: String, default: "" },
+    landingPage: { type: String, default: "" },
+
+    // ── Consent ──
+    consentToContact: { type: Boolean, default: false },
+    consentAt: { type: Date, default: null },
+
+    // ── Spam guard ──
+    honeypotTriggered: { type: Boolean, default: false },
+    fastSubmit: { type: Boolean, default: false },
+    flaggedSpam: { type: Boolean, default: false },
+    submitIp: { type: String, default: "" },
+
+    // ── CRM mechanics ──
+    stage: { type: String, enum: STAGES, default: "new" },
+    stageHistory: { type: [stageHistorySchema], default: [] },
+    assignee: {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      name: { type: String, default: "" },
+      assignedAt: { type: Date, default: null },
+    },
+    thread: { type: [threadEntrySchema], default: [] },
+    lastMessageAt: { type: Date, default: Date.now },
+
+    lostReason: {
+      type: String,
+      enum: ["budget", "timing", "chose_competitor", "no_response", "not_a_fit", "spam", "other", ""],
+      default: "",
+    },
+    lostReasonNote: { type: String, default: "" },
+    lostAt: { type: Date, default: null },
+
+    // ── Conversion ──
+    convertedOrgId: { type: mongoose.Schema.Types.ObjectId, ref: "Organisation", default: null },
+    convertedAt: { type: Date, default: null },
+    // "manual_provision" = comped/free, created instantly, no Stripe.
+    // "manual_provision_paid" = operator-configured deal that still needed real
+    // payment — either charged in the console (Elements) or via an emailed
+    // payment link; both finalize through the same orgActivation.js chokepoint
+    // so the two aren't distinguished here (the audit log has that detail).
+    conversionMode: { type: String, enum: ["activation_link", "manual_provision", "manual_provision_paid", ""], default: "" },
+    activation: {
+      tokenHash: { type: String, default: "" },
+      tokenExpiresAt: { type: Date, default: null },
+      sentAt: { type: Date, default: null },
+      sentBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      openedAt: { type: Date, default: null },
+    },
+  },
+  { timestamps: true }
+);
+
+leadSchema.index({ stage: 1, lastMessageAt: -1 });
+leadSchema.index({ contactEmail: 1 });
+leadSchema.index({ createdAt: -1 });
+leadSchema.index({ "activation.tokenHash": 1 });
+
+leadSchema.statics.STAGES = STAGES;
+
+module.exports = mongoose.model("Lead", leadSchema);

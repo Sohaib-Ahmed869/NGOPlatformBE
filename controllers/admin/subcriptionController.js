@@ -1,4 +1,5 @@
 // controllers/admin/subscriptionController.js
+const { getOrgIdentity } = require("../../utils/orgIdentity");
 const Order = require("../../models/order");
 const { getTenantStripe } = require("../../services/tenantStripe");
 
@@ -17,10 +18,16 @@ const sendCancellationApprovalEmail = async (subscription) => {
 
     console.log("Attempting to send cancellation approval email to:", user.email);
 
+    const orgIdentity = await getOrgIdentity(subscription.organisationId);
+
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            orgIdentity.logo
+              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #4a7c59;">Subscription Cancellation Approved</h2>
@@ -45,7 +52,7 @@ const sendCancellationApprovalEmail = async (subscription) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Subscription Cancellation Approved - Shahid Afridi Foundation",
+      `Subscription Cancellation Approved - ${orgIdentity.name}`,
       [],
       { organisationId: subscription.organisationId }
     );
@@ -75,10 +82,16 @@ const sendCancellationDenialEmail = async (subscription) => {
 
     console.log("Attempting to send cancellation denial email to:", user.email);
 
+    const orgIdentity = await getOrgIdentity(subscription.organisationId);
+
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            orgIdentity.logo
+              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #dc2626;">Subscription Cancellation Request Denied</h2>
@@ -93,7 +106,7 @@ const sendCancellationDenialEmail = async (subscription) => {
           <p><strong>Frequency:</strong> ${subscription.recurringDetails.frequency}</p>
         </div>
 
-        <p>If you have any questions or would like to discuss this further, please contact us at info@ShahidAfridiFoundation.org.au.</p>
+        ${orgIdentity.email ? `<p>If you have any questions or would like to discuss this further, please contact us at ${orgIdentity.email}.</p>` : ""}
         
         <p>Thank you for your continued support.</p>
       </div>
@@ -102,7 +115,7 @@ const sendCancellationDenialEmail = async (subscription) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Subscription Cancellation Request Update - Shahid Afridi Foundation",
+      `Subscription Cancellation Request Update - ${orgIdentity.name}`,
       [],
       { organisationId: subscription.organisationId }
     );

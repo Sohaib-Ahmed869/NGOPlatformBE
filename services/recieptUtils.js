@@ -3,6 +3,7 @@ const PDFDocument = require("pdfkit");
 const fs = require("fs-extra");
 const path = require("path");
 const { sendEmail } = require("./emailUtil");
+const { getOrgIdentity } = require("../utils/orgIdentity");
 const os = require("os");
 
 /**
@@ -17,6 +18,10 @@ const generateReceiptPDF = async (
   installmentNumber = null,
   paidOnly = false
 ) => {
+  // Whose receipt this is. Was hardcoded to one charity, so every tenant's
+  // donors received that charity's name, website and phone number on their tax
+  // receipt. See utils/orgIdentity.js.
+  const identity = await getOrgIdentity(order.organisationId);
   // Create a temporary file path
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "receipt-"));
 
@@ -53,7 +58,7 @@ const generateReceiptPDF = async (
       );
 
       // Add header
-      doc.fontSize(18).text("Shahid Afridi Foundation Ltd", 50, 130);
+      doc.fontSize(18).text(identity.name, 50, 130);
 
       // Customize title based on payment type and installment
       if (order.paymentType === "installments" && installmentNumber) {
@@ -191,9 +196,11 @@ const generateReceiptPDF = async (
 
       // Add footer
       doc.moveDown(3);
-      const footerText =
-        "www.shahidafridifoundation.org.au | info@ShahidAfridiFoundation.org.au | 1300 SAF AUS (1300 723 287)";
-      doc.fontSize(9).text(footerText, 50, 700, { align: "center" });
+      // Only the contact details this tenant actually has — an empty footer is
+      // correct, another organisation's details are not.
+      if (identity.footer) {
+        doc.fontSize(9).text(identity.footer, 50, 700, { align: "center" });
+      }
 
       // Finalize the PDF and end the stream
       doc.end();
@@ -684,8 +691,10 @@ const sendReceiptEmail = async (
       paidOnly
     );
 
+    const identity = await getOrgIdentity(order.organisationId);
+
     // Create appropriate email subject based on payment type
-    let emailSubject = `Shahid Afridi Foundation - `;
+    let emailSubject = `${identity.name} - `;
 
     if (order.paymentType === "installments" && installmentNumber) {
       emailSubject += `Installment ${installmentNumber} Receipt ${order.donationId}`;
@@ -698,11 +707,11 @@ const sendReceiptEmail = async (
     }
 
     // Create email body
-    const emailBody = createEmailBody(order, totalAmount, installmentNumber);
+    const emailBody = createEmailBody(order, totalAmount, installmentNumber, identity);
 
     // Setup email options with attachment
     const mailOptions = {
-      from: `"Shahid Afridi Foundation" <${process.env.EMAIL_USER}>`,
+      from: `"${identity.name}" <${process.env.EMAIL_USER}>`,
       to: order.donorDetails.email,
       subject: emailSubject,
       html: emailBody,
@@ -749,7 +758,17 @@ const sendReceiptEmail = async (
  * @param {Number} installmentNumber - Installment number (if applicable)
  * @returns {String} - HTML email body
  */
-const createEmailBody = (order, totalAmount, installmentNumber) => {
+const createEmailBody = (order, totalAmount, installmentNumber, identity = {}) => {
+  const orgName = identity.name || "";
+  // Rendered only when the tenant has the detail — never another org's.
+  const contactLine = [
+    identity.email
+      ? `contact us at <a href="mailto:${identity.email}">${identity.email}</a>`
+      : "",
+    identity.phone ? `call us on ${identity.phone}` : "",
+  ]
+    .filter(Boolean)
+    .join(" or ");
   // Customize messaging based on payment type
   let paymentTypeMessage = "";
   let amountDescription = "";
@@ -770,9 +789,17 @@ const createEmailBody = (order, totalAmount, installmentNumber) => {
 
   return `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <div style="text-align: center; padding: 20px 0;">
-        <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
-      </div>
+      ${
+        // The tenant's own logo. The old hardcoded S3 image put one charity's
+        // logo on every tenant's receipt email.
+        identity.logo
+          ? `<div style="text-align: center; padding: 20px 0;">
+        <img src="${identity.logo}" alt="${orgName}" style="max-width: 150px;">
+      </div>`
+          : `<div style="text-align: center; padding: 20px 0;">
+        <h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgName}</h1>
+      </div>`
+      }
       
       <h2 style="color: #4a7c59;">Thank You for Your ${
         paymentTypeMessage.charAt(0).toUpperCase() + paymentTypeMessage.slice(1)
@@ -780,7 +807,7 @@ const createEmailBody = (order, totalAmount, installmentNumber) => {
       
       <p>Dear ${order.donorDetails.name},</p>
       
-      <p>Thank you for your generous ${paymentTypeMessage} to the Shahid Afridi Foundation. Your support helps us make a difference in the lives of those in need.</p>
+      <p>Thank you for your generous ${paymentTypeMessage}${orgName ? ` to ${orgName}` : ""}. Your support helps us make a difference in the lives of those in need.</p>
       
       <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
         <h3 style="margin-top: 0;">Receipt Details:</h3>
@@ -807,14 +834,17 @@ const createEmailBody = (order, totalAmount, installmentNumber) => {
         order.paymentMethod === "bank" ? getBankTransferInstructions(order) : ""
       }
       
-      <p>If you have any questions or need further assistance, please don't hesitate to contact us at <a href="mailto:info@ShahidAfridiFoundation.org.au">info@ShahidAfridiFoundation.org.au</a> or call us at 1300 SAF AUS (1300 723 287).</p>
-      
+      ${
+        contactLine
+          ? `<p>If you have any questions or need further assistance, please don't hesitate to ${contactLine}.</p>`
+          : ""
+      }
+
       <p>Warm regards,<br>
-      Shahid Afridi Foundation Team</p>
-      
+      ${orgName ? `${orgName} Team` : "The Team"}</p>
+
       <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px; color: #777;">
-        <p>Shahid Afridi Foundation Ltd | ABN: 97 642 657 010<br>
-        <a href="http://www.shahidafridifoundation.org.au/">www.shahidafridifoundation.org.au</a> | <a href="mailto:info@ShahidAfridiFoundation.org.au">info@ShahidAfridiFoundation.org.au</a> | 1300 SAF AUS (1300 723 287)</p>
+        <p>${orgName}${identity.footer ? `<br>${identity.footer}` : ""}</p>
       </div>
     </div>
   `;

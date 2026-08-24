@@ -80,4 +80,6 @@ eventRegistrationSchema.index({ organisationId: 1, userId: 1 });
 // Fast confirm lookups; sparse so the many free/unpaid rows don't collide on "".
 eventRegistrationSchema.index({ stripePaymentIntentId: 1 }, { sparse: true });
 
+eventRegistrationSchema.index({ organisationId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("EventRegistration", eventRegistrationSchema);

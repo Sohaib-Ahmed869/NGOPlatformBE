@@ -1,7 +1,9 @@
 const bcrypt = require("bcrypt");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const crypto = require("crypto");
+const { stripe } = require("../../services/platformStripe");
 const Organisation = require("../../models/organisation");
 const User = require("../../models/user");
+const Lead = require("../../models/lead");
 const stripePrices = require("../../config/stripePrices");
 const { sendEmail } = require("../../services/emailUtil");
 
@@ -28,7 +30,7 @@ exports.uploadRegistrationLogo = async (req, res) => {
  */
 exports.register = async (req, res) => {
   try {
-    const { orgName, slug, adminName, adminEmail, adminPassword, plan, billingCycle, revenueRange, theme, logoUrl, isMuslimCharity } = req.body;
+    const { orgName, slug, adminName, adminEmail, adminPassword, plan, billingCycle, revenueRange, theme, logoUrl, isMuslimCharity, leadToken } = req.body;
 
     // Validate required fields
     if (!orgName || !slug || !adminName || !adminEmail || !adminPassword || !plan || !billingCycle) {
@@ -62,6 +64,21 @@ exports.register = async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(adminPassword, 10);
 
+    // Came in via a Leads CRM activation link? Link the two records so
+    // orgActivation.js can flip the source Lead to "won" once this org
+    // actually goes live. Best-effort — an invalid/expired token just means no
+    // link, never a registration failure.
+    let sourceLeadId = null;
+    if (leadToken) {
+      try {
+        const tokenHash = crypto.createHash("sha256").update(String(leadToken)).digest("hex");
+        const lead = await Lead.findOne({ "activation.tokenHash": tokenHash });
+        if (lead) sourceLeadId = lead._id;
+      } catch (e) {
+        console.error("Failed to resolve leadToken:", e.message);
+      }
+    }
+
     const { getThemeColors } = require("../../config/themePresets");
     const selectedTheme = getThemeColors(theme);
 
@@ -77,6 +94,7 @@ exports.register = async (req, res) => {
       subscriptionStatus: "pending",
       isActive: false,
       isMuslimCharity: !!isMuslimCharity,
+      sourceLeadId,
       pendingAdmin: {
         name: adminName,
         email: adminEmail.toLowerCase(),
@@ -139,10 +157,18 @@ exports.register = async (req, res) => {
     if (req.body.couponCode) {
       try {
         const Coupon = require("../../models/coupon");
+        const { refreshRedemptions, hasRedemptionsLeft } = require("../../utils/couponRedemptions");
         const coupon = await Coupon.findOne({ code: String(req.body.couponCode).toUpperCase().trim(), isActive: true });
         const okPlan = coupon && (!coupon.planCodes?.length || coupon.planCodes.includes(plan));
         const okExpiry = coupon && (!coupon.redeemBy || new Date(coupon.redeemBy) > new Date());
-        const okRedemptions = coupon && (!coupon.maxRedemptions || coupon.timesRedeemed < coupon.maxRedemptions);
+        // Read the count back from Stripe first — the stored mirror is never
+        // incremented by anything here, so an exhausted coupon used to sail
+        // through this check and only fail (or over-discount) at Stripe.
+        let okRedemptions = false;
+        if (coupon) {
+          const used = coupon.maxRedemptions ? await refreshRedemptions(coupon) : 0;
+          okRedemptions = hasRedemptionsLeft(coupon, used);
+        }
         if (coupon && coupon.stripeCouponId && okPlan && okExpiry && okRedemptions) {
           discounts = [{ coupon: coupon.stripeCouponId }];
         }
@@ -186,6 +212,95 @@ exports.register = async (req, res) => {
   } catch (error) {
     console.error("Registration error:", error);
     res.status(500).json({ error: "Registration failed. Please try again." });
+  }
+};
+
+/**
+ * POST /api/saas/register/confirm   { slug }  (or { orgId })
+ *
+ * Browser-driven activation, called by /register/success as soon as the card is
+ * confirmed. The SaaS webhook does the same job, but webhook delivery is not
+ * guaranteed to be timely — and in local development Stripe cannot reach
+ * localhost at all — which left paid organisations stuck on "Setting up your
+ * organisation…" until the 60s poll gave up.
+ *
+ * This is NOT an activation oracle. It ignores everything the client says about
+ * payment and instead re-reads the org's OWN stored subscription from Stripe with
+ * the platform secret key; the org is activated only if Stripe itself reports the
+ * first invoice as paid. So the worst a caller can do is trigger the activation
+ * that the webhook was going to perform anyway.
+ */
+exports.confirmRegistration = async (req, res) => {
+  try {
+    const { slug, orgId } = req.body || {};
+    if (!slug && !orgId) {
+      return res.status(400).json({ error: "slug or orgId is required" });
+    }
+
+    const org = orgId
+      ? await Organisation.findById(orgId)
+      : await Organisation.findOne({ slug: String(slug).toLowerCase().trim() });
+    if (!org) {
+      return res.status(404).json({ error: "Organisation not found" });
+    }
+
+    // Already live — the webhook (or a previous call) got there first.
+    if (org.isActive && org.adminUserId) {
+      return res.json({ isActive: true, slug: org.slug, name: org.name, source: "already-active" });
+    }
+
+    if (!org.stripeSubscriptionId) {
+      return res.status(409).json({ isActive: false, error: "No subscription for this organisation yet." });
+    }
+
+    // Ask Stripe — never the client — whether the money actually moved.
+    let subscription;
+    try {
+      subscription = await stripe.subscriptions.retrieve(org.stripeSubscriptionId, {
+        expand: ["latest_invoice.payment_intent"],
+      });
+    } catch (e) {
+      console.error("confirmRegistration: Stripe lookup failed:", e.message);
+      return res.status(502).json({ isActive: false, error: "Could not verify the payment with Stripe." });
+    }
+
+    const invoice = subscription.latest_invoice;
+    const intent = invoice?.payment_intent;
+
+    // TWO conditions, both required. A paid invoice alone is not enough: a
+    // cancelled subscription keeps its last paid invoice forever, so checking
+    // only `invoice.paid` would let a cancelled tenant be switched back on.
+    const subscriptionLive = ["active", "trialing"].includes(subscription.status);
+    const invoicePaid = invoice?.paid === true || intent?.status === "succeeded" || subscription.status === "trialing";
+
+    if (!subscriptionLive) {
+      return res.status(409).json({
+        isActive: false,
+        error: "This subscription is no longer active. Please start a new subscription.",
+        subscriptionStatus: subscription.status,
+      });
+    }
+
+    if (!invoicePaid) {
+      return res.status(402).json({
+        isActive: false,
+        error: "Payment has not completed yet.",
+        subscriptionStatus: subscription.status,
+        invoiceStatus: invoice?.status || null,
+        paymentIntentStatus: intent?.status || null,
+      });
+    }
+
+    const { activateOrgWithAdmin } = require("../../services/orgActivation");
+    await activateOrgWithAdmin(org, {
+      subscriptionId: subscription.id,
+      customerId: typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id,
+    });
+
+    res.json({ isActive: true, slug: org.slug, name: org.name, source: "confirm" });
+  } catch (error) {
+    console.error("Confirm registration error:", error);
+    res.status(500).json({ error: "Failed to confirm registration" });
   }
 };
 
@@ -281,11 +396,33 @@ exports.getBySlug = async (req, res) => {
       return res.status(404).json({ error: "Organisation not found" });
     }
 
-    // Public payment info — only the publishable key + enabled flag (never secrets).
+    // Public payment info — only publishable material, never secrets.
     const fullOrg = await Organisation.findById(org._id).select("payment paypal override");
+    // WHICH Stripe account confirms this tenant's donations is decided on the
+    // server, once, and handed to the browser — rather than letting the client
+    // guess from an env var. That guess was the bug: the server would fall back
+    // to the platform account while the page mounted Elements with a build-time
+    // key from a different account (or a different test/live mode), and the
+    // payment failed at confirmation with an unrelated-looking error.
+    //
+    // `publishableKey` is therefore the EFFECTIVE key — the tenant's own when
+    // they've connected Stripe, the platform's only when the operator allows
+    // that fallback, and "" when neither applies (the checkout then says card
+    // payments aren't set up instead of silently failing).
+    const { getDonationSource, getDonationPublishableKey } = require("../../services/tenantStripe");
+    const donationSource = getDonationSource(fullOrg);
+    const donationKey = getDonationPublishableKey(fullOrg);
     const payment = {
+      // Unchanged meaning: the tenant's OWN account is connected and switched on.
       enabled: !!(fullOrg?.payment?.enabled && fullOrg?.payment?.publishableKey),
-      publishableKey: fullOrg?.payment?.publishableKey || "",
+      publishableKey: donationKey,
+      source: donationSource, // "tenant" | "platform" | "none"
+      // NOT `!!publishableKey`: the key is legitimately empty when the platform
+      // account is running on STRIPE_SECRET_KEY, and in that case the browser
+      // supplies the matching VITE_STRIPE_PUBLISHABLE_KEY itself. Only "none" —
+      // no tenant account and the operator has closed the fallback — actually
+      // means cards can't be taken.
+      canAcceptCards: donationSource !== "none",
     };
     // Public PayPal info — client id is public (the buttons load with it).
     const paypal = {

@@ -28,4 +28,7 @@ const contactReadSchema = new mongoose.Schema(
 
 contactReadSchema.index({ contactId: 1, user: 1 }, { unique: true });
 
+// readMapFor() loads one admin's read markers for one org on every inbox open.
+contactReadSchema.index({ user: 1, organisationId: 1 });
+
 module.exports = mongoose.model("ContactRead", contactReadSchema);

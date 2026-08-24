@@ -1,8 +1,10 @@
 // controllers/adminController.js
+const { getOrgIdentity } = require("../../utils/orgIdentity");
 const Order = require("../../models/order");
 const User = require("../../models/user");
 const { sendEmail } = require("../../services/emailUtil");
 const { getTenantStripe } = require("../../services/tenantStripe");
+const { runCappedExport, toCsv } = require("../../utils/exportLimit");
 
 exports.getDashboardStats = async (req, res) => {
   try {
@@ -676,10 +678,17 @@ const sendCancellationConfirmationEmail = async (donation) => {
       return;
     }
 
+    // Tenant identity — logo and contact address were one charity's, on every tenant's email.
+    const orgIdentity = await getOrgIdentity(donation.organisationId);
+
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            orgIdentity.logo
+              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #4a7c59;">Subscription Cancelled</h2>
@@ -705,7 +714,7 @@ const sendCancellationConfirmationEmail = async (donation) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Subscription Cancelled - Shahid Afridi Foundation",
+      `Subscription Cancelled - ${orgIdentity.name}`,
       [],
       { organisationId: donation.organisationId }
     );
@@ -1027,11 +1036,13 @@ exports.getAllDonations = async (req, res) => {
     const sortConfig = {};
     sortConfig[sortBy] = sortOrder === "asc" ? 1 : -1;
 
-    // Fetch all donations without pagination
-    const donations = await Order.find(filter)
-      .sort(sortConfig)
-      .populate("user", "name email")
-      .lean();
+    // Deliberately unpaginated, but no longer unbounded: past the export
+    // ceiling this returns a truncated set and says so, rather than trying to
+    // sort and serialise every donation a tenant has ever taken.
+    const { rows: donations, truncated, limit: exportLimit } = await runCappedExport(
+      Order.find(filter).sort(sortConfig).populate("user", "name email").lean(),
+      res,
+    );
 
     // Optionally, format your donations (if needed)
     const formattedDonations = donations.map((donation) => ({
@@ -1051,6 +1062,10 @@ exports.getAllDonations = async (req, res) => {
 
     res.json({
       donations: formattedDonations,
+      // Mirrors the X-Export-* headers so a client reading only the body can
+      // still tell a complete result from a capped one.
+      truncated,
+      limit: exportLimit,
     });
   } catch (error) {
     console.error("Error in getAllDonations:", error);
@@ -1064,18 +1079,49 @@ exports.getAllDonations = async (req, res) => {
 
 exports.getDonationsExport = async (req, res) => {
   try {
-    // Implementation for exporting donations to CSV
-    // Use a library like json2csv
     const exportFilter = {};
     if (req.organisation?._id) exportFilter.organisationId = req.organisation._id;
-    const donations = await Order.find(exportFilter)
-      .populate("user", "name email")
-      .sort({ createdAt: -1 });
 
-    // Convert to CSV and send
-    res.setHeader("Content-Type", "text/csv");
+    const { rows: donations, truncated } = await runCappedExport(
+      Order.find(exportFilter).sort({ createdAt: -1 }).populate("user", "name email").lean(),
+      res,
+    );
+
+    const headers = [
+      "Donation ID",
+      "Date",
+      "Donor",
+      "Email",
+      "Cause",
+      "Amount",
+      "Type",
+      "Status",
+    ];
+
+    const rows = donations.map((d) => [
+      d.donationId,
+      d.createdAt ? new Date(d.createdAt).toISOString() : "",
+      d.donorDetails?.name || d.user?.name || "",
+      d.donorDetails?.email || d.user?.email || "",
+      d.items?.[0]?.title || (d.items?.length > 1 ? "Multiple items" : ""),
+      // Order carries no currency field — the platform is single-currency, the
+      // same assumption the dashboards make.
+      d.totalAmount,
+      d.paymentType || "",
+      d.paymentStatus || "",
+    ]);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", "attachment; filename=donations.csv");
-    // ... implement CSV conversion and sending
+    // The handler previously set these headers and then returned without ever
+    // writing a body or ending the response, so the download hung until the
+    // client gave up. Send the file.
+    if (truncated) {
+      // A silently short CSV is worse than a loud one — the operator would
+      // reconcile against it and find money missing.
+      res.setHeader("X-Export-Notice", "Truncated at the export limit; narrow the range and export again.");
+    }
+    res.send(toCsv(headers, rows));
   } catch (error) {
     res.status(500).json({
       status: "Error",
@@ -1143,10 +1189,16 @@ const sendBankTransferApprovalEmail = async (donation) => {
 
     console.log("Attempting to send donation approval email to:", user.email);
 
+    const orgIdentity = await getOrgIdentity(donation.organisationId);
+
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            orgIdentity.logo
+              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #4a7c59;">Donation Approved</h2>
@@ -1171,7 +1223,7 @@ const sendBankTransferApprovalEmail = async (donation) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Donation Approved - Shahid Afridi Foundation",
+      `Donation Approved - ${orgIdentity.name}`,
       [],
       { organisationId: donation.organisationId }
     );
@@ -1180,7 +1232,7 @@ const sendBankTransferApprovalEmail = async (donation) => {
       console.error("Failed to send donation approval email:", result.error);
       console.error("Email details:", {
         to: user.email,
-        subject: "Donation Approved - Shahid Afridi Foundation",
+        subject: `Donation Approved - ${orgIdentity.name}`,
         donationId: donation.donationId
       });
     } else {
@@ -1207,10 +1259,16 @@ const sendBankTransferCancellationEmail = async (donation) => {
 
     console.log("Attempting to send donation cancellation email to:", user.email);
 
+    const orgIdentity = await getOrgIdentity(donation.organisationId);
+
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            orgIdentity.logo
+              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #dc2626;">Donation Cancelled</h2>
@@ -1226,7 +1284,7 @@ const sendBankTransferCancellationEmail = async (donation) => {
           <p><strong>Amount:</strong> $${donation.totalAmount.toFixed(2)} AUD</p>
         </div>
 
-        <p>If you believe this is an error, please contact us at info@ShahidAfridiFoundation.org.au</p>
+        ${orgIdentity.email ? `<p>If you believe this is an error, please contact us at ${orgIdentity.email}</p>` : ""}
         
         <p>Thank you for your interest in supporting our cause.</p>
       </div>
@@ -1235,7 +1293,7 @@ const sendBankTransferCancellationEmail = async (donation) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Donation Cancelled - Shahid Afridi Foundation",
+      `Donation Cancelled - ${orgIdentity.name}`,
       [],
       { organisationId: donation.organisationId }
     );
@@ -1244,7 +1302,7 @@ const sendBankTransferCancellationEmail = async (donation) => {
       console.error("Failed to send donation cancellation email:", result.error);
       console.error("Email details:", {
         to: user.email,
-        subject: "Donation Cancelled - Shahid Afridi Foundation",
+        subject: `Donation Cancelled - ${orgIdentity.name}`,
         donationId: donation.donationId
       });
     } else {

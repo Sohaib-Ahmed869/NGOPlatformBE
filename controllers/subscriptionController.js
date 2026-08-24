@@ -1,7 +1,8 @@
 // Updated subscription controller with Stripe integration
 const Order = require("../models/order");
 const Organisation = require("../models/organisation");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
+const { stripe } = require("../services/platformStripe"); // platform fallback (console-configurable)
+const { getOrgIdentity, getOrgAdminEmail } = require("../utils/orgIdentity");
 const { getTenantStripe, getTenantWebhookSecret } = require("../services/tenantStripe");
 const { clampNextPaymentDate } = require("../services/recurringDates");
 
@@ -256,6 +257,7 @@ const User = require("../models/user");
 // Helper function to send cancellation request emails
 const sendCancellationRequestEmail = async (subscription) => {
   try {
+    const subIdentity = await getOrgIdentity(subscription.organisationId);
     // Get user from the subscription
     const user = await User.findById(subscription.user);
     if (!user || !user.email) {
@@ -267,7 +269,11 @@ const sendCancellationRequestEmail = async (subscription) => {
     const adminEmailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            subIdentity.logo
+              ? `<img src="${subIdentity.logo}" alt="${subIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${subIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #4a7c59;">Subscription Cancellation Request</h2>
@@ -289,21 +295,32 @@ const sendCancellationRequestEmail = async (subscription) => {
       </div>
     `;
 
-    await sendEmail(
-      process.env.ADMIN_EMAIL || "info@shahidafridifoundation.org.au", //THIS IS MARYAM'S EMAIL FOR TESTING
-      // Use the actual admin email here
-      //info@shahidafridifoundation.org.au is the actual admin email
-      adminEmailBody,
-      "Subscription Cancellation Request - Shahid Afridi Foundation",
-      [],
-      { organisationId: subscription.organisationId }
-    );
+    // Carries donor details, so it must reach the tenant that owns the
+    // subscription — not a hardcoded inbox.
+    const subAdminRecipient = await getOrgAdminEmail(subscription.organisationId);
+    if (subAdminRecipient) {
+      await sendEmail(
+        subAdminRecipient,
+        adminEmailBody,
+        `Subscription Cancellation Request - ${subIdentity.name}`,
+        [],
+        { organisationId: subscription.organisationId }
+      );
+    } else {
+      console.error(
+        `No admin contact for organisation ${subscription.organisationId}; subscription cancellation request was not emailed.`
+      );
+    }
 
     // Send confirmation email to donor
     const donorEmailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            subIdentity.logo
+              ? `<img src="${subIdentity.logo}" alt="${subIdentity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${subIdentity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #4a7c59;">Cancellation Request Received</h2>
@@ -327,7 +344,7 @@ const sendCancellationRequestEmail = async (subscription) => {
     await sendEmail(
       user.email,
       donorEmailBody,
-      "Cancellation Request Received - Shahid Afridi Foundation",
+      `Cancellation Request Received - ${subIdentity.name}`,
       [],
       { organisationId: subscription.organisationId }
     );
@@ -956,6 +973,8 @@ exports.handleStripeWebhook = async (req, res) => {
   const signature = req.headers["stripe-signature"];
 
   // Default to the platform account/secret (legacy /api/subscriptions/webhook).
+  // This is the DONATION webhook endpoint, which has its own signing secret in
+  // Stripe — distinct from the SaaS billing one configured in the console.
   let endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let verifyStripe = stripe;
 

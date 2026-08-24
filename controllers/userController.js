@@ -1,4 +1,5 @@
 // controllers/userController.js
+const { getOrgIdentity } = require("../utils/orgIdentity");
 const User = require("../models/user");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
@@ -7,11 +8,12 @@ const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const { sendEmail } = require("../services/emailUtil");
+const { MFA_REQUIRED_ROLES } = require("../config/platformRoles");
 
 const INSTAGRAM_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
 
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
+const generateToken = (id, extraClaims = {}) => {
+  return jwt.sign({ id, ...extraClaims }, process.env.JWT_SECRET, {
     expiresIn: "30d",
   });
 };
@@ -191,6 +193,10 @@ exports.loginAdmin = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
+    if (user.platformStatus === "suspended") {
+      return res.status(403).json({ error: "This account has been suspended" });
+    }
+
     // Two-factor challenge (if enabled for this account).
     if (user.twoFactorEnabled) {
       const { code } = req.body;
@@ -215,14 +221,26 @@ exports.loginAdmin = async (req, res) => {
     user.lastLogin = new Date();
     await user.save();
 
+    // Owner/Admin platform operators must enrol in MFA before they can use the
+    // console — the token is still issued so the frontend can drive them
+    // through the (already-authenticated) /users/mfa/setup + /mfa/enable
+    // endpoints, then re-request the console.
+    const mfaSetupRequired =
+      user.role === "superadmin" &&
+      MFA_REQUIRED_ROLES.includes(user.platformRole) &&
+      !user.twoFactorEnabled &&
+      !user.mfaExempt;
+
     // Admins don't need to change temporary passwords
     res.json({
       _id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
+      platformRole: user.platformRole,
       profileImage: user.profileImage || "",
-      token: generateToken(user._id),
+      mfaSetupRequired,
+      token: generateToken(user._id, { tokenVersion: user.tokenVersion }),
     });
   } catch (error) {
     res.status(401).json({ error: error.message });
@@ -324,6 +342,10 @@ exports.forgotPassword = async (req, res) => {
     const clientUrl = process.env.CLIENT_URL || `${req.protocol}://${req.get("host")}`;
     const resetUrl = `${clientUrl}/reset-password/${resetToken}`;
 
+    // Whose account this is — the reset mail used to name one hardcoded charity
+    // regardless of which tenant the user belongs to.
+    const orgIdentity = await getOrgIdentity(user.organisationId);
+
     // Email content
     const emailBody = `
      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
@@ -332,7 +354,7 @@ exports.forgotPassword = async (req, res) => {
   
   <p>Dear Valued Member,</p>
   
-  <p>We received a request to reset your password for your Shahid Afridi Foundation account. To complete the process and set a new password, please click the button below:</p>
+  <p>We received a request to reset your password for your ${orgIdentity.name} account. To complete the process and set a new password, please click the button below:</p>
   
   <div style="text-align: center; margin: 30px 0;">
     <a href="${resetUrl}" style="background-color: #4CAF50; color: white; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">Reset Your Password</a>
@@ -342,7 +364,7 @@ exports.forgotPassword = async (req, res) => {
   
   <p>If you didn't request this password reset, please ignore this email or contact our support team if you have concerns about your account security.</p>
   
-  <p>Warm regards,<br>The Shahid Afridi Foundation Team</p>
+  <p>Warm regards,<br>The ${orgIdentity.name} Team</p>
   
   <div style="font-size: 12px; color: #666; border-top: 1px solid #e0e0e0; margin-top: 20px; padding-top: 20px;">
     <p>This is an automated email. Please do not reply to this message.</p>

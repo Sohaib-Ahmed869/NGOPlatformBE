@@ -23,5 +23,8 @@ const platformAuditLogSchema = new mongoose.Schema(
 platformAuditLogSchema.index({ organisationId: 1, createdAt: -1 });
 platformAuditLogSchema.index({ actorId: 1, createdAt: -1 });
 platformAuditLogSchema.index({ action: 1, createdAt: -1 });
+// The support-session detail page lists every action taken during one session.
+// Sparse because only impersonation-related entries carry a sessionId.
+platformAuditLogSchema.index({ "meta.sessionId": 1, createdAt: 1 }, { sparse: true });
 
 module.exports = mongoose.model("PlatformAuditLog", platformAuditLogSchema);

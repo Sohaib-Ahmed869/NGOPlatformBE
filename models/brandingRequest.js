@@ -56,4 +56,6 @@ const brandingRequestSchema = new mongoose.Schema(
 
 brandingRequestSchema.index({ organisationId: 1, status: 1 });
 
+brandingRequestSchema.index({ organisationId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("BrandingRequest", brandingRequestSchema);

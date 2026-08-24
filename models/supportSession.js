@@ -55,5 +55,8 @@ const supportSessionSchema = new mongoose.Schema(
 
 supportSessionSchema.index({ organisationId: 1, startedAt: -1 });
 supportSessionSchema.index({ status: 1, startedAt: -1 });
+// Serves the lapsed-session sweep (status:active + expiresAt past), which runs
+// before every operator read of this collection.
+supportSessionSchema.index({ status: 1, expiresAt: 1 });
 
 module.exports = mongoose.model("SupportSession", supportSessionSchema);

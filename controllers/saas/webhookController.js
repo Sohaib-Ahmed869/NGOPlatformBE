@@ -1,18 +1,22 @@
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { stripe, getSaasWebhookSecret } = require("../../services/platformStripe");
 const Organisation = require("../../models/organisation");
 const User = require("../../models/user");
 const StripeEvent = require("../../models/stripeEvent");
 const PlatformInvoice = require("../../models/platformInvoice");
 const { sendEmail } = require("../../services/emailUtil");
+const { activateOrgWithAdmin } = require("../../services/orgActivation");
+const { emitToSuperAdmins } = require("../../services/socket");
 
 /**
  * POST /api/saas/webhooks/stripe
  * Handle Stripe webhook events for SaaS subscriptions.
- * Uses STRIPE_SAAS_WEBHOOK_SECRET (separate from donation webhook secret).
+ * Signing secret comes from the SuperAdmin console (Platform Settings → Stripe),
+ * falling back to STRIPE_SAAS_WEBHOOK_SECRET. Separate from the donation webhook
+ * secret — they are different Stripe endpoints with different signing secrets.
  */
 exports.handleWebhook = async (req, res) => {
   const signature = req.headers["stripe-signature"];
-  const endpointSecret = process.env.STRIPE_SAAS_WEBHOOK_SECRET;
+  const endpointSecret = getSaasWebhookSecret();
   let event;
 
   try {
@@ -106,75 +110,8 @@ async function upsertInvoice(invoice, organisation, status) {
     },
     { upsert: true, new: true }
   );
-}
-
-/**
- * Activate an org after its first successful subscription payment: create the
- * admin User from `pendingAdmin` (if not already), flip the org active, and send
- * the welcome email. Idempotent — safe to call from invoice.paid AND
- * subscription.updated (whichever Stripe fires first).
- */
-async function activateOrgWithAdmin(organisation, { subscriptionId, customerId } = {}) {
-  const setActive = () => {
-    organisation.isActive = true;
-    organisation.subscriptionStatus = "active";
-    if (subscriptionId) organisation.stripeSubscriptionId = subscriptionId;
-    if (customerId) organisation.stripeCustomerId = customerId;
-  };
-
-  // Already has an admin → just ensure the active flags are set.
-  if (organisation.adminUserId) {
-    setActive();
-    await organisation.save();
-    return;
-  }
-
-  const pending = organisation.pendingAdmin || {};
-  if (!pending.email || !pending.passwordHash) {
-    setActive();
-    await organisation.save();
-    return;
-  }
-
-  // Materialise the admin user (guard against a race / event re-run).
-  let adminUser = await User.findOne({ email: pending.email.toLowerCase() });
-  if (!adminUser) {
-    adminUser = await User.create({
-      name: pending.name,
-      email: pending.email.toLowerCase(),
-      password: pending.passwordHash,
-      role: "admin",
-      organisationId: organisation._id,
-    });
-  }
-
-  setActive();
-  organisation.adminUserId = adminUser._id;
-  organisation.pendingAdmin = undefined;
-  await organisation.save();
-
-  const subdomainUrl = process.env.CLIENT_URL
-    ? `${organisation.slug}.${process.env.CLIENT_URL.replace(/^https?:\/\//, "")}`
-    : `${organisation.slug}.${process.env.CORS_DOMAIN || "localhost"}`;
-  const emailBody = `
-    <h2>Welcome to the Platform, ${pending.name}!</h2>
-    <p>Your organisation <strong>${organisation.name}</strong> has been set up successfully.</p>
-    <p>Your portal is ready at: <a href="http://${subdomainUrl}">http://${subdomainUrl}</a></p>
-    <h3>Your Admin Account</h3>
-    <ul>
-      <li><strong>Email:</strong> ${pending.email}</li>
-      <li><strong>Plan:</strong> ${organisation.plan}</li>
-      <li><strong>Billing:</strong> ${organisation.billingCycle}</li>
-    </ul>
-    <p>Log in at <a href="http://${subdomainUrl}/admin/login">http://${subdomainUrl}/admin/login</a> to start setting up your portal.</p>
-  `;
-  try {
-    await sendEmail(pending.email, emailBody, `Welcome to ${organisation.name} - Your Portal is Ready!`);
-  } catch (e) {
-    console.error("Welcome email failed:", e.message);
-  }
-
-  console.log(`Organisation ${organisation.slug} activated (in-house checkout)`);
+  // The Invoices screen caches its pages — tell open consoles to revalidate.
+  emitToSuperAdmins("invoice:updated", { stripeInvoiceId: invoice.id, status });
 }
 
 /**
@@ -190,6 +127,8 @@ async function handleInvoicePaid(invoice) {
       customerId: invoice.customer || organisation.stripeCustomerId,
     });
   }
+  // The mirrored invoice shows in the operator console — nudge open screens.
+  if (organisation) emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
   console.log(`Invoice ${invoice.id} mirrored (paid) for ${organisation?.slug || "unknown org"}`);
 }
 
@@ -230,6 +169,7 @@ async function handleCheckoutCompleted(session) {
   organisation.stripeCustomerId = session.customer || organisation.stripeCustomerId;
   organisation.adminUserId = adminUser._id;
   await organisation.save();
+  emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
 
   // Send welcome email
   const subdomainUrl = process.env.CLIENT_URL
@@ -293,6 +233,7 @@ async function handleSubscriptionUpdated(subscription) {
   organisation.subscriptionStatus = newStatus;
   organisation.isActive = newStatus === "active";
   await organisation.save();
+  emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
 
   console.log(`Organisation ${organisation.slug} status updated to ${newStatus}`);
 }
@@ -314,6 +255,7 @@ async function handleSubscriptionDeleted(subscription) {
   organisation.subscriptionStatus = "cancelled";
   organisation.isActive = false;
   await organisation.save();
+  emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
 
   // Notify admin
   if (organisation.adminUserId) {
@@ -350,6 +292,7 @@ async function handlePaymentFailed(invoice) {
 
   // Mirror the failed invoice for the billing history.
   await upsertInvoice(invoice, organisation, "failed");
+  emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
 
   // Notify admin about failed payment
   if (organisation.adminUserId) {

@@ -77,6 +77,7 @@ const {
   defaultInitiativesSections,
   defaultGetInvolvedSections,
   defaultGivingSections,
+  defaultFaqSections,
 } = require("./sectionTypes");
 const { buildInitiativeSections } = require("./initiativeContent");
 
@@ -1111,6 +1112,20 @@ const PAGE_TEMPLATES = [
         eyebrow: "What happens next",
         title: "After you hit submit",
       },
+    },
+  },
+
+  // ── FAQ (public help page; reached via the footer, not the top nav) ──
+  {
+    key: "faq",
+    path: "/faq",
+    navLabel: "FAQs",
+    navOrder: 10,
+    showInNav: false,
+    editable: true,
+    sectionBased: true,
+    defaults: {
+      sections: defaultFaqSections(),
     },
   },
 ];

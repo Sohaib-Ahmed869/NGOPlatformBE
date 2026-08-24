@@ -3,8 +3,9 @@ const Order = require("../models/order");
 const User = require("../models/user");
 const Program = require("../models/program");
 const Organisation = require("../models/organisation");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY); // platform fallback
+const { stripe } = require("../services/platformStripe"); // platform fallback (console-configurable)
 const { getTenantStripe } = require("../services/tenantStripe");
+const { getOrgIdentity, getOrgAdminEmail } = require("../utils/orgIdentity");
 const {
   resolveChargeCustomer,
   ensureDonorCustomer,
@@ -91,11 +92,14 @@ const createUserForDonor = async (donorDetails, donationId, organisationId = nul
     await newUser.save();
     console.log(`Created new user account for donor: ${donorDetails.email}`);
 
-    // Send welcome email with credentials
-    const loginUrl = "https://shahidafridifoundation.org.au/login";
+    // Send welcome email with credentials. The org name and portal link come
+    // from the tenant this donation belongs to — they used to be hardcoded to a
+    // single charity, so every tenant's donors were welcomed to the wrong one
+    // and sent to the wrong login page.
+    const identity = await getOrgIdentity(organisationId);
+    const loginUrl = identity.loginUrl || "";
 
-    const emailSubject =
-      "Welcome to Shahid Afridi Foundation - Your Account Details";
+    const emailSubject = `Welcome to ${identity.name} - Your Account Details`;
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
       
@@ -104,7 +108,7 @@ const createUserForDonor = async (donorDetails, donationId, organisationId = nul
         
         <p>Dear ${donorDetails.name},</p>
         
-        <p>Thank you for your generous donation (ID: <strong>${donationId}</strong>) to the Shahid Afridi Foundation. Your contribution will help us make a meaningful difference in the lives of those in need.</p>
+        <p>Thank you for your generous donation (ID: <strong>${donationId}</strong>) to ${identity.name}. Your contribution will help us make a meaningful difference in the lives of those in need.</p>
         
         <p>We've created an account for you so you can easily track your donations and manage your giving in the future.</p>
         
@@ -115,13 +119,17 @@ const createUserForDonor = async (donorDetails, donationId, organisationId = nul
           <p style="font-size: 12px; color: #666;">Please keep this information secure. We recommend changing your password after your first login.</p>
         </div>
         
-        <div style="text-align: center; margin: 30px 0;">
+        ${
+          loginUrl
+            ? `<div style="text-align: center; margin: 30px 0;">
           <a href="${loginUrl}" style="background-color: #4CAF50; color: white; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">Login to Your Account</a>
-        </div>
+        </div>`
+            : ""
+        }
         
         <p>If you have any questions or need assistance, please don't hesitate to contact our team.</p>
         
-        <p>Warm regards,<br>The Shahid Afridi Foundation Team</p>
+        <p>Warm regards,<br>The ${identity.name} Team</p>
         
         <div style="font-size: 12px; color: #666; border-top: 1px solid #e0e0e0; margin-top: 20px; padding-top: 20px;">
           <p>This is an automated email. Please do not reply to this message.</p>
@@ -293,17 +301,25 @@ const sendBankTransferPendingEmail = async (order) => {
       user.email
     );
 
+    // Tenant identity — the logo, name and payment-proof address all used to be
+    // one charity's, on every tenant's email.
+    const identity = await getOrgIdentity(order.organisationId);
+
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <div style="text-align: center; padding: 20px 0;">
-          <img src="https://safimages.s3.ap-southeast-2.amazonaws.com/events/Screenshot+2025-02-27+014744.png" alt="Shahid Afridi Foundation" style="max-width: 150px;">
+          ${
+            identity.logo
+              ? `<img src="${identity.logo}" alt="${identity.name}" style="max-width: 150px;">`
+              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${identity.name}</h1>`
+          }
         </div>
         
         <h2 style="color: #4a7c59;">Bank Transfer Donation Pending</h2>
         
         <p>Dear ${user.name},</p>
         
-        <p>Thank you for your generous donation to the Shahid Afridi Foundation. Your donation is currently pending approval.</p>
+        <p>Thank you for your generous donation to ${identity.name}. Your donation is currently pending approval.</p>
         
         <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
           <h3 style="margin-top: 0;">Donation Details:</h3>
@@ -321,7 +337,7 @@ const sendBankTransferPendingEmail = async (order) => {
             <li>Upload proof of payment through our website using your donation ID: ${
               order.donationId
             }</li>
-            <li>Email your payment proof to: info@ShahidAfridiFoundation.org.au</li>
+            ${identity.email ? `<li>Email your payment proof to: ${identity.email}</li>` : ""}
           </ol>
           <p>Your donation will be processed once we receive and verify your payment proof.</p>
         </div>
@@ -333,7 +349,7 @@ const sendBankTransferPendingEmail = async (order) => {
     const result = await sendEmail(
       user.email,
       emailBody,
-      "Bank Transfer Donation Pending - Shahid Afridi Foundation",
+      `Bank Transfer Donation Pending - ${identity.name}`,
       [],
       { organisationId: order.organisationId }
     );
@@ -345,7 +361,7 @@ const sendBankTransferPendingEmail = async (order) => {
       );
       console.error("Email details:", {
         to: user.email,
-        subject: "Bank Transfer Donation Pending - Shahid Afridi Foundation",
+        subject: `Bank Transfer Donation Pending - ${identity.name}`,
         donationId: order.donationId,
       });
     } else {
@@ -374,6 +390,12 @@ const sendCancellationRequestEmail = async (order) => {
     }
 
     // Send email to admin
+    const identity = await getOrgIdentity(order.organisationId);
+    // This notice carries the donor's name, email and donation amount. It was
+    // hardcoded to one charity's inbox, so cancellations from EVERY tenant were
+    // disclosed to a third party. Route it to the tenant that owns the donation.
+    const adminRecipient = await getOrgAdminEmail(order.organisationId);
+
     const adminEmailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #4a7c59;">Subscription Cancellation Request</h2>
@@ -396,17 +418,20 @@ const sendCancellationRequestEmail = async (order) => {
       </div>
     `;
 
-    await sendEmail(
-      "info@shahidafridifoundation.org.au",
-      //THIS IS MARYAM'S EMAIL FOR TESTING
-      // Use the actual admin email here
-
-      //info@shahidafridifoundation.org.au is the actual admin email
-      adminEmailBody,
-      "Subscription Cancellation Request - Shahid Afridi Foundation",
-      [],
-      { organisationId: order.organisationId }
-    );
+    if (adminRecipient) {
+      await sendEmail(
+        adminRecipient,
+        adminEmailBody,
+        `Subscription Cancellation Request - ${identity.name}`,
+        [],
+        { organisationId: order.organisationId }
+      );
+    } else {
+      // Better to log loudly than to email donor details to whoever is hardcoded.
+      console.error(
+        `No admin contact for organisation ${order.organisationId}; cancellation request for ${order.donationId} was not emailed.`
+      );
+    }
 
     // Send confirmation email to donor
     const donorEmailBody = `
@@ -433,7 +458,7 @@ const sendCancellationRequestEmail = async (order) => {
     await sendEmail(
       user.email,
       donorEmailBody,
-      "Cancellation Request Received - Shahid Afridi Foundation",
+      `Cancellation Request Received - ${identity.name}`,
       [],
       { organisationId: order.organisationId }
     );

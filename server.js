@@ -46,10 +46,14 @@ const { initSocket } = require("./services/socket");
 const app = express();
 
 const Order = require("./models/order");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+// Resolves to the Stripe key saved in the SuperAdmin console, falling back to
+// STRIPE_SECRET_KEY. Same call syntax as a real client — see services/platformStripe.js.
+const platformStripe = require("./services/platformStripe");
+const stripe = platformStripe.stripe;
 
-// Connect to database
-connectDB();
+// Connect to database, then load the stored Stripe credentials so the first
+// request already resolves to them instead of the env fallback.
+connectDB().then(() => platformStripe.prime());
 setupInstallmentProcessingJob();
 scheduleSubscriptionChecks();
 setupCampaignScheduler();
@@ -83,7 +87,10 @@ app.use(
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS' ,'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Slug']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Slug'],
+    // Let browsers cache preflight (OPTIONS) responses for 10 minutes instead
+    // of Chrome's 5-second default — halves the request rows in devtools.
+    maxAge: 600
   })
 );
 

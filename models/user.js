@@ -26,6 +26,27 @@ const userSchema = new mongoose.Schema(
       enum: ["superadmin", "admin", "donor"],
       default: "donor",
     },
+    // Only meaningful when role === "superadmin" — which capability group this
+    // platform operator has (see config/platformRoles.js). Undefined on every
+    // other role.
+    platformRole: {
+      type: String,
+      enum: ["owner", "admin", "support", "billing", "tenant_manager"],
+    },
+    platformStatus: {
+      type: String,
+      enum: ["invited", "active", "suspended"],
+    },
+    invitedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    invitedAt: { type: Date, default: null },
+    // Escape hatch for a specific Owner/Admin operator that shouldn't be forced
+    // through MFA enrollment (e.g. a shared dev/test account). Set by hand —
+    // there's no UI toggle for this on purpose, since it's meant to be rare.
+    mfaExempt: { type: Boolean, default: false },
     organisationId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Organisation",
@@ -100,5 +121,12 @@ const userSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// A donor row is created per organisation, so this collection grows fastest of
+// all. `email` already has its own unique index; these cover the two shapes the
+// app actually queries by: staff lookups for assignment dropdowns, and
+// org-scoped listings ordered newest-first.
+userSchema.index({ organisationId: 1, role: 1 });
+userSchema.index({ organisationId: 1, createdAt: -1 });
 
 module.exports = mongoose.model("User", userSchema);

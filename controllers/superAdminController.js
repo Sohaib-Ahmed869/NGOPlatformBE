@@ -14,13 +14,15 @@ const GoFundMe = require("../models/goFundMe");
 const writeAudit = require("../utils/writeAudit");
 const { sendEmail } = require("../services/emailUtil");
 const { getEffectiveLimits } = require("../utils/effectiveLimits");
+const { METER_KEYS } = require("../config/featureCatalog");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { emitToSuperAdmins } = require("./../services/socket");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { stripe } = require("../services/platformStripe");
 const stripePrices = require("../config/stripePrices");
 const planPricing = require("../config/planPricing");
+const subscriptionMetrics = require("../services/subscriptionMetrics");
 
 // Escape user-supplied text for safe inclusion in notification HTML.
 const escapeHtml = (s) =>
@@ -97,6 +99,8 @@ exports.bootstrap = async (req, res) => {
       email: String(email).toLowerCase(),
       password: hashed,
       role: "superadmin",
+      platformRole: "owner",
+      platformStatus: "active",
       organisationId: null,
     });
 
@@ -117,31 +121,45 @@ exports.bootstrap = async (req, res) => {
   }
 };
 
+// User-typed search terms are matched literally — escape regex metacharacters
+// so "(" can't throw and ".*" can't match everything.
+const escapeRegex = require("../utils/operatorInput").escapeRegex;
+const input = require("../utils/operatorInput");
+
+// The tenant list feeds a table of names, plans and statuses. It does NOT need
+// the per-tenant payment credentials, and shipping them (even encrypted) put
+// every tenant's Stripe/PayPal ciphertext and webhook secrets into the operator
+// browser on every page load.
+const LIST_PROJECTION = "-payment -paypal -bankDetails -pendingAdmin -draftDesign -volunteerQuestions -eventAudiences";
+
 /**
  * GET /api/superadmin/organisations
  * List all organisations with pagination, search, and filter.
  */
 exports.listOrganisations = async (req, res) => {
   try {
-    const { page = 1, limit = 20, search, plan, status } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const { page, limit, skip } = input.paging(req.query, { defaultLimit: 20, maxLimit: 100 });
 
     const filter = {};
-    if (search) {
-      filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { slug: { $regex: search, $options: "i" } },
-      ];
-    }
-    if (plan) filter.plan = plan;
-    if (status) filter.subscriptionStatus = status;
+    const rx = input.searchRegex(req.query.search);
+    if (rx) filter.$or = [{ name: rx }, { slug: rx }];
+    // `?plan[$ne]=null` arrives as an object and used to reach Mongo as a query
+    // operator, returning every tenant. It's refused rather than dropped —
+    // quietly ignoring it answers with the whole list, which looks like a match.
+    const plan = input.scalarFilter(req.query.plan, "plan");
+    if (plan.error) return res.status(400).json({ error: plan.error });
+    const status = input.scalarFilter(req.query.status, "status");
+    if (status.error) return res.status(400).json({ error: status.error });
+    if (plan.value) filter.plan = plan.value;
+    if (status.value) filter.subscriptionStatus = status.value;
 
     const [organisations, total] = await Promise.all([
       Organisation.find(filter)
+        .select(LIST_PROJECTION)
         .populate("adminUserId", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit)),
+        .limit(limit),
       Organisation.countDocuments(filter),
     ]);
 
@@ -149,8 +167,8 @@ exports.listOrganisations = async (req, res) => {
       organisations,
       pagination: {
         total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
+        page,
+        pages: Math.ceil(total / limit),
       },
     });
   } catch (error) {
@@ -165,7 +183,12 @@ exports.listOrganisations = async (req, res) => {
  */
 exports.changePlan = async (req, res) => {
   try {
-    const { plan } = req.body;
+    // `plan` must be a scalar before it becomes a Mongo query. An object like
+    // { $ne: null } used to match the FIRST plan in the collection, clear the
+    // "is this a real plan?" guard, and then fail the cast on save as a 500.
+    const parsed = input.text(req.body?.plan, "Plan", { max: 60, required: true, allowEmpty: false });
+    if (parsed.error) return res.status(400).json({ error: "Invalid plan" });
+    const plan = parsed.value;
 
     // Prefer a dynamic Plan; fall back to the legacy static tiers so this keeps
     // working before the Plan collection has been seeded.
@@ -173,6 +196,11 @@ exports.changePlan = async (req, res) => {
     const legacyPlans = ["basic", "professional", "enterprise"];
     if (!planDoc && !legacyPlans.includes(plan)) {
       return res.status(400).json({ error: "Invalid plan" });
+    }
+    // An archived plan is off-sale. Moving a tenant onto one leaves them on a
+    // tier with no live Stripe price, so the next renewal has nothing to charge.
+    if (planDoc && planDoc.isActive === false) {
+      return res.status(400).json({ error: `"${plan}" is archived — reactivate the plan before assigning it` });
     }
 
     const org = await Organisation.findById(req.params.id);
@@ -213,6 +241,10 @@ exports.changePlan = async (req, res) => {
       targetId: String(org._id),
       meta: { from: fromPlan, to: plan },
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+    // The kill-switch screen shows who is inside a tenant right now, so a new
+    // session has to land there without waiting for a refresh.
+    emitToSuperAdmins("supportSession:updated", { reason: "started", sessionId, organisationId: String(org._id) });
 
     res.json({ message: "Plan updated", organisation: org });
   } catch (error) {
@@ -251,6 +283,7 @@ exports.suspendOrg = async (req, res) => {
       targetId: String(org._id),
       meta: { name: org.name, slug: org.slug },
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
 
     res.json({ message: "Organisation suspended", organisation: org });
   } catch (error) {
@@ -277,46 +310,53 @@ exports.getOrganisationDetail = async (req, res) => {
       invoices,
       brandingRequests,
       supportSessions,
-      campaignsActive,
-      programsTotal,
+      programAgg,
       volunteersTotal,
       usersTotal,
       eventsTotal,
       p2pTotal,
-      ordersTotal,
-      donationAgg,
+      orderAgg,
     ] = await Promise.all([
       getEffectiveLimits(org),
-      Plan.findOne({ code: org.plan }).select("code name price color limits"),
-      PlatformAuditLog.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(20),
-      PlatformInvoice.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(10),
-      BrandingRequest.find({ organisationId: orgId }).populate("requestedBy", "name email").sort({ createdAt: -1 }).limit(5),
-      SupportSession.find({ organisationId: orgId }).sort({ startedAt: -1 }).limit(5),
-      Program.countDocuments({ organisationId: orgId, status: "active" }),
-      Program.countDocuments({ organisationId: orgId }),
+      Plan.findOne({ code: org.plan }).select("code name price color limits").lean(),
+      PlatformAuditLog.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(20).lean(),
+      PlatformInvoice.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(10).lean(),
+      BrandingRequest.find({ organisationId: orgId }).populate("requestedBy", "name email").sort({ createdAt: -1 }).limit(5).lean(),
+      SupportSession.find({ organisationId: orgId }).sort({ startedAt: -1 }).limit(5).lean(),
+      // One Programs scan yields both counts (was two countDocuments).
+      Program.aggregate([
+        { $match: { organisationId: orgId } },
+        { $group: { _id: null, total: { $sum: 1 }, active: { $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] } } } },
+      ]),
       Join.countDocuments({ organisationId: orgId }),
       User.countDocuments({ organisationId: orgId }),
       Event.countDocuments({ organisationId: orgId }),
       GoFundMe.countDocuments({ organisationId: orgId }),
-      Order.countDocuments({ organisationId: orgId }),
+      // One Orders scan yields the count and the paid-donations sum (was two).
       Order.aggregate([
-        { $match: { organisationId: orgId, paymentStatus: { $in: ["completed", "active"] } } },
-        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+        { $match: { organisationId: orgId } },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            donationsRaised: { $sum: { $cond: [{ $in: ["$paymentStatus", ["completed", "active"]] }, "$totalAmount", 0] } },
+          },
+        },
       ]),
     ]);
 
     // Current usage for the metered limits (mirrors planEnforcement counting:
     // campaigns = active Programs, volunteers = Join applications).
-    const usage = { campaigns: campaignsActive, volunteers: volunteersTotal };
+    const usage = { campaigns: programAgg[0]?.active || 0, volunteers: volunteersTotal };
     // Tenant-by-the-numbers snapshot.
     const stats = {
       users: usersTotal,
-      programs: programsTotal,
+      programs: programAgg[0]?.total || 0,
       events: eventsTotal,
       campaigns: p2pTotal, // P2P fundraisers (GoFundMe)
       volunteers: volunteersTotal,
-      orders: ordersTotal,
-      donationsRaised: donationAgg[0]?.total || 0,
+      orders: orderAgg[0]?.count || 0,
+      donationsRaised: orderAgg[0]?.donationsRaised || 0,
     };
 
     res.json({ organisation: org, plan, effectiveLimits, audit, invoices, brandingRequests, supportSessions, usage, stats });
@@ -358,7 +398,11 @@ exports.updateStatus = async (req, res) => {
       targetType: "organisation",
       targetId: String(org._id),
     });
-    res.json({ message: `Organisation ${action}d`, organisation: org });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+    res.json({
+      message: `Organisation ${action === "suspend" ? "suspended" : "reactivated"}`,
+      organisation: org,
+    });
   } catch (err) {
     console.error("Update status error:", err);
     res.status(500).json({ error: "Failed to update status" });
@@ -370,12 +414,17 @@ exports.updateStatus = async (req, res) => {
  */
 exports.compOrg = async (req, res) => {
   try {
-    const { isComp, reason } = req.body;
-    if (isComp && !reason) return res.status(400).json({ error: "A reason is required" });
+    const isComp = !!req.body?.isComp;
+    // A whitespace-only reason satisfied the old `!reason` check, so a comped
+    // tenant could end up with no recorded justification at all.
+    const parsedReason = input.text(req.body?.reason, "Reason", { max: 500, required: isComp, allowEmpty: !isComp });
+    if (parsedReason.error) return res.status(400).json({ error: isComp ? "A reason is required" : parsedReason.error });
+    const reason = parsedReason.value;
+
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
 
-    org.isComp = !!isComp;
+    org.isComp = isComp;
     org.compReason = isComp ? reason : "";
     await org.save();
     await writeAudit(req, isComp ? "org.comped" : "org.uncomped", {
@@ -384,6 +433,7 @@ exports.compOrg = async (req, res) => {
       targetId: String(org._id),
       meta: { reason },
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
     res.json({ message: "Updated", organisation: org });
   } catch (err) {
     console.error("Comp org error:", err);
@@ -396,27 +446,48 @@ exports.compOrg = async (req, res) => {
  */
 exports.setOverride = async (req, res) => {
   try {
-    const { limits, pricing, reason } = req.body;
-    if (!reason) return res.status(400).json({ error: "A reason is required" });
+    const { limits, pricing } = req.body || {};
+    const parsedReason = input.text(req.body?.reason, "Reason", { max: 500, required: true, allowEmpty: false });
+    if (parsedReason.error) return res.status(400).json({ error: "A reason is required" });
+
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
 
+    // Limits are validated against the catalog's meter keys and the numbers are
+    // checked rather than coerced. `Number(v)` alone wrote NaN into the document
+    // for a typo, and NaN compares false against every quota — the tenant ended
+    // up with an override that silently blocked everything.
     const cleanLimits = {};
-    if (limits && typeof limits === "object") {
+    if (limits && typeof limits === "object" && !Array.isArray(limits)) {
       for (const k of Object.keys(limits)) {
+        if (!METER_KEYS.includes(k)) continue; // ignore keys the catalog doesn't know
         const v = limits[k];
-        cleanLimits[k] =
-          typeof v === "boolean" ? v : v === "" || v === null || v === undefined ? null : Number(v);
+        if (typeof v === "boolean") {
+          cleanLimits[k] = v;
+          continue;
+        }
+        const n = input.number(v, `Limit "${k}"`, { min: 0, max: 1e9, allowNull: true, integer: true });
+        if (n.error) return res.status(400).json({ error: n.error });
+        cleanLimits[k] = n.value;
       }
+    }
+
+    const cleanPricing = {};
+    for (const cycle of ["monthly", "annual"]) {
+      const n = input.number(pricing?.[cycle], `${cycle[0].toUpperCase()}${cycle.slice(1)} price`, {
+        min: 0,
+        max: 1e7,
+        allowNull: true,
+        decimals: 2,
+      });
+      if (n.error) return res.status(400).json({ error: n.error });
+      cleanPricing[cycle] = n.value;
     }
 
     org.override = {
       limits: Object.keys(cleanLimits).length ? cleanLimits : null,
-      pricing: {
-        monthly: pricing && pricing.monthly !== "" && pricing.monthly != null ? Number(pricing.monthly) : null,
-        annual: pricing && pricing.annual !== "" && pricing.annual != null ? Number(pricing.annual) : null,
-      },
-      reason,
+      pricing: cleanPricing,
+      reason: parsedReason.value,
       setBy: req.user._id,
       setAt: new Date(),
     };
@@ -425,8 +496,9 @@ exports.setOverride = async (req, res) => {
       organisationId: org._id,
       targetType: "organisation",
       targetId: String(org._id),
-      meta: { limits: cleanLimits, pricing, reason },
+      meta: { limits: cleanLimits, pricing: cleanPricing, reason: parsedReason.value },
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
     res.json({ message: "Override saved", organisation: org });
   } catch (err) {
     console.error("Set override error:", err);
@@ -448,6 +520,7 @@ exports.clearOverride = async (req, res) => {
       targetType: "organisation",
       targetId: String(org._id),
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
     res.json({ message: "Override cleared", organisation: org });
   } catch (err) {
     console.error("Clear override error:", err);
@@ -460,10 +533,15 @@ exports.clearOverride = async (req, res) => {
  */
 exports.setTrial = async (req, res) => {
   try {
-    const { trialEndsAt } = req.body;
+    // `new Date("nonsense")` is an Invalid Date; it used to reach Mongoose and
+    // come back as a 500. A trial that already expired is also refused — it
+    // reads as "set" in the console while gating nothing.
+    const parsed = input.date(req.body?.trialEndsAt, "Trial end date", { allowNull: true, future: true });
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
-    org.trialEndsAt = trialEndsAt ? new Date(trialEndsAt) : null;
+    org.trialEndsAt = parsed.value;
     await org.save();
     await writeAudit(req, "org.trial_set", {
       organisationId: org._id,
@@ -471,6 +549,7 @@ exports.setTrial = async (req, res) => {
       targetId: String(org._id),
       meta: { trialEndsAt: org.trialEndsAt },
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
     res.json({ message: "Trial updated", organisation: org });
   } catch (err) {
     console.error("Set trial error:", err);
@@ -569,6 +648,7 @@ exports.actAs = async (req, res) => {
       targetId: String(org._id),
       meta: { sessionId, reason: req.body?.reason || "", actingAs: target.email, mode, access, ticketId },
     });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
 
     res.json({
       token,
@@ -610,6 +690,8 @@ exports.endSupportSession = async (req, res) => {
         { sessionId: decoded.sessionId, status: "active" },
         { $set: { status: "ended", endedAt: new Date(), endedBy: decoded.impersonatorId || null } }
       ).catch((e) => console.error("End support session record update failed:", e.message));
+      // Tell any open Support Sessions screen the row just went quiet.
+      emitToSuperAdmins("supportSession:updated", { reason: "ended", sessionId: decoded.sessionId });
     }
 
     await PlatformAuditLog.create({
@@ -637,29 +719,74 @@ exports.endSupportSession = async (req, res) => {
  */
 exports.listInvoices = async (req, res) => {
   try {
-    const { status, organisationId, page = 1, limit = 30 } = req.query;
-    const filter = {};
-    if (status && status !== "all") filter.status = status;
-    if (organisationId) filter.organisationId = organisationId;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const { page, limit, skip } = input.paging(req.query, { defaultLimit: 30, maxLimit: 100 });
 
-    const [invoices, total, paidAgg] = await Promise.all([
+    const filter = {};
+    const status = input.filterValue(req.query.status);
+    if (status && status !== "all") filter.status = status;
+    // A malformed organisationId used to reach Mongo and answer 500; an object
+    // like `?organisationId[$ne]=null` reached it as a query operator.
+    const orgFilter = input.filterValue(req.query.organisationId);
+    if (orgFilter) {
+      if (!input.isObjectId(orgFilter)) return res.status(400).json({ error: "That organisation id is not valid" });
+      filter.organisationId = orgFilter;
+    }
+
+    // Search spans the invoice's own identifiers AND the tenant it belongs to,
+    // so looking up a charity by name finds their invoices on any page — the
+    // screen used to filter only the 30 rows already loaded.
+    const rx = input.searchRegex(req.query.search);
+    if (rx) {
+      const orgIds = await Organisation.find({ $or: [{ name: rx }, { slug: rx }] })
+        .select("_id")
+        .lean();
+      filter.$or = [{ number: rx }, { stripeInvoiceId: rx }];
+      if (orgIds.length) filter.$or.push({ organisationId: { $in: orgIds.map((o) => o._id) } });
+    }
+
+    const [invoices, summaryAgg, collectedAgg] = await Promise.all([
       PlatformInvoice.find(filter)
         .populate("organisationId", "name slug branding")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit)),
-      PlatformInvoice.countDocuments(filter),
+        .limit(limit)
+        .lean(),
+      // Count + paid/outstanding across the WHOLE filtered set, not just the
+      // page on screen — the tiles sat next to lifetime figures and quietly
+      // described a 30-row window.
+      PlatformInvoice.aggregate([
+        { $match: filter },
+        {
+          $facet: {
+            total: [{ $count: "n" }],
+            paid: [{ $match: { status: "paid" } }, { $count: "n" }],
+            outstanding: [
+              { $match: { status: { $in: ["open", "failed", "uncollectible"] } } },
+              { $group: { _id: null, amount: { $sum: "$amountDue" }, count: { $sum: 1 } } },
+            ],
+          },
+        },
+      ]),
+      // Lifetime collected is deliberately global — it's the platform total,
+      // independent of whatever filter is applied.
       PlatformInvoice.aggregate([
         { $match: { status: "paid" } },
         { $group: { _id: null, total: { $sum: "$amountPaid" } } },
       ]),
     ]);
 
+    const s = summaryAgg[0] || {};
+    const total = s.total?.[0]?.n || 0;
+
     res.json({
       invoices,
-      totalCollected: paidAgg[0]?.total || 0,
-      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
+      totalCollected: collectedAgg[0]?.total || 0,
+      summary: {
+        paidCount: s.paid?.[0]?.n || 0,
+        outstandingAmount: s.outstanding?.[0]?.amount || 0,
+        outstandingCount: s.outstanding?.[0]?.count || 0,
+      },
+      pagination: { total, page, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error("List invoices error:", err);
@@ -673,20 +800,18 @@ exports.listInvoices = async (req, res) => {
  */
 exports.getBillingStats = async (req, res) => {
   try {
-    const [totalOrgs, activeOrgs, planCounts, recentSignups, failedPayments, planDocs, collectedAgg] = await Promise.all([
-      Organisation.countDocuments(),
-      Organisation.countDocuments({ isActive: true, subscriptionStatus: "active" }),
-      Organisation.aggregate([
-        { $match: { isActive: true, subscriptionStatus: "active" } },
-        { $group: { _id: "$plan", count: { $sum: 1 } } },
-      ]),
+    // MRR normalisation (annual cycles, comps, per-tenant overrides) lives in
+    // services/subscriptionMetrics.js so this screen and the Dashboard can never
+    // quote different numbers again.
+    const [orgFacetRes, recentSignups, planDocs, collectedAgg] = await Promise.all([
+      Organisation.aggregate([subscriptionMetrics.orgFacet()]),
       Organisation.find()
         .populate("adminUserId", "name email")
         .sort({ createdAt: -1 })
         .limit(10)
-        .select("name slug plan subscriptionStatus createdAt branding"),
-      Organisation.countDocuments({ subscriptionStatus: "past_due" }),
-      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color"),
+        .select("name slug plan subscriptionStatus createdAt branding")
+        .lean(),
+      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color").lean(),
       // Lifetime revenue actually collected (paid invoices in the Stripe mirror).
       PlatformInvoice.aggregate([
         { $match: { status: "paid" } },
@@ -694,48 +819,18 @@ exports.getBillingStats = async (req, res) => {
       ]),
     ]);
 
-    const countByCode = {};
-    planCounts.forEach((p) => { countByCode[p._id] = p.count; });
-
-    // Per-plan breakdown from the dynamic Plan collection; fall back to the
-    // legacy static tiers before the Plan collection has been seeded.
-    let plans;
-    if (planDocs.length) {
-      plans = planDocs.map((p) => ({
-        code: p.code,
-        name: p.name,
-        color: p.color || "#10b981",
-        monthly: p.price?.monthly || 0,
-        annual: p.price?.annual || 0,
-        count: countByCode[p.code] || 0,
-      }));
-    } else {
-      plans = [
-        ["basic", "Basic", "#06b6d4"],
-        ["professional", "Professional", "#10b981"],
-        ["enterprise", "Enterprise", "#f59e0b"],
-      ].map(([code, name, color]) => ({
-        code,
-        name,
-        color,
-        monthly: planPricing[code]?.monthly || 0,
-        annual: planPricing[code]?.annual || 0,
-        count: countByCode[code] || 0,
-      }));
-    }
-
-    const mrr = plans.reduce((sum, p) => sum + p.count * p.monthly, 0);
-    const byPlan = {};
-    plans.forEach((p) => { byPlan[p.code] = p.count; });
+    const m = subscriptionMetrics.summarise(orgFacetRes[0], planDocs);
 
     res.json({
-      totalOrganisations: totalOrgs,
-      activeSubscriptions: activeOrgs,
-      failedPayments,
-      mrr,
+      totalOrganisations: m.totalOrgs,
+      activeSubscriptions: m.activeOrgs,
+      failedPayments: m.failedPayments,
+      mrr: m.mrr,
       collected: collectedAgg[0]?.total || 0, // lifetime revenue collected
-      plans,
-      byPlan, // back-compat for any older consumer
+      compedSubscriptions: m.compedSubscriptions, // active but paying nothing
+      byCycle: m.byCycle, // revenue-bearing subscribers per billing cycle
+      plans: m.plans, // each carries `count`, `payingCount` and monthly-normalised `revenue`
+      byPlan: m.byPlan, // back-compat for any older consumer
       recentSignups,
     });
   } catch (error) {
@@ -758,67 +853,91 @@ exports.getDashboardStats = async (req, res) => {
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
 
-    const [
-      totalOrgs, activeOrgs, planCounts, recentSignups, failedPayments, planDocs,
-      collectedAgg, donationsAgg, totalUsers, totalPrograms, totalEvents, totalCampaigns,
-      newThisMonth, newLastMonth, signupBuckets,
-    ] = await Promise.all([
-      Organisation.countDocuments(),
-      Organisation.countDocuments({ isActive: true, subscriptionStatus: "active" }),
-      Organisation.aggregate([
-        { $match: { isActive: true, subscriptionStatus: "active" } },
-        { $group: { _id: "$plan", count: { $sum: 1 } } },
-      ]),
-      Organisation.find()
-        .populate("adminUserId", "name email")
-        .sort({ createdAt: -1 })
-        .limit(8)
-        .select("name slug plan subscriptionStatus createdAt branding"),
-      Organisation.countDocuments({ subscriptionStatus: "past_due" }),
-      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color"),
-      PlatformInvoice.aggregate([{ $match: { status: "paid" } }, { $group: { _id: null, total: { $sum: "$amountPaid" } } }]),
-      Order.aggregate([{ $match: { paymentStatus: "completed" } }, { $group: { _id: null, total: { $sum: "$totalAmount" }, count: { $sum: 1 } } }]),
-      User.countDocuments(),
-      Program.countDocuments(),
-      Event.countDocuments(),
-      GoFundMe.countDocuments(),
-      Organisation.countDocuments({ createdAt: { $gte: startOfMonth } }),
-      Organisation.countDocuments({ createdAt: { $gte: startOfLastMonth, $lt: startOfMonth } }),
-      Organisation.aggregate([
-        { $match: { createdAt: { $gte: twelveMonthsAgo } } },
-        { $group: { _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } }, count: { $sum: 1 } } },
-      ]),
-    ]);
+    // One pass over Organisations for every roll-up this screen needs. It used
+    // to fire five countDocuments, two aggregates and a find against the same
+    // collection; the growth branches ride along on the shared facet.
+    const [orgFacetRes, recentSignups, planDocs, collectedAgg, donationsAgg, counts] =
+      await Promise.all([
+        Organisation.aggregate([
+          subscriptionMetrics.orgFacet({
+            newThisMonth: [{ $match: { createdAt: { $gte: startOfMonth } } }, { $count: "n" }],
+            newLastMonth: [
+              { $match: { createdAt: { $gte: startOfLastMonth, $lt: startOfMonth } } },
+              { $count: "n" },
+            ],
+            signupBuckets: [
+              { $match: { createdAt: { $gte: twelveMonthsAgo } } },
+              {
+                $group: {
+                  _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } },
+                  count: { $sum: 1 },
+                },
+              },
+            ],
+          }),
+        ]),
+        Organisation.find()
+          .populate("adminUserId", "name email")
+          .sort({ createdAt: -1 })
+          .limit(8)
+          .select("name slug plan subscriptionStatus createdAt branding")
+          .lean(),
+        Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color").lean(),
+        PlatformInvoice.aggregate([
+          { $match: { status: "paid" } },
+          { $group: { _id: null, total: { $sum: "$amountPaid" } } },
+        ]),
+        Order.aggregate([
+          { $match: { paymentStatus: "completed" } },
+          { $group: { _id: null, total: { $sum: "$totalAmount" }, count: { $sum: 1 } } },
+        ]),
+        // Footprint counts across four separate collections — genuinely parallel.
+        Promise.all([
+          User.estimatedDocumentCount(),
+          Program.estimatedDocumentCount(),
+          Event.estimatedDocumentCount(),
+          GoFundMe.estimatedDocumentCount(),
+        ]),
+      ]);
 
-    const countByCode = {};
-    planCounts.forEach((p) => { countByCode[p._id] = p.count; });
-    let plans;
-    if (planDocs.length) {
-      plans = planDocs.map((p) => ({ code: p.code, name: p.name, color: p.color || "#10b981", monthly: p.price?.monthly || 0, count: countByCode[p.code] || 0 }));
-    } else {
-      plans = [["basic", "Basic", "#06b6d4"], ["professional", "Professional", "#10b981"], ["enterprise", "Enterprise", "#f59e0b"]].map(([code, name, color]) => ({
-        code, name, color, monthly: planPricing[code]?.monthly || 0, count: countByCode[code] || 0,
-      }));
-    }
-    const mrr = plans.reduce((s, p) => s + p.count * p.monthly, 0);
+    const f = orgFacetRes[0] || {};
+    // Same normalisation the Billing screen uses — annual cycles, comps and
+    // per-tenant overrides all folded in. These two screens quoted different
+    // MRR for the same month until this became one shared calculation.
+    const m = subscriptionMetrics.summarise(f, planDocs);
+    const [totalUsers, totalPrograms, totalEvents, totalCampaigns] = counts;
+
+    const newThisMonth = subscriptionMetrics.firstCount(f.newThisMonth);
+    const newLastMonth = subscriptionMetrics.firstCount(f.newLastMonth);
 
     // Build a continuous 12-month signup series (zero-filled).
     const bucketMap = {};
-    signupBuckets.forEach((b) => { bucketMap[`${b._id.y}-${b._id.m}`] = b.count; });
+    (f.signupBuckets || []).forEach((b) => {
+      bucketMap[`${b._id.y}-${b._id.m}`] = b.count;
+    });
     const signupSeries = [];
     for (let i = 11; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      signupSeries.push({ month: d.toLocaleString("en-US", { month: "short" }), count: bucketMap[`${d.getFullYear()}-${d.getMonth() + 1}`] || 0 });
+      signupSeries.push({
+        month: d.toLocaleString("en-US", { month: "short" }),
+        count: bucketMap[`${d.getFullYear()}-${d.getMonth() + 1}`] || 0,
+      });
     }
-    const growthPct = newLastMonth ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100) : newThisMonth > 0 ? 100 : 0;
+    const growthPct = newLastMonth
+      ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100)
+      : newThisMonth > 0
+        ? 100
+        : 0;
 
     res.json({
-      totalOrganisations: totalOrgs,
-      activeSubscriptions: activeOrgs,
-      failedPayments,
-      mrr,
+      totalOrganisations: m.totalOrgs,
+      activeSubscriptions: m.activeOrgs,
+      failedPayments: m.failedPayments,
+      compedSubscriptions: m.compedSubscriptions,
+      mrr: m.mrr,
       collected: collectedAgg[0]?.total || 0,
-      plans,
+      byCycle: m.byCycle,
+      plans: m.plans,
       recentSignups,
       // Cross-tenant footprint
       donationsTotal: donationsAgg[0]?.total || 0,
@@ -846,9 +965,11 @@ exports.getDashboardStats = async (req, res) => {
  */
 exports.listBrandingRequests = async (req, res) => {
   try {
-    const { status = "pending", page = 1, limit = 50 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    // `parseInt("abc")` produced NaN and `page=-1` a negative skip, both of
+    // which the driver rejected as a 500.
+    const { page, limit, skip } = input.paging(req.query, { defaultLimit: 50, maxLimit: 100 });
     const filter = {};
+    const status = input.filterValue(req.query.status) || "pending";
     if (status !== "all") filter.status = status;
 
     const [requests, total] = await Promise.all([
@@ -858,11 +979,14 @@ exports.listBrandingRequests = async (req, res) => {
         .populate("reviewedBy", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(parseInt(limit)),
+        .limit(limit),
       BrandingRequest.countDocuments(filter),
     ]);
 
-    res.json(requests);
+    // The count was computed and then thrown away — the screen received a bare
+    // array and had no way to know a second page existed. `requests` is kept at
+    // the top level so existing callers that index the response still work.
+    res.json({ requests, pagination: { total, page, pages: Math.ceil(total / limit) } });
   } catch (error) {
     console.error("List branding requests error:", error);
     res.status(500).json({ error: "Failed to fetch branding requests" });

@@ -66,6 +66,10 @@ const contactRequestSchema = new mongoose.Schema(
   }
 );
 
+// Matches the inbox query in contactController.getAlContact exactly:
+// find({ organisationId }).sort({ lastMessageAt: -1, createdAt: -1 })
+contactRequestSchema.index({ organisationId: 1, lastMessageAt: -1, createdAt: -1 });
+
 const ContactRequest = mongoose.model("ContactRequest", contactRequestSchema);
 
 module.exports = ContactRequest;

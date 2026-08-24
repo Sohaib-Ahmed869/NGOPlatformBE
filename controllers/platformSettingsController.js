@@ -2,6 +2,64 @@ const PlatformSettings = require("../models/platformSettings");
 const Organisation = require("../models/organisation");
 const Order = require("../models/order");
 const { brandingUpload, deleteS3Object } = require("../config/s3");
+const platformStripe = require("../services/platformStripe");
+const writeAudit = require("../utils/writeAudit");
+
+// Subset of an object, for compact audit diffs.
+const pick = (obj, keys) => Object.fromEntries(keys.map((k) => [k, obj[k]]));
+
+/**
+ * Plain text for a field that is published on the marketing site and pasted
+ * into transactional email HTML. React escapes what it renders, but these
+ * values also reach email bodies and page <title>s, where nothing does.
+ */
+const plainText = (v, max) =>
+  String(v)
+    .replace(/[<>]/g, "") // no tag delimiters in a name/tagline/description
+    .trim()
+    .slice(0, max);
+
+/**
+ * A link for the public footer. Anything that isn't http(s) is dropped —
+ * `javascript:alert(1)` was accepted and rendered straight into an href.
+ */
+function safeUrl(v) {
+  const s = String(v || "").trim();
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) return null; // caller turns null into a 400
+  try {
+    // eslint-disable-next-line no-new
+    new URL(s);
+  } catch {
+    return null;
+  }
+  return s.slice(0, 300);
+}
+
+/**
+ * The PLATFORM's Stripe identity for the browser — SaaS subscription checkout on
+ * the marketing site, and nothing else. This is not the tenant donation key:
+ * that one is resolved per-organisation in saas/registrationController.getBySlug
+ * from Organisation.payment, and the two must never be swapped.
+ *
+ * Only the publishable key is here, and a pk_ is built to be public — it can
+ * create payment attempts against a specific account but authorises nothing.
+ * It is read from the RESOLVER rather than the document so it always names the
+ * account (and mode) the server will actually charge with; the resolver returns
+ * "" when running on env credentials, which is the signal for the client to use
+ * its own build-time VITE_STRIPE_PUBLISHABLE_KEY — the same fallback the server
+ * just made, so the two halves stay in step by construction.
+ */
+function publicStripe() {
+  const runtime = platformStripe.describeSource();
+  return {
+    scope: "platform-billing",
+    configured: !!runtime.configured,
+    mode: runtime.mode, // "test" | "live" | null — inferred from the live key
+    source: runtime.secretSource, // "database" | "env" | "none"
+    publishableKey: platformStripe.getPublishableKey(),
+  };
+}
 
 // Safe public projection — exactly what the marketing site needs, nothing else.
 const toPublic = (s) => ({
@@ -26,6 +84,8 @@ const toPublic = (s) => ({
     twitter: s.socialLinks?.twitter || "",
     linkedin: s.socialLinks?.linkedin || "",
   },
+  // SaaS-billing Stripe identity for the signup checkout — see publicStripe().
+  stripe: publicStripe(),
 });
 
 /* ── Public platform stats ──────────────────────────────────────────────────
@@ -130,22 +190,57 @@ exports.updateSettings = async (req, res) => {
     const s = await PlatformSettings.getSingleton();
     const hex = /^#[0-9A-Fa-f]{6}$/;
 
-    if (b.name !== undefined) s.name = String(b.name).slice(0, 120);
-    if (b.tagline !== undefined) s.tagline = String(b.tagline).slice(0, 200);
-    if (b.description !== undefined) s.description = String(b.description).slice(0, 1200);
-    if (b.contactEmail !== undefined) s.contactEmail = String(b.contactEmail).slice(0, 160);
-    if (b.contactPhone !== undefined) s.contactPhone = String(b.contactPhone).slice(0, 60);
-    if (b.address !== undefined) s.address = String(b.address).slice(0, 240);
+    // Reject bad colours instead of dropping them. The old code silently
+    // ignored anything that failed the hex test, so a typo'd swatch reported
+    // "saved" while the colour never changed.
+    const COLOURS = ["primaryColor", "accentColor", "backgroundColor"];
+    const br = b.branding || b; // may arrive nested or flat
+    const badColour = COLOURS.find((k) => br[k] !== undefined && br[k] !== "" && !hex.test(br[k]));
+    if (badColour) {
+      return res.status(400).json({ error: `${badColour} must be a 6-digit hex colour like #10B981` });
+    }
+    if (b.contactEmail !== undefined && String(b.contactEmail).trim() && !/^\S+@\S+\.\S+$/.test(String(b.contactEmail).trim())) {
+      // This address is published on the marketing site — don't let a typo through.
+      return res.status(400).json({ error: "Contact email doesn't look like a valid address" });
+    }
 
-    if (b.socialLinks && typeof b.socialLinks === "object") {
-      ["facebook", "instagram", "twitter", "linkedin"].forEach((k) => {
-        if (b.socialLinks[k] !== undefined) s.socialLinks[k] = String(b.socialLinks[k]).slice(0, 300);
-      });
+    // Snapshot the fields we're about to touch so the audit entry can say what
+    // actually changed rather than just "settings updated".
+    const before = {
+      name: s.name,
+      contactEmail: s.contactEmail,
+      contactPhone: s.contactPhone,
+      primaryColor: s.branding?.primaryColor,
+      accentColor: s.branding?.accentColor,
+      theme: s.branding?.theme,
+    };
+
+    // Validate the links BEFORE writing anything, so a bad URL doesn't leave
+    // the name already changed.
+    const socialUpdates = {};
+    if (b.socialLinks && typeof b.socialLinks === "object" && !Array.isArray(b.socialLinks)) {
+      for (const k of ["facebook", "instagram", "twitter", "linkedin"]) {
+        if (b.socialLinks[k] === undefined) continue;
+        const url = safeUrl(b.socialLinks[k]);
+        if (url === null) {
+          return res.status(400).json({ error: `The ${k} link must be a full http(s) URL` });
+        }
+        socialUpdates[k] = url;
+      }
+    }
+
+    if (b.name !== undefined) s.name = plainText(b.name, 120);
+    if (b.tagline !== undefined) s.tagline = plainText(b.tagline, 200);
+    if (b.description !== undefined) s.description = plainText(b.description, 1200);
+    if (b.contactEmail !== undefined) s.contactEmail = plainText(b.contactEmail, 160);
+    if (b.contactPhone !== undefined) s.contactPhone = plainText(b.contactPhone, 60);
+    if (b.address !== undefined) s.address = plainText(b.address, 240);
+
+    if (Object.keys(socialUpdates).length) {
+      Object.assign(s.socialLinks, socialUpdates);
       s.markModified("socialLinks");
     }
 
-    // Branding colours/theme may come nested under `branding` or flat.
-    const br = b.branding || b;
     if (br.primaryColor && hex.test(br.primaryColor)) s.branding.primaryColor = br.primaryColor;
     if (br.accentColor && hex.test(br.accentColor)) s.branding.accentColor = br.accentColor;
     if (br.backgroundColor && hex.test(br.backgroundColor)) s.branding.backgroundColor = br.backgroundColor;
@@ -153,6 +248,25 @@ exports.updateSettings = async (req, res) => {
     s.markModified("branding");
 
     await s.save();
+
+    const after = {
+      name: s.name,
+      contactEmail: s.contactEmail,
+      contactPhone: s.contactPhone,
+      primaryColor: s.branding?.primaryColor,
+      accentColor: s.branding?.accentColor,
+      theme: s.branding?.theme,
+    };
+    const changed = Object.keys(after).filter((k) => after[k] !== before[k]);
+    if (changed.length) {
+      // Platform-wide branding and contact details were the ONLY operator
+      // mutation in the console with no audit trail.
+      await writeAudit(req, "platform.settings_updated", {
+        targetType: "platform",
+        targetId: "settings",
+        meta: { changed, before: pick(before, changed), after: pick(after, changed) },
+      });
+    }
     res.json(s);
   } catch (error) {
     console.error("Update platform settings error:", error);
@@ -198,6 +312,11 @@ exports.uploadAsset = [
       s.markModified("branding");
       await s.save();
 
+      await writeAudit(req, "platform.asset_uploaded", {
+        targetType: "platform",
+        targetId: req.params.type,
+        meta: { field, url: req.file.location },
+      });
       res.json({ message: "Asset uploaded successfully", field, url: req.file.location });
     } catch (error) {
       console.error("Upload platform asset error:", error);
@@ -229,6 +348,11 @@ exports.deleteAsset = async (req, res) => {
     s.markModified("branding");
     await s.save();
 
+    await writeAudit(req, "platform.asset_removed", {
+      targetType: "platform",
+      targetId: req.params.type,
+      meta: { field },
+    });
     res.json({ message: "Asset removed successfully", field });
   } catch (error) {
     console.error("Delete platform asset error:", error);

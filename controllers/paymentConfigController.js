@@ -1,8 +1,18 @@
 const Stripe = require("stripe");
 const Organisation = require("../models/organisation");
 const { encrypt, decrypt } = require("../utils/crypto");
+const { getDonationSource } = require("../services/tenantStripe");
 
-/** Shape returned to the admin client — NEVER includes secret values. */
+/**
+ * Shape returned to the admin client — NEVER includes secret values.
+ *
+ * This is the TENANT Stripe setup (donations). The platform's own account —
+ * which bills this organisation for its subscription — is configured separately
+ * in the SuperAdmin console and is not editable here. `source` names which of
+ * the two actually processes this tenant's donations right now, so an admin can
+ * see at a glance whether they are on their own account or riding the platform's
+ * fallback, rather than inferring it from an empty form.
+ */
 function maskedConfig(org) {
   const p = org.payment || {};
   return {
@@ -13,6 +23,7 @@ function maskedConfig(org) {
     hasWebhookSecret: !!p.webhookSecretEnc,
     accountLabel: p.accountLabel || "",
     lastVerifiedAt: p.lastVerifiedAt || null,
+    source: getDonationSource(org), // "tenant" | "platform" | "none"
   };
 }
 

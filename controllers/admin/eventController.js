@@ -5,6 +5,7 @@ const EventRegistration = require("../../models/eventRegistration");
 const Join = require("../../models/join");
 const { deleteS3Object } = require("../../config/s3");
 const { normalizeQuestions } = require("../../utils/eventQuestions");
+const { runCappedExport } = require("../../utils/exportLimit");
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
@@ -684,9 +685,12 @@ exports.exportRegistrations = async (req, res) => {
       return res.status(404).json({ status: "Error", message: "Event not found" });
     }
 
-    const regs = await EventRegistration.find({ eventId: event._id })
-      .sort({ createdAt: 1 })
-      .lean();
+    // Scoped to one event, so this is far smaller than the donation exports —
+    // but a large recurring event is still unbounded without a ceiling.
+    const { rows: regs } = await runCappedExport(
+      EventRegistration.find({ eventId: event._id }).sort({ createdAt: 1 }).lean(),
+      res,
+    );
 
     const questions = event.registrationQuestions || [];
     const headers = [

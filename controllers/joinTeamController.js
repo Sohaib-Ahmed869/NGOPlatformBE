@@ -6,6 +6,7 @@ const User = require("../models/user");
 const Organisation = require("../models/organisation");
 const { sendEmail } = require("../services/emailUtil");
 const { emitToOrg } = require("../services/socket");
+const { runCappedExport } = require("../utils/exportLimit");
 
 const QUESTION_TYPES = ["text", "textarea", "select", "checkbox", "number", "email", "phone"];
 
@@ -281,10 +282,12 @@ exports.exportJoins = async (req, res) => {
     if (req.query.status && req.query.status !== "all" && STATUSES.includes(req.query.status)) {
       filter.status = req.query.status;
     }
-    const rows = await Join.find(filter)
-      .sort({ createdAt: -1 })
-      .populate("assignedTo", "name email")
-      .lean();
+    // Capped, with truncation reported in the X-Export-* headers so the
+    // response stays a plain array and no existing caller breaks.
+    const { rows } = await runCappedExport(
+      Join.find(filter).sort({ createdAt: -1 }).populate("assignedTo", "name email").lean(),
+      res,
+    );
     res.status(200).json(rows);
   } catch (error) {
     console.log(error);

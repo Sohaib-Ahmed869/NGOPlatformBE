@@ -6,15 +6,18 @@
  * fresh prices when an amount changes, archive a plan's Stripe objects, and
  * migrate existing subscribers onto a plan's current price.
  *
- * All functions degrade gracefully when STRIPE_SECRET_KEY is unset — the plan
+ * All functions degrade gracefully when no Stripe key is configured — the plan
  * is still persisted, just unsynced.
+ *
+ * The key comes from the SuperAdmin console (Platform Settings → Stripe) or
+ * STRIPE_SECRET_KEY. Note that the guard below is a CALL, not a captured
+ * boolean: saving a key in the console has to enable syncing on the spot, and a
+ * module-scope `!!stripe` would have stayed false until the next restart.
  */
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? require("stripe")(process.env.STRIPE_SECRET_KEY)
-  : null;
+const { stripe, isStripeConfigured } = require("./platformStripe");
 const planPricing = require("../config/planPricing");
 
-const isStripeEnabled = () => !!stripe;
+const isStripeEnabled = () => isStripeConfigured();
 
 const intervalFor = (cycle) => (cycle === "annual" ? "year" : "month");
 
@@ -34,7 +37,7 @@ async function createPriceForCycle(productId, plan, cycle) {
 
 /** Create a Stripe Product + monthly/annual Prices for a brand-new plan. */
 async function provisionPlan(plan) {
-  if (!stripe) return { stripeProductId: "", stripePriceIds: { monthly: "", annual: "" } };
+  if (!isStripeEnabled()) return { stripeProductId: "", stripePriceIds: { monthly: "", annual: "" } };
   const product = await stripe.products.create({
     name: plan.name,
     description: plan.description || undefined,
@@ -47,7 +50,7 @@ async function provisionPlan(plan) {
 
 /** Push name/description edits to the existing Stripe Product (best-effort). */
 async function syncProduct(plan) {
-  if (!stripe || !plan.stripeProductId) return;
+  if (!isStripeEnabled() || !plan.stripeProductId) return;
   await stripe.products.update(plan.stripeProductId, {
     name: plan.name,
     description: plan.description || undefined,
@@ -59,7 +62,7 @@ async function syncProduct(plan) {
  * Price when the product id is missing. Returns the product id or "".
  */
 async function resolveProductId(plan) {
-  if (!stripe) return "";
+  if (!isStripeEnabled()) return "";
   if (plan.stripeProductId) return plan.stripeProductId;
   const anyPrice = plan.stripePriceIds?.monthly || plan.stripePriceIds?.annual;
   if (anyPrice) {
@@ -85,7 +88,7 @@ async function resolveProductId(plan) {
  * for a cycle priced > 0. Returns { stripeProductId, stripePriceIds }.
  */
 async function resyncPlan(plan) {
-  if (!stripe) {
+  if (!isStripeEnabled()) {
     return {
       stripeProductId: plan.stripeProductId || "",
       stripePriceIds: {
@@ -120,7 +123,7 @@ async function resyncPlan(plan) {
  * stripePriceIds:{ [cycle]: id } } for the changed cycles only.
  */
 async function repriceChangedCycles(plan, changedCycles) {
-  if (!stripe) return { stripeProductId: plan.stripeProductId || "", stripePriceIds: {} };
+  if (!isStripeEnabled()) return { stripeProductId: plan.stripeProductId || "", stripePriceIds: {} };
 
   let productId = plan.stripeProductId;
   // Resolve (or create) the product if the plan doesn't already have one.
@@ -153,7 +156,7 @@ async function repriceChangedCycles(plan, changedCycles) {
 
 /** Deactivate a plan's Stripe Prices + Product (best-effort). */
 async function archivePlanStripe(plan) {
-  if (!stripe) return;
+  if (!isStripeEnabled()) return;
   try {
     for (const cycle of ["monthly", "annual"]) {
       const id = plan.stripePriceIds?.[cycle];
@@ -174,7 +177,7 @@ async function archivePlanStripe(plan) {
  */
 async function migrateSubscribers(plan, { proration = "none" } = {}) {
   const result = { migrated: 0, failed: 0, skipped: 0 };
-  if (!stripe) return result;
+  if (!isStripeEnabled()) return result;
   const Organisation = require("../models/organisation");
 
   const orgs = await Organisation.find({

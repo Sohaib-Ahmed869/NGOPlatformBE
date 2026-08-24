@@ -74,6 +74,14 @@ const organisationSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    // The Lead this org was converted from, if any (SuperAdmin Leads CRM).
+    // Set at /register when the visitor arrived via a lead's activation link;
+    // orgActivation flips that Lead to "won" once this org actually goes live.
+    sourceLeadId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Lead",
+      default: null,
+    },
     // Admin credentials captured at registration, before payment completes.
     // The admin User row is created (and this is cleared) by the subscription
     // webhook once the first invoice is paid (in-house checkout).
@@ -81,6 +89,15 @@ const organisationSchema = new mongoose.Schema(
       name: { type: String },
       email: { type: String },
       passwordHash: { type: String },
+    },
+    // Same idea as pendingAdmin, but for the SuperAdmin-initiated paid-Leads
+    // flow (Convert → charge now / send a payment link): no password is
+    // collected up front, so orgActivation.js materialises this admin via a
+    // reset-token "set your password" email instead of the pendingAdmin's
+    // "here's your login" welcome email. Mutually exclusive with pendingAdmin.
+    pendingAdminNoPassword: {
+      name: { type: String },
+      email: { type: String },
     },
     branding: {
       // Primary logo — the light/white variant, shown on DARK backgrounds
@@ -233,5 +250,8 @@ const organisationSchema = new mongoose.Schema(
 );
 
 organisationSchema.index({ stripeCustomerId: 1 });
+
+// The operator console lists tenants newest-first on several screens.
+organisationSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("Organisation", organisationSchema);

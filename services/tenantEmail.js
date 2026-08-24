@@ -8,7 +8,9 @@ const nodemailer = require("nodemailer");
 const { decrypt } = require("../utils/crypto");
 const Organisation = require("../models/organisation");
 
-const PLATFORM_FROM_NAME = process.env.EMAIL_FROM_NAME || "Shahid Afridi Foundation";
+// Only used for PLATFORM-level mail (SaaS billing, operator notices). Tenant
+// mail falls back to the organisation's own name — see getFromIdentity.
+const PLATFORM_FROM_NAME = process.env.EMAIL_FROM_NAME || "NGO Platform";
 
 // Leaving EMAIL_HOST unset while EMAIL_USER points at another provider sends the
 // right credentials to the wrong server, which the provider rejects as
@@ -91,7 +93,11 @@ function getTenantTransport(org) {
 function getFromIdentity(org, options = {}) {
   const e = (org && org.email) || {};
   const tenant = isEmailConfigured(org) && !!decrypt(e.passwordEnc);
-  const fromName = e.fromName || options.fromName || PLATFORM_FROM_NAME;
+  // org.name before the platform default: a tenant that hasn't set a custom
+  // from-name should still send as themselves, not as the platform (previously
+  // this made every such tenant's mail arrive from one hardcoded charity).
+  const fromName =
+    e.fromName || options.fromName || (org && org.name) || PLATFORM_FROM_NAME;
   const fromEmail = tenant ? e.fromEmail || e.username : process.env.EMAIL_USER;
   const replyTo = options.replyTo || e.replyTo || "";
   return { fromName, fromEmail, replyTo, tenant };

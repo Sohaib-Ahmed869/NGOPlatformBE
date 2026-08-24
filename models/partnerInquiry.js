@@ -63,4 +63,8 @@ partnerInquirySchema.index({ organisationId: 1, status: 1, createdAt: -1 });
 // Public wall query: approved + published, ordered.
 partnerInquirySchema.index({ organisationId: 1, showOnWebsite: 1, status: 1, displayOrder: 1 });
 
+// The status-led index can't serve an org-only listing sorted by date, because
+// `status` sits between the two.
+partnerInquirySchema.index({ organisationId: 1, createdAt: -1 });
+
 module.exports = mongoose.model("PartnerInquiry", partnerInquirySchema);

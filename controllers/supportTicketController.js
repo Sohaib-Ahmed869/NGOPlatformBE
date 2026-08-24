@@ -3,8 +3,14 @@ const SupportTicket = require("../models/supportTicket");
 const Organisation = require("../models/organisation");
 const { emitToOrg, emitToSuperAdmins } = require("../services/socket");
 const { sendEmail } = require("../services/emailUtil");
+const operatorInput = require("../utils/operatorInput");
 
 const PUBLIC_FIELDS = "-triage -kanbanStatus -triagedBy -triagedAt -triageNotes";
+
+// Mirrors the enums on models/supportTicket.js. The kanban board groups tickets
+// by exactly these values, so anything outside them is unreachable in the UI.
+const TRIAGE_VALUES = ["unclassified", "bug", "feature", "invalid", "duplicate"];
+const KANBAN_VALUES = ["todo", "in_progress", "done"];
 
 function orgId(req) {
   return req.organisation?._id;
@@ -529,9 +535,14 @@ exports.publicSatisfaction = async (req, res) => {
 // Platform operator (super admin) — cross-tenant triage + kanban
 // ──────────────────────────────────────────────────────────────────────────
 
+// User-typed search terms are matched literally — an unescaped "(" made the
+// regex throw a 500, and ".*" matched every ticket.
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 exports.listAllTickets = async (req, res) => {
   try {
-    const { tenant, triage, status, priority, kanban, source, search, limit = 200 } = req.query;
+    const { tenant, triage, status, priority, kanban, source, search } = req.query;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 1000);
     const filter = {};
     if (tenant) filter.organisationId = tenant;
     if (triage && triage !== "all") filter.triage = triage;
@@ -539,13 +550,77 @@ exports.listAllTickets = async (req, res) => {
     if (priority && priority !== "all") filter.priority = priority;
     if (kanban && kanban !== "all") filter.kanbanStatus = kanban;
     if (source && source !== "all") filter["reporter.kind"] = source; // tenant (admin) | customer | public
-    if (search) filter.summary = { $regex: search, $options: "i" };
+    if (search) filter.summary = { $regex: escapeRegex(String(search).trim()), $options: "i" };
 
-    const tickets = await SupportTicket.find(filter)
-      .populate("organisationId", "name slug")
-      .sort({ createdAt: -1 })
-      .limit(Math.min(Number(limit) || 200, 1000));
-    res.json({ tickets });
+    const [tickets, total, statsAgg] = await Promise.all([
+      // `comments` is an embedded array that can run to dozens of messages per
+      // ticket and dominated the payload — the list only ever renders its
+      // LENGTH, so send that instead of the whole thread.
+      SupportTicket.aggregate([
+        { $match: filter },
+        { $sort: { createdAt: -1 } },
+        { $limit: limit },
+        { $addFields: { commentCount: { $size: { $ifNull: ["$comments", []] } } } },
+        { $project: { comments: 0 } },
+        {
+          $lookup: {
+            from: "organisations",
+            localField: "organisationId",
+            foreignField: "_id",
+            as: "_org",
+            pipeline: [{ $project: { name: 1, slug: 1 } }],
+          },
+        },
+        { $addFields: { organisationId: { $arrayElemAt: ["$_org", 0] } } },
+        { $project: { _org: 0 } },
+      ]),
+      SupportTicket.countDocuments(filter),
+      // Headline figures come from the WHOLE collection, not the capped page of
+      // rows above — otherwise every tile silently under-reports once the
+      // platform passes the row limit.
+      SupportTicket.aggregate([
+        {
+          $facet: {
+            byStatus: [{ $group: { _id: "$status", count: { $sum: 1 } } }],
+            total: [{ $count: "n" }],
+            unassigned: [
+              { $match: { status: { $in: ["new", "in_progress", "on_hold"] }, "assignee.userId": { $in: [null, undefined] } } },
+              { $count: "n" },
+            ],
+            untriaged: [
+              { $match: { $or: [{ triage: { $in: [null, "unclassified"] } }, { triage: { $exists: false } }] } },
+              { $count: "n" },
+            ],
+            csat: [
+              { $match: { satisfactionRating: { $gt: 0 } } },
+              { $group: { _id: null, avg: { $avg: "$satisfactionRating" }, count: { $sum: 1 } } },
+            ],
+          },
+        },
+      ]),
+    ]);
+
+    const f = statsAgg[0] || {};
+    const byStatus = {};
+    (f.byStatus || []).forEach((r) => { byStatus[r._id] = r.count; });
+    const grandTotal = f.total?.[0]?.n || 0;
+
+    res.json({
+      tickets,
+      // `total` counts everything matching the FILTER; `stats` is platform-wide
+      // so the tiles and status pills stay honest whatever is being viewed.
+      total,
+      truncated: total > tickets.length,
+      stats: {
+        total: grandTotal,
+        byStatus,
+        open: (byStatus.new || 0) + (byStatus.in_progress || 0) + (byStatus.on_hold || 0),
+        unassigned: f.unassigned?.[0]?.n || 0,
+        untriaged: f.untriaged?.[0]?.n || 0,
+        csat: f.csat?.[0]?.avg || 0,
+        csatCount: f.csat?.[0]?.count || 0,
+      },
+    });
   } catch (err) {
     console.error("List all tickets error:", err);
     res.status(500).json({ error: "Failed to fetch tickets" });
@@ -554,17 +629,34 @@ exports.listAllTickets = async (req, res) => {
 
 exports.board = async (req, res) => {
   try {
+    // Cards show a comment COUNT, never the thread — keep the array off the wire.
     const tickets = await SupportTicket.find({ triage: { $in: ["bug", "feature"] } })
       .populate("organisationId", "name slug")
       .populate("assignee.userId", "name email profileImage")
       .sort({ updatedAt: -1 })
-      .limit(1000);
+      .limit(1000)
+      .lean()
+      .then((rows) =>
+        rows.map(({ comments, ...t }) => ({ ...t, commentCount: comments?.length || 0 })),
+      );
     const empty = () => ({ todo: [], in_progress: [], done: [] });
     const board = { bug: empty(), feature: empty() };
+    // A ticket whose kanbanStatus isn't one of the three lanes used to be
+    // dropped here — present in the list, invisible on the board, and with no
+    // way to drag it back. Writes are now enum-checked, but any row that
+    // predates that lands in "todo" rather than disappearing.
+    let recovered = 0;
     tickets.forEach((t) => {
       const lane = board[t.triage];
-      if (lane && lane[t.kanbanStatus]) lane[t.kanbanStatus].push(t);
+      if (!lane) return; // triage category genuinely not on this board
+      if (lane[t.kanbanStatus]) {
+        lane[t.kanbanStatus].push(t);
+      } else {
+        recovered++;
+        lane.todo.push({ ...t, kanbanStatus: "todo", laneRecovered: true });
+      }
     });
+    if (recovered) console.warn(`Kanban board: ${recovered} ticket(s) had an unknown lane and were shown in "todo"`);
     res.json({ board });
   } catch (err) {
     console.error("Board error:", err);
@@ -592,12 +684,31 @@ exports.getOne = async (req, res) => {
 exports.triage = async (req, res) => {
   try {
     const { triage, kanbanStatus, triageNotes } = req.body;
+    // findByIdAndUpdate does NOT run schema validators by default, so an
+    // off-enum lane was written straight through — and the board groups by
+    // exactly these three keys, so the ticket disappeared from the kanban
+    // screen entirely with no way to get it back from the UI.
     const update = { triagedBy: req.user._id, triagedAt: new Date() };
-    if (triage !== undefined) update.triage = triage;
-    if (kanbanStatus !== undefined) update.kanbanStatus = kanbanStatus;
-    if (triageNotes !== undefined) update.triageNotes = triageNotes;
-    const ticket = await SupportTicket.findByIdAndUpdate(req.params.id, { $set: update }, { new: true })
-      .populate("organisationId", "name slug");
+    if (triage !== undefined) {
+      const v = operatorInput.oneOf(triage, "Triage category", TRIAGE_VALUES);
+      if (v.error) return res.status(400).json({ error: v.error });
+      update.triage = v.value;
+    }
+    if (kanbanStatus !== undefined) {
+      const v = operatorInput.oneOf(kanbanStatus, "Board column", KANBAN_VALUES);
+      if (v.error) return res.status(400).json({ error: v.error });
+      update.kanbanStatus = v.value;
+    }
+    if (triageNotes !== undefined) {
+      const v = operatorInput.text(triageNotes, "Triage notes", { max: 5000 });
+      if (v.error) return res.status(400).json({ error: v.error });
+      update.triageNotes = v.value;
+    }
+    const ticket = await SupportTicket.findByIdAndUpdate(
+      req.params.id,
+      { $set: update },
+      { new: true, runValidators: true }
+    ).populate("organisationId", "name slug");
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
     emitToSuperAdmins("ticket:update", { id: ticket._id, organisationId: ticket.organisationId?._id });
     res.json({ ticket });

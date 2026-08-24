@@ -21,9 +21,11 @@ const stripePrices = require("../config/stripePrices");
 const stripePlanService = require("../services/stripePlanService");
 const { FLAG_KEYS } = require("../config/featureCatalog");
 
-const stripe = process.env.STRIPE_SECRET_KEY
-  ? require("stripe")(process.env.STRIPE_SECRET_KEY)
-  : null;
+// Resolves the key saved in the SuperAdmin console first, then
+// STRIPE_SECRET_KEY — otherwise a console-only setup would silently seed plans
+// with no Stripe products. prime() below loads it once the DB is connected.
+const platformStripe = require("../services/platformStripe");
+const stripe = platformStripe.stripe;
 
 const DEFS = [
   { code: "basic", name: "Basic", color: "#06b6d4", sortOrder: 1, description: "For small charities getting started." },
@@ -94,7 +96,7 @@ async function run() {
 
     const hasEnvIds = !!(plan.stripePriceIds.monthly || plan.stripePriceIds.annual);
 
-    if (hasEnvIds && stripe) {
+    if (hasEnvIds && platformStripe.isStripeConfigured()) {
       // Resolve the parent product from an existing price so future reprices
       // attach to the same Stripe Product.
       try {
@@ -125,6 +127,7 @@ async function run() {
 (async () => {
   try {
     await connectDB();
+    await platformStripe.prime(); // pick up console-configured credentials
     await run();
   } catch (err) {
     console.error("Seed plans failed:", err);

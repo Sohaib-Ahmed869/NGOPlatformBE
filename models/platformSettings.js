@@ -48,6 +48,44 @@ const platformSettingsSchema = new mongoose.Schema(
       ],
     },
 
+    // The PLATFORM's own Stripe account — bills tenants for their SaaS
+    // subscription and is the donation fallback for tenants without their own
+    // keys. Mirrors Organisation.payment: secrets are AES-256-GCM encrypted
+    // (utils/crypto.js) and are stripped by the toJSON transform below, so they
+    // can never reach a client. Falls back to STRIPE_SECRET_KEY when not
+    // enabled — see services/platformStripe.js.
+    stripe: {
+      enabled: { type: Boolean, default: false },
+      mode: { type: String, enum: ["test", "live"], default: "test" },
+      publishableKey: { type: String, default: "" },
+      secretKeyEnc: { type: String, default: "" },
+      // Display-only hint ("sk_live_••••••••4242") computed once at save time.
+      // Storing it means the read path never has to decrypt the key just to
+      // render a mask — plaintext only ever materializes on write and verify.
+      secretKeyMask: { type: String, default: "" },
+      webhookSecretEnc: { type: String, default: "" },
+      // Stripe's id for the SaaS billing webhook endpoint, when it was created
+      // from the console rather than by hand in the Stripe dashboard. Stored so
+      // the console can tell "an endpoint exists" from "you still have to make
+      // one", and so recreating it can delete the old one instead of leaving a
+      // second endpoint delivering to the same URL.
+      webhookEndpointId: { type: String, default: "" },
+      accountLabel: { type: String, default: "" },
+      accountId: { type: String, default: "" },
+      lastVerifiedAt: { type: Date },
+
+      // May a tenant WITHOUT their own Stripe keys take donations through this
+      // platform account? The two Stripe setups are otherwise entirely separate
+      // — this flag is their single, deliberate point of contact, and the only
+      // reason a tenant page is ever handed the platform publishable key.
+      //
+      // Defaults to true because that is the long-standing behaviour of
+      // services/tenantStripe.js; turning it off makes tenant donations require
+      // the tenant's own account, and unconfigured tenants are told so plainly
+      // instead of quietly billing into the operator's account.
+      allowTenantFallback: { type: Boolean, default: true },
+    },
+
     contactEmail: { type: String, default: "support@ngoplatform.com" },
     contactPhone: { type: String, default: "" },
     address: { type: String, default: "Sydney, NSW, Australia" },
@@ -60,6 +98,21 @@ const platformSettingsSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// Belt-and-braces: strip the encrypted secrets from every serialization.
+// GET /api/platform/settings returns the whole document, so without this any
+// field added under `stripe` would be shipped to the browser by default. Server
+// code reads doc.stripe.secretKeyEnc off the Mongoose document directly, which
+// this doesn't touch.
+function scrubSecrets(_doc, ret) {
+  if (ret.stripe) {
+    delete ret.stripe.secretKeyEnc;
+    delete ret.stripe.webhookSecretEnc;
+  }
+  return ret;
+}
+platformSettingsSchema.set("toJSON", { transform: scrubSecrets });
+platformSettingsSchema.set("toObject", { transform: scrubSecrets });
 
 // Fetch (or lazily create) the one settings document.
 platformSettingsSchema.statics.getSingleton = async function () {
