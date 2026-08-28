@@ -4,14 +4,40 @@ const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 const User = require("../models/user");
 const writeAudit = require("../utils/writeAudit");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const input = require("../utils/operatorInput");
-const { ALL_ROLES, ROLE_LABELS, ROLE_DESCRIPTIONS } = require("../config/platformRoles");
+const {
+  ALL_ROLES,
+  ROLE_CAPABILITIES,
+  ROLE_LABELS,
+  ROLE_DESCRIPTIONS,
+  MFA_POLICIES,
+  mfaPolicyOf,
+  mfaRequiredFor,
+} = require("../config/platformRoles");
 
 const INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days, matches leadConversion's manualProvision
 
 const PUBLIC_FIELDS =
-  "name email platformRole platformStatus twoFactorEnabled lastLogin invitedAt invitedBy createdAt";
+  "name email platformRole platformStatus twoFactorEnabled mfaPolicy mfaExempt lastLogin invitedAt invitedBy createdAt";
+
+// Serialise one operator for the Team screen. PROJECTS explicitly rather than
+// spreading the document: list() reads through `.select(PUBLIC_FIELDS)`, but the
+// mutation handlers hold a FULL document, and spreading that would have put the
+// password hash, 2FA secret and invite token on the wire. `mfaExempt` is a
+// legacy input to mfaPolicyOf, not part of the contract.
+const PUBLIC_KEYS = PUBLIC_FIELDS.split(" ").filter((k) => k && k !== "mfaExempt");
+function withMfa(user) {
+  const src = user.toObject ? user.toObject() : user;
+  const out = { _id: user._id };
+  for (const key of PUBLIC_KEYS) if (src[key] !== undefined) out[key] = src[key];
+  // Both halves of the MFA picture: the policy that was chosen, and whether it
+  // adds up to "required" once the role default is folded in — so no caller has
+  // to re-implement the precedence rules.
+  out.mfaPolicy = mfaPolicyOf(user);
+  out.mfaRequired = mfaRequiredFor(user);
+  return out;
+}
 
 function clientBase(req) {
   return process.env.CLIENT_URL || `${req.protocol}://${req.get("host")}`;
@@ -48,7 +74,10 @@ function ownerGuardError(req, roleInvolved) {
 exports.list = async (req, res) => {
   try {
     const users = await User.find({ role: "superadmin" }).select(PUBLIC_FIELDS).sort({ createdAt: 1 });
-    res.json({ users, roles: ALL_ROLES.map((key) => ({ key, label: ROLE_LABELS[key], description: ROLE_DESCRIPTIONS[key] })) });
+    res.json({
+      users: users.map(withMfa),
+      roles: ALL_ROLES.map((key) => ({ key, label: ROLE_LABELS[key], description: ROLE_DESCRIPTIONS[key] })),
+    });
   } catch (err) {
     console.error("List platform users error:", err);
     res.status(500).json({ error: "Failed to fetch team" });
@@ -90,15 +119,19 @@ exports.invite = async (req, res) => {
     });
 
     const link = adminLink(req, `/accept-invite/${rawToken}`);
-    const html = `
-      <h2>You've been invited to the platform team</h2>
-      <p>${req.user.name || req.user.email} invited you as <strong>${ROLE_LABELS[v.values.platformRole]}</strong>.</p>
-      <div style="text-align:center;margin:24px 0;">
-        <a href="${link}" style="background:#047857;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:600;">Set up your account</a>
-      </div>
-      <p>This link expires in 7 days.</p>
-    `;
-    await sendEmail(email, html, "You're invited to the platform team");
+    await sendTemplateEmail("operator.invite", {
+      to: email,
+      data: {
+        recipient: { name: v.values.name || "", email },
+        invite: {
+          url: link,
+          role: ROLE_LABELS[v.values.platformRole],
+          expiresIn: "7 days",
+        },
+        invitedBy: req.user.name || req.user.email,
+      },
+      meta: { userId: String(user._id), platformRole: v.values.platformRole },
+    });
 
     await writeAudit(req, "sa_user.invited", {
       targetType: "user",
@@ -106,7 +139,9 @@ exports.invite = async (req, res) => {
       meta: { email, platformRole: v.values.platformRole },
     });
 
-    res.status(201).json({ user: { _id: user._id, name: user.name, email: user.email, platformRole: user.platformRole, platformStatus: user.platformStatus } });
+    // Same shape as a row from list() — including the MFA fields — so the new
+    // row the screen appends is complete (and safe to write to the cache).
+    res.status(201).json({ user: withMfa(user) });
   } catch (err) {
     console.error("Invite platform user error:", err);
     res.status(500).json({ error: "Failed to send invite" });
@@ -129,20 +164,95 @@ exports.resendInvite = async (req, res) => {
     await user.save();
 
     const link = adminLink(req, `/accept-invite/${rawToken}`);
-    const html = `
-      <h2>Your platform team invite</h2>
-      <div style="text-align:center;margin:24px 0;">
-        <a href="${link}" style="background:#047857;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:600;">Set up your account</a>
-      </div>
-      <p>This link expires in 7 days.</p>
-    `;
-    await sendEmail(user.email, html, "Your platform team invite");
+    await sendTemplateEmail("operator.inviteResend", {
+      to: user.email,
+      data: {
+        recipient: { name: user.name || "", email: user.email },
+        invite: {
+          url: link,
+          role: ROLE_LABELS[user.platformRole] || "",
+          expiresIn: "7 days",
+        },
+      },
+      meta: { userId: String(user._id) },
+    });
 
     await writeAudit(req, "sa_user.invite_resent", { targetType: "user", targetId: String(user._id), meta: { email: user.email } });
     res.json({ message: "Invite resent" });
   } catch (err) {
     console.error("Resend invite error:", err);
     res.status(500).json({ error: "Failed to resend invite" });
+  }
+};
+
+/**
+ * PATCH /api/superadmin/users/:id/invite — { name, email }
+ *
+ * Fix a typo in a PENDING invite. Only while the account is still `invited`:
+ * once someone has accepted, the email is their identity (and their login), so
+ * it isn't ours to rewrite from this screen.
+ *
+ * Saving ALWAYS rotates the invite token, so the link already sitting in
+ * someone's inbox dies the moment this returns — otherwise correcting a
+ * mistyped address would leave a working invite pointing at the wrong mailbox.
+ * A fresh link is emailed to whatever the address now is.
+ */
+exports.updateInvite = async (req, res) => {
+  try {
+    const b = req.body || {};
+    const v = input.collect({
+      name: input.text(b.name, "Name", { required: true, max: 120 }),
+      email: input.text(b.email, "Email", { required: true, max: 200 }),
+    });
+    if (v.error) return res.status(400).json({ error: v.error });
+
+    const user = await User.findOne({ _id: req.params.id, role: "superadmin" });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const guardErr = ownerGuardError(req, user.platformRole);
+    if (guardErr) return res.status(403).json({ error: guardErr });
+
+    if (user.platformStatus !== "invited") {
+      return res.status(400).json({ error: "Only a pending invite can be edited — this account has already been activated" });
+    }
+
+    const email = v.values.email.toLowerCase();
+    if (email !== user.email) {
+      const clash = await User.findOne({ email, _id: { $ne: user._id } });
+      if (clash) return res.status(409).json({ error: "A user with that email already exists" });
+    }
+
+    const from = { name: user.name, email: user.email };
+    const rawToken = crypto.randomBytes(32).toString("hex");
+
+    user.name = v.values.name;
+    user.email = email;
+    // Rotating the hash is what kills the old link — the previous token can no
+    // longer be found, so /accept-invite/:token 400s for it from here on.
+    user.resetPasswordToken = crypto.createHash("sha256").update(rawToken).digest("hex");
+    user.resetPasswordExpires = Date.now() + INVITE_EXPIRY_MS;
+    await user.save();
+
+    const link = adminLink(req, `/accept-invite/${rawToken}`);
+    await sendTemplateEmail("operator.inviteResend", {
+      to: user.email,
+      data: {
+        recipient: { name: user.name || "", email: user.email },
+        invite: { url: link, role: ROLE_LABELS[user.platformRole] || "", expiresIn: "7 days" },
+      },
+      meta: { userId: String(user._id) },
+    });
+
+    await writeAudit(req, "sa_user.invite_updated", {
+      targetType: "user",
+      targetId: String(user._id),
+      meta: { from, to: { name: user.name, email: user.email }, linkRotated: true },
+    });
+
+    res.json({ user: withMfa(user) });
+  } catch (err) {
+    console.error("Update invite error:", err);
+    res.status(500).json({ error: "Failed to update the invite" });
   }
 };
 
@@ -177,10 +287,59 @@ exports.changeRole = async (req, res) => {
       meta: { email: user.email, from, to: v.value },
     });
 
-    res.json({ user: { _id: user._id, platformRole: user.platformRole } });
+    // Return the MFA fields too: a role change can flip whether MFA is required
+    // for anyone on the "default" policy, and the Team screen shows that.
+    res.json({ user: withMfa(user) });
   } catch (err) {
     console.error("Change role error:", err);
     res.status(500).json({ error: "Failed to change role" });
+  }
+};
+
+/**
+ * PATCH /api/superadmin/users/:id/mfa-policy — { policy: "default"|"required"|"exempt" }
+ *
+ * Whether MFA is mandatory for THIS operator, overriding the role default.
+ * Enforcement happens at sign-in (userController.login returns
+ * `mfaSetupRequired`), so a change lands on their next session — use "Sign out
+ * everywhere" alongside it if it needs to bite immediately.
+ */
+exports.setMfaPolicy = async (req, res) => {
+  try {
+    const v = input.oneOf(req.body?.policy, "MFA policy", MFA_POLICIES);
+    if (v.error) return res.status(400).json({ error: v.error });
+
+    // Same rule as role/status: nobody edits their own security settings from
+    // this screen — otherwise an Owner can quietly exempt themselves.
+    if (String(req.params.id) === String(req.user._id)) {
+      return res.status(400).json({ error: "You can't change your own MFA requirement" });
+    }
+
+    const user = await User.findOne({ _id: req.params.id, role: "superadmin" });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const guardErr = ownerGuardError(req, user.platformRole);
+    if (guardErr) return res.status(403).json({ error: guardErr });
+
+    const from = mfaPolicyOf(user);
+    if (from === v.value) return res.json({ user: withMfa(user) });
+
+    user.mfaPolicy = v.value;
+    // Retire the legacy flag as soon as the policy is set explicitly, so the
+    // two can't drift apart.
+    user.mfaExempt = v.value === "exempt";
+    await user.save();
+
+    await writeAudit(req, "sa_user.mfa_policy_changed", {
+      targetType: "user",
+      targetId: String(user._id),
+      meta: { email: user.email, from, to: v.value, enrolled: !!user.twoFactorEnabled },
+    });
+
+    res.json({ user: withMfa(user) });
+  } catch (err) {
+    console.error("Change MFA policy error:", err);
+    res.status(500).json({ error: "Failed to update the MFA requirement" });
   }
 };
 
@@ -253,9 +412,23 @@ exports.getInvite = async (req, res) => {
       resetPasswordExpires: { $gt: Date.now() },
       role: "superadmin",
       platformStatus: "invited",
-    }).select("name email platformRole");
+    })
+      .select("name email platformRole invitedBy mfaPolicy mfaExempt")
+      .populate("invitedBy", "name email");
     if (!user) return res.status(400).json({ error: "This invite link is invalid or has expired" });
-    res.json({ name: user.name, email: user.email, platformRole: user.platformRole, roleLabel: ROLE_LABELS[user.platformRole] });
+    res.json({
+      name: user.name,
+      email: user.email,
+      platformRole: user.platformRole,
+      roleLabel: ROLE_LABELS[user.platformRole],
+      roleDescription: ROLE_DESCRIPTIONS[user.platformRole] || "",
+      // The nav sections this person will actually be able to open. Shown on
+      // the invite page so "you've been made a Billing Operator" means
+      // something to someone who has never seen the console.
+      capabilities: ROLE_CAPABILITIES[user.platformRole] || [],
+      invitedByName: user.invitedBy?.name || user.invitedBy?.email || "",
+      mfaRequired: mfaRequiredFor(user),
+    });
   } catch (err) {
     console.error("Get invite error:", err);
     res.status(500).json({ error: "Failed to load invite" });
@@ -289,5 +462,191 @@ exports.acceptInvite = async (req, res) => {
   } catch (err) {
     console.error("Accept invite error:", err);
     res.status(500).json({ error: "Failed to activate account" });
+  }
+};
+
+// ── Public forgot-password flow (no auth — a locked-out operator by
+// definition can't authenticate) ────────────────────────────────────────────
+// email -> 6-digit code -> verify -> short-lived ticket -> set new password.
+// Every response at the request step is IDENTICAL whether or not the email
+// belongs to a real operator account, so this can't be used to enumerate who
+// has platform access. The verify/reset steps are inherently scoped to a flow
+// the caller already started (they typed this email on the previous screen),
+// so those give specific feedback the same way any OTP flow does.
+
+const RESET_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes to use a code
+const RESET_TICKET_TTL_MS = 10 * 60 * 1000; // 10 minutes to finish the reset after verifying
+const RESET_CODE_MAX_ATTEMPTS = 5; // wrong guesses before a code is burned
+const RESET_RESEND_COOLDOWN_MS = 45 * 1000; // between sends to the SAME account
+const RESET_MAX_SENDS_PER_HOUR = 5; // sends to the SAME account
+
+// A light in-memory IP throttle on top of the per-account limits above —
+// blunts a script hammering this endpoint with random addresses to fish for
+// valid operator emails. Not a substitute for the per-account limits (it
+// resets on deploy and isn't shared across instances if this ever runs on
+// more than one), just a free extra layer.
+const ipHits = new Map(); // ip -> { count, windowStart }
+const IP_WINDOW_MS = 10 * 60 * 1000;
+const IP_MAX_PER_WINDOW = 20;
+function ipRateLimited(req) {
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || req.socket?.remoteAddress || "unknown";
+  const now = Date.now();
+  const hit = ipHits.get(ip);
+  if (!hit || now - hit.windowStart > IP_WINDOW_MS) {
+    ipHits.set(ip, { count: 1, windowStart: now });
+    return false;
+  }
+  hit.count += 1;
+  return hit.count > IP_MAX_PER_WINDOW;
+}
+
+const SENT_MESSAGE = "If that email belongs to a platform operator account, we've sent a verification code.";
+const CODE_ERROR = "That code is invalid or has expired.";
+const SESSION_EXPIRED = "This reset session has expired. Start again.";
+
+// Constant-time compare of two hex digests — never == / === a secret hash,
+// same reasoning as the bootstrap-secret check in superAdminController.js.
+function hashesMatch(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+
+/** POST /api/superadmin/auth/forgot-password — { email } */
+exports.forgotPassword = async (req, res) => {
+  try {
+    // Rate-limited or malformed input still gets the generic reply — an
+    // attacker learns nothing new from a different response either way.
+    if (ipRateLimited(req)) return res.json({ message: SENT_MESSAGE });
+
+    const v = input.text(req.body?.email, "Email", { required: true, max: 250 });
+    if (v.error || !/\S+@\S+\.\S+/.test(v.value)) return res.json({ message: SENT_MESSAGE });
+    const email = v.value.toLowerCase();
+
+    const user = await User.findOne({ email, role: "superadmin", platformStatus: "active" });
+    if (user) {
+      const now = Date.now();
+      const pr = user.passwordReset || {};
+      const sentRecently = pr.lastSentAt && now - new Date(pr.lastSentAt).getTime() < RESET_RESEND_COOLDOWN_MS;
+      const windowFresh = pr.windowStartedAt && now - new Date(pr.windowStartedAt).getTime() < 60 * 60 * 1000;
+      const sendCount = windowFresh ? pr.sendCount || 0 : 0;
+
+      if (!sentRecently && sendCount < RESET_MAX_SENDS_PER_HOUR) {
+        const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+
+        user.passwordReset = {
+          codeHash: sha256(code),
+          codeExpiresAt: new Date(now + RESET_CODE_TTL_MS),
+          attempts: 0,
+          lastSentAt: new Date(now),
+          sendCount: sendCount + 1,
+          windowStartedAt: windowFresh ? pr.windowStartedAt : new Date(now),
+          ticketHash: null,
+          ticketExpiresAt: null,
+        };
+        await user.save();
+
+        await sendTemplateEmail("operator.passwordResetCode", {
+          to: email,
+          data: {
+            recipient: { name: user.name || "", email },
+            reset: { code, expiresIn: "10 minutes" },
+          },
+          meta: { userId: String(user._id) },
+        });
+        await writeAudit(req, "sa_user.password_reset_requested", { targetType: "user", targetId: String(user._id), meta: { email } });
+      }
+    }
+
+    res.json({ message: SENT_MESSAGE });
+  } catch (err) {
+    console.error("Forgot password error:", err);
+    res.status(500).json({ error: "Something went wrong. Please try again." });
+  }
+};
+
+/** POST /api/superadmin/auth/forgot-password/verify — { email, code } */
+exports.verifyResetCode = async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const code = String(req.body?.code || "").trim();
+    if (!email || !/^\d{6}$/.test(code)) return res.status(400).json({ error: CODE_ERROR });
+
+    const user = await User.findOne({ email, role: "superadmin", platformStatus: "active" });
+    const pr = user?.passwordReset;
+    const validWindow = pr?.codeHash && pr.codeExpiresAt && new Date(pr.codeExpiresAt).getTime() > Date.now();
+    if (!user || !validWindow) return res.status(400).json({ error: CODE_ERROR });
+
+    if ((pr.attempts || 0) >= RESET_CODE_MAX_ATTEMPTS) {
+      user.passwordReset.codeHash = null; // burned — a fresh request is required
+      user.markModified("passwordReset");
+      await user.save();
+      return res.status(400).json({ error: "Too many attempts. Request a new code." });
+    }
+
+    if (!hashesMatch(sha256(code), pr.codeHash)) {
+      user.passwordReset.attempts = (pr.attempts || 0) + 1;
+      user.markModified("passwordReset");
+      await user.save();
+      const attemptsRemaining = Math.max(RESET_CODE_MAX_ATTEMPTS - user.passwordReset.attempts, 0);
+      return res.status(400).json({ error: CODE_ERROR, attemptsRemaining });
+    }
+
+    // Correct — burn the code (single-use) and hand back a short-lived
+    // ticket scoped only to the final "set new password" call, so the
+    // frontend never has to resubmit the code itself.
+    const rawTicket = crypto.randomBytes(32).toString("hex");
+    user.passwordReset = {
+      codeHash: null,
+      codeExpiresAt: null,
+      attempts: 0,
+      lastSentAt: pr.lastSentAt,
+      sendCount: pr.sendCount,
+      windowStartedAt: pr.windowStartedAt,
+      ticketHash: sha256(rawTicket),
+      ticketExpiresAt: new Date(Date.now() + RESET_TICKET_TTL_MS),
+    };
+    await user.save();
+
+    await writeAudit(req, "sa_user.password_reset_code_verified", { targetType: "user", targetId: String(user._id), meta: { email } });
+    res.json({ ticket: rawTicket });
+  } catch (err) {
+    console.error("Verify reset code error:", err);
+    res.status(500).json({ error: "Something went wrong. Please try again." });
+  }
+};
+
+/** POST /api/superadmin/auth/forgot-password/reset — { email, ticket, password } */
+exports.resetPasswordWithCode = async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const ticket = String(req.body?.ticket || "").trim();
+    const v = input.text(req.body?.password, "Password", { required: true, max: 200 });
+    if (v.error) return res.status(400).json({ error: v.error });
+    if (v.value.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+    if (!email || !ticket) return res.status(400).json({ error: SESSION_EXPIRED });
+
+    const user = await User.findOne({ email, role: "superadmin", platformStatus: "active" });
+    const pr = user?.passwordReset;
+    const validTicket = pr?.ticketHash && pr.ticketExpiresAt && new Date(pr.ticketExpiresAt).getTime() > Date.now();
+    if (!user || !validTicket || !hashesMatch(sha256(ticket), pr.ticketHash)) {
+      return res.status(400).json({ error: SESSION_EXPIRED });
+    }
+
+    user.password = await bcrypt.hash(v.value, 10);
+    user.passwordReset = undefined;
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = null;
+    user.passwordLastChanged = new Date();
+    user.tokenVersion = (user.tokenVersion || 0) + 1; // kills every already-issued session
+    await user.save();
+
+    await writeAudit(req, "sa_user.password_reset_completed", { targetType: "user", targetId: String(user._id), meta: { email } });
+    res.json({ message: "Password updated — you can now sign in" });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    res.status(500).json({ error: "Something went wrong. Please try again." });
   }
 };

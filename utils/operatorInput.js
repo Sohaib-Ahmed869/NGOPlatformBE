@@ -56,6 +56,44 @@ function paging(query = {}, { defaultLimit = 20, maxLimit = 100 } = {}) {
   return { page, limit, skip: (page - 1) * limit };
 }
 
+/**
+ * A Mongo sort spec built from a column the client asked for.
+ *
+ * The client sends a COLUMN NAME, never a field path — `?sort=name&dir=asc`.
+ * The caller supplies the map from column names to the paths they mean, and
+ * anything not in that map falls back to the default. That whitelist is the
+ * whole point: passing `req.query.sort` into `.sort()` would let a caller sort
+ * by any field in the document, including ones with no index (a collection
+ * scan on demand) and ones the projection deliberately withholds — sorting by
+ * a hidden field leaks its ordering even when the value never ships.
+ *
+ * A column may map to several paths, so "contact" can mean
+ * `["contactName", "contactEmail"]` and sort sensibly when the first is blank.
+ *
+ * `tiebreak` is not decoration. Skip/limit paging over a non-unique sort key
+ * is unstable: two rows with the same `status` have no defined order, so the
+ * same document can appear on page 1 and again on page 2 while another is
+ * never shown at all. Appending a unique field makes the total order
+ * deterministic, which is what makes paging trustworthy.
+ *
+ * @param query    req.query
+ * @param allowed  { columnName: "path" | ["path", …] }
+ * @returns {{ sort: object, key: string, dir: "asc"|"desc" }}
+ */
+function sorting(query = {}, allowed = {}, { defaultKey, defaultDir = "desc", tiebreak = "_id" } = {}) {
+  const asked = filterValue(query.sort);
+  const key = Object.prototype.hasOwnProperty.call(allowed, asked) ? asked : defaultKey;
+
+  const askedDir = filterValue(query.dir);
+  const dir = askedDir === "asc" ? 1 : askedDir === "desc" ? -1 : defaultDir === "asc" ? 1 : -1;
+
+  const sort = {};
+  for (const path of [].concat(allowed[key] || [])) sort[path] = dir;
+  if (tiebreak && !(tiebreak in sort)) sort[tiebreak] = -1;
+
+  return { sort, key: key || null, dir: dir === 1 ? "asc" : "desc" };
+}
+
 /** True for a string Mongo can cast to an ObjectId. */
 const isObjectId = (v) => typeof v === "string" && mongoose.Types.ObjectId.isValid(v) && String(new mongoose.Types.ObjectId(v)) === v;
 
@@ -206,6 +244,7 @@ module.exports = {
   escapeRegex,
   searchRegex,
   paging,
+  sorting,
   isObjectId,
   objectId,
   number,

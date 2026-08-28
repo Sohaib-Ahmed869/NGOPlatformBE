@@ -3,7 +3,8 @@ const Event = require("../models/event");
 const EventRegistration = require("../models/eventRegistration");
 const { validateAnswers } = require("../utils/eventQuestions");
 const { getTenantStripe } = require("../services/tenantStripe");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
+const { publicSiteUrl } = require("../utils/tenantUrls");
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
@@ -29,41 +30,34 @@ function decorate(event) {
   return { ...event, ...registrationState(event) };
 }
 
-// Tenant-branded "you're registered" email (best-effort; never throws).
+// "You're registered" — content and layout live in config/emailCatalog.js
+// ("event.registrationConfirmed") and are editable in the console. This function
+// only shapes the data. Best-effort; never throws.
 function sendRegistrationConfirmation(org, registration, event) {
   try {
     if (!registration?.email || !event) return;
-    const when = new Date(event.date).toLocaleDateString("en-AU", {
-      weekday: "long", day: "numeric", month: "long", year: "numeric",
-    });
-    const time = [event.startTime, event.endTime].filter(Boolean).join(" – ");
-    const venue = [event.location?.venue, event.location?.city].filter(Boolean).join(", ");
-    const guestsLine =
-      registration.numberOfGuests > 0
-        ? `<p style="margin:4px 0"><strong>Guests:</strong> ${registration.numberOfGuests}</p>`
-        : "";
-    const paidLine =
-      registration.paymentStatus === "paid"
-        ? `<p style="margin:4px 0"><strong>Amount paid:</strong> $${Number(registration.amountPaid).toFixed(2)} ${registration.currency || "AUD"}</p>`
-        : "";
-    const html = `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#222">
-        <h2 style="color:#2C2418">You're registered 🎉</h2>
-        <p>Hi ${registration.name || "there"}, your spot for <strong>${event.title}</strong> is confirmed.</p>
-        <div style="background:#f9f9f9;padding:15px;border-radius:6px;margin:16px 0">
-          <p style="margin:4px 0"><strong>When:</strong> ${when}${time ? ` · ${time}` : ""}</p>
-          ${venue ? `<p style="margin:4px 0"><strong>Where:</strong> ${venue}</p>` : ""}
-          ${guestsLine}
-          ${paidLine}
-        </div>
-        <p>We look forward to seeing you there.</p>
-        <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
-        <p style="font-size:12px;color:#888">Sent by ${org?.name || "the organisers"}.</p>
-      </div>`;
-    return sendEmail(registration.email, html, `You're registered — ${event.title}`, [], {
+    return sendTemplateEmail("event.registrationConfirmed", {
+      to: registration.email,
       org,
-      fromName: org?.name,
       replyTo: org?.contactEmail || undefined,
+      data: {
+        recipient: { name: registration.name || "", email: registration.email },
+        event: {
+          title: event.title || "",
+          date: event.date,
+          time: [event.startTime, event.endTime].filter(Boolean).join(" – "),
+          venue: [event.location?.venue, event.location?.city].filter(Boolean).join(", "),
+          url: event.slug ? publicSiteUrl(org, `/events/${event.slug}`) : publicSiteUrl(org, "/events"),
+        },
+        registration: {
+          guests: registration.numberOfGuests || 0,
+          isPaid: registration.paymentStatus === "paid",
+          amountPaid: registration.amountPaid || 0,
+          currency: registration.currency || "AUD",
+          reference: registration.reference || registration.confirmationCode || "",
+        },
+      },
+      meta: { eventId: String(event._id || ""), registrationId: String(registration._id || "") },
     });
   } catch (e) {
     console.error("sendRegistrationConfirmation error:", e.message);

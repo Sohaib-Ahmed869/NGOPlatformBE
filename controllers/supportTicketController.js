@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const SupportTicket = require("../models/supportTicket");
 const Organisation = require("../models/organisation");
 const { emitToOrg, emitToSuperAdmins } = require("../services/socket");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const operatorInput = require("../utils/operatorInput");
 
 const PUBLIC_FIELDS = "-triage -kanbanStatus -triagedBy -triagedAt -triageNotes";
@@ -41,10 +41,6 @@ function reporterKind(user) {
   return ["admin", "superadmin"].includes(user.role) ? "admin" : "customer";
 }
 
-// Minimal HTML escaping for user-supplied text dropped into an email body.
-function escapeHtml(s) {
-  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
 
 // The tenant's own front-end origin (where the public feedback page lives). The
 // admin resolving the ticket is on that origin, so its Origin header is the
@@ -55,22 +51,17 @@ function tenantBaseUrl(req) {
 
 // Email the reporter a one-time "How did we do?" CSAT link, sent through the
 // tenant's own email identity. Fire-and-forget — never blocks the response.
+// Wording lives in config/emailCatalog.js ("support.satisfactionSurvey").
 async function sendCsatEmail(ticket, link) {
-  const name = ticket.reporter?.name || "there";
-  const safeSummary = escapeHtml(ticket.summary);
-  const html = `
-    <p>Hi ${escapeHtml(name)},</p>
-    <p>Your support request <strong>#${ticket.ticketNumber}</strong> — “${safeSummary}” — has been resolved.</p>
-    <p>We'd love to know how we did. It only takes a few seconds:</p>
-    <p style="margin:24px 0">
-      <a href="${link}" style="background:#10b981;color:#ffffff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">Rate your support experience</a>
-    </p>
-    <p style="color:#888;font-size:12px">Or paste this link into your browser:<br>${link}</p>
-  `;
-  const text = `Hi ${name},\n\nYour support request #${ticket.ticketNumber} ("${ticket.summary}") has been resolved.\n\nWe'd love your feedback — rate your support experience here:\n${link}\n`;
-  return sendEmail(ticket.reporter.email, html, `How did we do? [#${ticket.ticketNumber}] ${ticket.summary}`, [], {
+  return sendTemplateEmail("support.satisfactionSurvey", {
+    to: ticket.reporter.email,
     organisationId: ticket.organisationId,
-    text,
+    data: {
+      recipient: { name: ticket.reporter?.name || "", email: ticket.reporter.email },
+      ticket: { number: ticket.ticketNumber, summary: ticket.summary || "" },
+      survey: { url: link },
+    },
+    meta: { ticketId: String(ticket._id), ticketNumber: ticket.ticketNumber },
   });
 }
 
@@ -254,13 +245,23 @@ exports.addComment = async (req, res) => {
     // A public reply (not an internal note) is emailed to the reporter using the
     // tenant's own email identity.
     if (!isInternal && ticket.reporter?.email) {
-      const result = await sendEmail(
-        ticket.reporter.email,
-        message,
-        `Re: [#${ticket.ticketNumber}] ${ticket.summary}`,
-        [],
-        { organisationId: ticket.organisationId },
-      );
+      const result = await sendTemplateEmail("support.ticketReply", {
+        to: ticket.reporter.email,
+        organisationId: ticket.organisationId,
+        data: {
+          recipient: { name: ticket.reporter?.name || "", email: ticket.reporter.email },
+          ticket: {
+            number: ticket.ticketNumber,
+            summary: ticket.summary || "",
+            url: `${tenantBaseUrl(req)}/admin/support/${ticket._id}`,
+          },
+          // Plain text from a textarea. The template escapes it via | nl2br —
+          // it used to be interpolated straight into the HTML body unescaped.
+          message: { body: message },
+          staff: { name: userDisplayName(req.user) },
+        },
+        meta: { ticketId: String(ticket._id), ticketNumber: ticket.ticketNumber },
+      });
       entry.emailStatus = result?.success ? "sent" : "failed";
     }
 

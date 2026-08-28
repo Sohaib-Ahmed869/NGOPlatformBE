@@ -12,6 +12,39 @@ const s3Client = new S3Client({
   },
 });
 
+/**
+ * The MIME type S3 should serve an object as.
+ *
+ * NOT `multerS3.AUTO_CONTENT_TYPE`: that helper calls `fileType.fromStream()`
+ * without awaiting it, so it hands S3 the `.mime` of a *Promise* -- undefined --
+ * and every object in the bucket ends up stored as `application/octet-stream`.
+ * That is invisible in the app (browsers sniff `<img>` bodies anyway) and very
+ * visible in email, where Gmail's image proxy refuses to serve a logo that
+ * isn't declared as an image, so the header renders as a broken box.
+ *
+ * The extension wins over the browser's claimed mimetype because the S3 key is
+ * built from that same extension -- this way the URL and the served type agree.
+ */
+const MIME_BY_EXT = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml",
+  ".avif": "image/avif",
+  ".ico": "image/x-icon",
+  ".pdf": "application/pdf",
+};
+
+const GENERIC = new Set(["", "application/octet-stream", "binary/octet-stream"]);
+
+function resolveContentType(req, file, cb) {
+  const ext = path.extname(String(file.originalname || "")).toLowerCase();
+  const claimed = String(file.mimetype || "").trim().toLowerCase();
+  cb(null, MIME_BY_EXT[ext] || (GENERIC.has(claimed) ? "application/octet-stream" : claimed));
+}
+
 // Helper function to create upload configuration
 const createUploadConfig = (folder) => ({
   s3: s3Client,
@@ -19,7 +52,7 @@ const createUploadConfig = (folder) => ({
   contentDisposition: function (req, file, cb) {
     cb(null, "inline");
   },
-  contentType: multerS3.AUTO_CONTENT_TYPE,
+  contentType: resolveContentType,
   metadata: function (req, file, cb) {
     cb(null, { fieldName: file.fieldname });
   },

@@ -43,9 +43,12 @@ const userSchema = new mongoose.Schema(
       default: null,
     },
     invitedAt: { type: Date, default: null },
-    // Escape hatch for a specific Owner/Admin operator that shouldn't be forced
-    // through MFA enrollment (e.g. a shared dev/test account). Set by hand —
-    // there's no UI toggle for this on purpose, since it's meant to be rare.
+    // Per-operator MFA requirement, set from the Team screen. "default" follows
+    // the role (see MFA_REQUIRED_ROLES); "required" forces enrolment on a role
+    // that wouldn't normally need it; "exempt" is the escape hatch for a shared
+    // dev/test login. Read through mfaRequiredFor() in config/platformRoles.js.
+    mfaPolicy: { type: String, enum: ["default", "required", "exempt"], default: "default" },
+    // Legacy form of `mfaPolicy: "exempt"`, still honoured on old documents.
     mfaExempt: { type: Boolean, default: false },
     organisationId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -101,6 +104,21 @@ const userSchema = new mongoose.Schema(
     dateOfBirth: Date,
     resetPasswordToken: String,
     resetPasswordExpires: Date,
+    // Platform-operator "forgot password" flow — email a 6-digit code, verify
+    // it, then hand back a short-lived ticket for the actual reset call. Kept
+    // separate from resetPasswordToken/Expires above (the admin-invite link
+    // flow) since a code and a link have different shapes and lifecycles —
+    // see controllers/superAdminUserController.js.
+    passwordReset: {
+      codeHash: { type: String, default: null },
+      codeExpiresAt: { type: Date, default: null },
+      attempts: { type: Number, default: 0 },
+      lastSentAt: { type: Date, default: null },
+      sendCount: { type: Number, default: 0 },
+      windowStartedAt: { type: Date, default: null },
+      ticketHash: { type: String, default: null },
+      ticketExpiresAt: { type: Date, default: null },
+    },
     isTemporaryPassword: {
       type: Boolean,
       default: false

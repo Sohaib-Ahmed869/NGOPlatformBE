@@ -3,7 +3,8 @@
 // Public "Become a partner" submissions + admin management (tenant-scoped).
 const PartnerInquiry = require("../models/partnerInquiry");
 const User = require("../models/user");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
+const { publicSiteUrl, adminPortalUrl } = require("../utils/tenantUrls");
 const { deleteS3Object } = require("../config/s3");
 
 const TYPE_LABELS = {
@@ -20,16 +21,19 @@ const VALID_TYPE = Object.keys(TYPE_LABELS);
 // Multipart/checkbox values arrive as strings ("true"/"on") — coerce to boolean.
 const toBool = (v) => v === true || ["true", "on", "1", "yes"].includes(String(v).toLowerCase());
 
-const emailOpts = (org) => ({ org, fromName: org?.name, replyTo: org?.contactEmail || undefined });
+const emailOpts = (org) => ({ org, replyTo: org?.contactEmail || undefined });
 
-function shell(orgName, inner) {
-  return `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#222">
-      ${inner}
-      <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
-      <p style="font-size:12px;color:#888">Sent by ${orgName || "us"}.</p>
-    </div>`;
-}
+// The enquiry, shaped for the variables the catalog declares for partner.* mail.
+// Wording and layout live in config/emailCatalog.js and the console, not here.
+const partnerVars = (inquiry) => ({
+  name: inquiry.name || "",
+  email: inquiry.email || "",
+  phone: inquiry.phone || "",
+  organisationName: inquiry.organisationName || "",
+  website: inquiry.website || "",
+  type: TYPE_LABELS[inquiry.partnershipType] || inquiry.partnershipType || "",
+  message: inquiry.message || "",
+});
 
 // Tell the org's admins a new partnership enquiry arrived (best-effort).
 async function notifyAdmins(org, inquiry) {
@@ -39,23 +43,19 @@ async function notifyAdmins(org, inquiry) {
     const admins = await User.find(filter).select("email").lean();
     const emails = [...new Set(admins.map((a) => a.email).filter(Boolean))];
     if (!emails.length) return;
-    const html = shell(
-      org?.name,
-      `<h2 style="color:#2C2418">New partnership enquiry</h2>
-       <p>Someone wants to partner with you.</p>
-       <div style="background:#f9f9f9;padding:15px;border-radius:6px;margin:16px 0">
-         <p style="margin:4px 0"><strong>Name:</strong> ${inquiry.name}</p>
-         ${inquiry.organisationName ? `<p style="margin:4px 0"><strong>Organisation:</strong> ${inquiry.organisationName}</p>` : ""}
-         <p style="margin:4px 0"><strong>Type:</strong> ${TYPE_LABELS[inquiry.partnershipType] || inquiry.partnershipType}</p>
-         <p style="margin:4px 0"><strong>Email:</strong> ${inquiry.email}</p>
-         ${inquiry.phone ? `<p style="margin:4px 0"><strong>Phone:</strong> ${inquiry.phone}</p>` : ""}
-         ${inquiry.website ? `<p style="margin:4px 0"><strong>Website:</strong> ${inquiry.website}</p>` : ""}
-         ${inquiry.message ? `<p style="margin:8px 0 0"><strong>Message:</strong><br/>${String(inquiry.message).replace(/\n/g, "<br/>")}</p>` : ""}
-       </div>
-       <p>Review and respond from your admin portal → Partners.</p>`
-    );
+    const data = {
+      partner: partnerVars(inquiry),
+      adminUrl: adminPortalUrl(org, "/admin/partners"),
+    };
     await Promise.allSettled(
-      emails.map((e) => sendEmail(e, html, `New partnership enquiry — ${org?.name || ""}`, [], emailOpts(org)))
+      emails.map((e) =>
+        sendTemplateEmail("partner.enquiryAdminAlert", {
+          to: e,
+          ...emailOpts(org),
+          data,
+          meta: { inquiryId: String(inquiry._id || "") },
+        }),
+      ),
     );
   } catch (err) {
     console.error("notifyAdmins (partner) error:", err.message);
@@ -66,13 +66,15 @@ async function notifyAdmins(org, inquiry) {
 async function ackApplicant(org, inquiry) {
   try {
     if (!inquiry.email) return;
-    const html = shell(
-      org?.name,
-      `<h2 style="color:#2C2418">Thank you for reaching out 🤝</h2>
-       <p>Hi ${inquiry.name || "there"}, thanks for your interest in partnering with ${org?.name || "us"}.</p>
-       <p>We've received your enquiry and a member of our team will be in touch soon.</p>`
-    );
-    await sendEmail(inquiry.email, html, `We received your partnership enquiry — ${org?.name || ""}`, [], emailOpts(org));
+    await sendTemplateEmail("partner.enquiryReceived", {
+      to: inquiry.email,
+      ...emailOpts(org),
+      data: {
+        recipient: { name: inquiry.name || "", email: inquiry.email },
+        partner: partnerVars(inquiry),
+      },
+      meta: { inquiryId: String(inquiry._id || "") },
+    });
   } catch (err) {
     console.error("ackApplicant (partner) error:", err.message);
   }
@@ -83,13 +85,15 @@ async function notifyFeatured(org, inquiry) {
   try {
     if (!inquiry.email) return;
     const displayName = inquiry.publicName || inquiry.organisationName || inquiry.name || "your organisation";
-    const html = shell(
-      org?.name,
-      `<h2 style="color:#2C2418">You're now featured on our partners page 🎉</h2>
-       <p>Hi ${inquiry.name || "there"}, we're delighted to share that <strong>${displayName}</strong> is now listed on the ${org?.name || "our"} partners page.</p>
-       <p>Thank you for standing with us — together we reach further.</p>`
-    );
-    await sendEmail(inquiry.email, html, `You're featured on our partners page — ${org?.name || ""}`, [], emailOpts(org));
+    await sendTemplateEmail("partner.featured", {
+      to: inquiry.email,
+      ...emailOpts(org),
+      data: {
+        recipient: { name: inquiry.name || "", email: inquiry.email },
+        partner: { ...partnerVars(inquiry), displayName, pageUrl: publicSiteUrl(org, "/partners") },
+      },
+      meta: { inquiryId: String(inquiry._id || "") },
+    });
   } catch (err) {
     console.error("notifyFeatured (partner) error:", err.message);
   }

@@ -2,7 +2,7 @@
 const PDFDocument = require("pdfkit");
 const fs = require("fs-extra");
 const path = require("path");
-const { sendEmail } = require("./emailUtil");
+const { sendTemplateEmail } = require("./emailUtil");
 const { getOrgIdentity } = require("../utils/orgIdentity");
 const os = require("os");
 
@@ -691,47 +691,54 @@ const sendReceiptEmail = async (
       paidOnly
     );
 
-    const identity = await getOrgIdentity(order.organisationId);
+    const isInstallment = order.paymentType === "installments";
+    const lineItems = (order.items || []).map((i) => ({
+      label: i.title || "Donation",
+      amount: Number(i.price || 0) * Number(i.quantity || 1),
+      quantity: i.quantity || 1,
+    }));
 
-    // Create appropriate email subject based on payment type
-    let emailSubject = `${identity.name} - `;
+    // Bank details come from the ORGANISATION. They used to be hardcoded to one
+    // charity's Westpac account on every tenant's receipt, so donors paying by
+    // transfer were sent someone else's account number.
+    const bank = (await organisationBankDetails(order.organisationId)) || {};
 
-    if (order.paymentType === "installments" && installmentNumber) {
-      emailSubject += `Installment ${installmentNumber} Receipt ${order.donationId}`;
-    } else if (order.paymentType === "installments") {
-      emailSubject += `Installment Payment Receipt ${order.donationId}`;
-    } else if (order.paymentType === "recurring") {
-      emailSubject += `Recurring Donation Receipt ${order.donationId}`;
-    } else {
-      emailSubject += `Donation Receipt ${order.donationId}`;
-    }
-
-    // Create email body
-    const emailBody = createEmailBody(order, totalAmount, installmentNumber, identity);
-
-    // Setup email options with attachment
-    const mailOptions = {
-      from: `"${identity.name}" <${process.env.EMAIL_USER}>`,
+    const info = await sendTemplateEmail("donation.receipt", {
       to: order.donorDetails.email,
-      subject: emailSubject,
-      html: emailBody,
-      attachments: [
-        {
-          filename: fileName,
-          path: filePath,
-          contentType: "application/pdf",
+      organisationId: order.organisationId,
+      attachments: [{ filename: fileName, path: filePath, contentType: "application/pdf" }],
+      data: {
+        donor: {
+          name: order.donorDetails.name || "",
+          email: order.donorDetails.email,
+          phone: order.donorDetails.phone || "",
         },
-      ],
-    };
+        donation: {
+          id: order.donationId,
+          amount: totalAmount,
+          currency: "AUD",
+          date: order.createdAt,
+          type: formatPaymentType(order.paymentType),
+          method: formatPaymentMethod(order.paymentMethod),
+          cause: order.donationType || "",
+          items: lineItems,
+          isInstallment: isInstallment && !!installmentNumber,
+          installmentNumber: installmentNumber || 0,
+          installmentTotal: order.installmentDetails?.numberOfInstallments || 0,
+          isRecurring: order.paymentType === "recurring",
+          isBankTransfer: order.paymentMethod === "bank",
+          receiptUrl: identity.portalUrl ? `${identity.portalUrl}/user/donations` : "",
+        },
+        bank: {
+          name: bank.bankName || "",
+          bsb: bank.bsb || "",
+          accountNumber: bank.accountNumber || "",
+          accountName: bank.accountName || "",
+        },
+      },
+      meta: { donationId: order.donationId, installmentNumber: installmentNumber || 0 },
+    });
 
-    // Send the email
-    const info = await sendEmail(
-      order.donorDetails.email,
-      emailBody,
-      emailSubject,
-      mailOptions.attachments,
-      { organisationId: order.organisationId }
-    );
     // Cleanup - remove temporary file
     await fs.remove(filePath);
 
@@ -752,123 +759,20 @@ const sendReceiptEmail = async (
 };
 
 /**
- * Creates the email body with appropriate messaging based on payment type
- * @param {Object} order - The order object
- * @param {Number} totalAmount - Total amount on the receipt
- * @param {Number} installmentNumber - Installment number (if applicable)
- * @returns {String} - HTML email body
+ * The tenant's own bank account, for the transfer instructions on a receipt.
+ * Returns {} rather than throwing — a receipt must still send when the tenant
+ * hasn't filled these in; the template simply drops the block.
  */
-const createEmailBody = (order, totalAmount, installmentNumber, identity = {}) => {
-  const orgName = identity.name || "";
-  // Rendered only when the tenant has the detail — never another org's.
-  const contactLine = [
-    identity.email
-      ? `contact us at <a href="mailto:${identity.email}">${identity.email}</a>`
-      : "",
-    identity.phone ? `call us on ${identity.phone}` : "",
-  ]
-    .filter(Boolean)
-    .join(" or ");
-  // Customize messaging based on payment type
-  let paymentTypeMessage = "";
-  let amountDescription = "";
-
-  if (order.paymentType === "installments" && installmentNumber) {
-    paymentTypeMessage = `installment ${installmentNumber} payment`;
-    amountDescription = `Installment ${installmentNumber} Amount`;
-  } else if (order.paymentType === "installments") {
-    paymentTypeMessage = "installment payments";
-    amountDescription = "Total Paid Amount";
-  } else if (order.paymentType === "recurring") {
-    paymentTypeMessage = "recurring donation";
-    amountDescription = "Donation Amount";
-  } else {
-    paymentTypeMessage = "donation";
-    amountDescription = "Donation Amount";
+async function organisationBankDetails(organisationId) {
+  if (!organisationId) return {};
+  try {
+    const Organisation = require("../models/organisation");
+    const org = await Organisation.findById(organisationId).select("bankDetails").lean();
+    return (org && org.bankDetails) || {};
+  } catch (err) {
+    console.error("receipt: bank details unavailable:", err.message);
+    return {};
   }
-
-  return `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      ${
-        // The tenant's own logo. The old hardcoded S3 image put one charity's
-        // logo on every tenant's receipt email.
-        identity.logo
-          ? `<div style="text-align: center; padding: 20px 0;">
-        <img src="${identity.logo}" alt="${orgName}" style="max-width: 150px;">
-      </div>`
-          : `<div style="text-align: center; padding: 20px 0;">
-        <h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgName}</h1>
-      </div>`
-      }
-      
-      <h2 style="color: #4a7c59;">Thank You for Your ${
-        paymentTypeMessage.charAt(0).toUpperCase() + paymentTypeMessage.slice(1)
-      }!</h2>
-      
-      <p>Dear ${order.donorDetails.name},</p>
-      
-      <p>Thank you for your generous ${paymentTypeMessage}${orgName ? ` to ${orgName}` : ""}. Your support helps us make a difference in the lives of those in need.</p>
-      
-      <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-        <h3 style="margin-top: 0;">Receipt Details:</h3>
-        <p><strong>Donation ID:</strong> ${order.donationId}</p>
-        <p><strong>Date:</strong> ${formatDate(order.createdAt)}</p>
-        <p><strong>${amountDescription}:</strong> $${totalAmount.toFixed(
-    2
-  )} AUD</p>
-        <p><strong>Payment Method:</strong> ${formatPaymentMethod(
-          order.paymentMethod
-        )}</p>
-        ${
-          order.paymentType === "installments"
-            ? `<p><strong>Payment Plan:</strong> ${
-                order.installmentDetails?.numberOfInstallments || 0
-              } installments</p>`
-            : ""
-        }
-      </div> 
-      
-      <p>Your official tax-deductible receipt is attached to this email. Please keep it for your tax records.</p>
-      
-      ${
-        order.paymentMethod === "bank" ? getBankTransferInstructions(order) : ""
-      }
-      
-      ${
-        contactLine
-          ? `<p>If you have any questions or need further assistance, please don't hesitate to ${contactLine}.</p>`
-          : ""
-      }
-
-      <p>Warm regards,<br>
-      ${orgName ? `${orgName} Team` : "The Team"}</p>
-
-      <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px; color: #777;">
-        <p>${orgName}${identity.footer ? `<br>${identity.footer}` : ""}</p>
-      </div>
-    </div>
-  `;
-};
-
-/**
- * Gets bank transfer instructions for email body
- * @param {Object} order - The order object
- * @returns {string} - HTML string with bank transfer instructions
- */
-const getBankTransferInstructions = (order) => {
-  return `
-    <div style="background-color: #fffaed; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
-      <h3 style="margin-top: 0; color: #856404;">Bank Transfer Instructions:</h3>
-      <p>Please use the following details to complete your bank transfer:</p>
-      <ul style="padding-left: 20px;">
-        <li><strong>Bank Name:</strong> Westpac</li>
-        <li><strong>BSB:</strong> 032075</li>
-        <li><strong>Account Number:</strong> 841783</li>
-        <li><strong>Reference:</strong> ${order.donationId} (Important: Please include this reference)</li>
-      </ul>
-      <p><strong>Note:</strong> Your donation will be marked as completed once we receive your payment.</p>
-    </div>
-  `;
-};
+}
 
 module.exports = { generateReceiptPDF, sendReceiptEmail };

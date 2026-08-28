@@ -2,7 +2,8 @@ const crypto = require("crypto");
 const Lead = require("../../models/lead");
 const Organisation = require("../../models/organisation");
 const PlatformSettings = require("../../models/platformSettings");
-const { sendEmail } = require("../../services/emailUtil");
+const { sendTemplateEmail } = require("../../services/emailUtil");
+const { platformAppUrl } = require("../../utils/tenantUrls");
 const { emitToSuperAdmins } = require("../../services/socket");
 const { stripe } = require("../../services/platformStripe");
 
@@ -133,15 +134,26 @@ exports.submitLead = async (req, res) => {
         try {
           const platform = await PlatformSettings.getSingleton();
           const to = platform?.contactEmail || "support@ngoplatform.com";
-          const html = `
-            <h2>New lead: ${orgName}</h2>
-            <p><strong>Contact:</strong> ${contactName} — ${contactEmail}${lead.contactPhone ? ` — ${lead.contactPhone}` : ""}</p>
-            ${lead.timeline ? `<p><strong>Timeline:</strong> ${lead.timeline}</p>` : ""}
-            ${lead.interestedPlan ? `<p><strong>Interested plan:</strong> ${lead.interestedPlan}</p>` : ""}
-            ${lead.message ? `<p><strong>Message:</strong> ${lead.message}</p>` : ""}
-            <p>Open it in the Leads console to respond.</p>
-          `;
-          const mail = await sendEmail(to, html, `New lead: ${orgName}`);
+          const mail = await sendTemplateEmail("lead.newLeadAlert", {
+            to,
+            data: {
+              lead: {
+                orgName,
+                contactName,
+                contactEmail,
+                contactPhone: lead.contactPhone || "",
+                plan: lead.interestedPlan || "",
+                message: [
+                  lead.timeline ? `Timeline: ${lead.timeline}` : "",
+                  lead.message || "",
+                ]
+                  .filter(Boolean)
+                  .join("\n\n"),
+                url: platformAppUrl(`/leads/${lead._id}`),
+              },
+            },
+            meta: { leadId: String(lead._id) },
+          });
           if (!mail?.success) console.error("New-lead alert email failed:", mail?.error?.message || mail?.message);
         } catch (e) {
           console.error("New-lead alert email failed:", e.message);

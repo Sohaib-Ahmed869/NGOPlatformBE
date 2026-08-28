@@ -43,6 +43,30 @@ const ROLE_DESCRIPTIONS = {
 // Roles required to have MFA enabled before they can use the SuperAdmin console.
 const MFA_REQUIRED_ROLES = ["owner", "admin"];
 
+// Per-operator override of that role default, set from the Team screen:
+//   default  — follow MFA_REQUIRED_ROLES for this person's role
+//   required — must enrol, whatever the role says (e.g. a Support operator who
+//              can impersonate tenants)
+//   exempt   — never forced (a shared dev/test login), the old `mfaExempt` flag
+const MFA_POLICIES = ["default", "required", "exempt"];
+
+// `mfaExempt` predates the tri-state field and is still on live documents, so
+// it's read as "exempt" until the flag is set explicitly.
+function mfaPolicyOf(user) {
+  if (!user) return "default";
+  if (user.mfaPolicy && MFA_POLICIES.includes(user.mfaPolicy) && user.mfaPolicy !== "default") return user.mfaPolicy;
+  if (user.mfaExempt) return "exempt";
+  return "default";
+}
+
+// Does THIS operator have to have MFA on? Policy first, role default second.
+function mfaRequiredFor(user) {
+  const policy = mfaPolicyOf(user);
+  if (policy === "required") return true;
+  if (policy === "exempt") return false;
+  return MFA_REQUIRED_ROLES.includes(user?.platformRole);
+}
+
 const ALL_ROLES = Object.keys(ROLE_CAPABILITIES);
 
 function hasCapability(platformRole, capability) {
@@ -58,6 +82,9 @@ module.exports = {
   ROLE_LABELS,
   ROLE_DESCRIPTIONS,
   MFA_REQUIRED_ROLES,
+  MFA_POLICIES,
+  mfaPolicyOf,
+  mfaRequiredFor,
   ALL_ROLES,
   hasCapability,
   rolesWithCapability,

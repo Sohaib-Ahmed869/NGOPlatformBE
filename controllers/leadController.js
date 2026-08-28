@@ -1,11 +1,24 @@
 const Lead = require("../models/lead");
 const User = require("../models/user");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const { emitToSuperAdmins } = require("../services/socket");
 const writeAudit = require("../utils/writeAudit");
 const leadConversion = require("../services/leadConversion");
 const input = require("../utils/operatorInput");
 const { listAssignableStaff } = require("../utils/platformStaff");
+
+/**
+ * Columns the leads table may sort by, and the paths each one means.
+ * "activity" is the default because the question this screen answers is
+ * "who needs chasing", and that's ordered by when they last said something.
+ */
+const LEAD_SORTS = {
+  org: "orgName",
+  contact: ["contactName", "contactEmail"],
+  stage: "stage",
+  created: "createdAt",
+  activity: ["lastMessageAt", "createdAt"],
+};
 
 const ACTIVE_STAGES = Lead.STAGES.filter((s) => s !== "won" && s !== "lost");
 const LOST_REASONS = ["budget", "timing", "chose_competitor", "no_response", "not_a_fit", "spam", "other"];
@@ -24,12 +37,15 @@ exports.list = async (req, res) => {
     if (rx) filter.$or = [{ orgName: rx }, { contactName: rx }, { contactEmail: rx }];
 
     const { page, limit, skip } = input.paging(req.query, { defaultLimit: 25, maxLimit: 100 });
+    const { sort, key: sortKey, dir: sortDir } = input.sorting(req.query, LEAD_SORTS, {
+      defaultKey: "activity",
+    });
 
     const [leads, total, newCount] = await Promise.all([
       Lead.find(filter)
         .select("-thread")
         .populate("assignee.userId", "name email profileImage")
-        .sort({ lastMessageAt: -1, createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -37,7 +53,14 @@ exports.list = async (req, res) => {
       Lead.countDocuments({ stage: "new", flaggedSpam: false }),
     ]);
 
-    res.json({ leads, pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 }, newCount });
+    res.json({
+      leads,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) || 1 },
+      // Echoed back so the screen can render the arrow from what the server
+      // actually did, not from what it asked for.
+      sort: { key: sortKey, dir: sortDir },
+      newCount,
+    });
   } catch (err) {
     console.error("List leads error:", err);
     res.status(500).json({ error: "Failed to fetch leads" });
@@ -228,7 +251,16 @@ exports.addMessage = async (req, res) => {
 
     const from = lead.stage;
     if (entry.kind === "reply") {
-      const result = await sendEmail(lead.contactEmail, entry.body, `Re: ${lead.orgName}`);
+      const result = await sendTemplateEmail("lead.reply", {
+        to: lead.contactEmail,
+        data: {
+          recipient: { name: lead.contactName || "", email: lead.contactEmail },
+          lead: { orgName: lead.orgName || "" },
+          message: { body: entry.body },
+          staff: { name: req.user?.name || req.user?.email || "" },
+        },
+        meta: { leadId: String(lead._id) },
+      });
       entry.emailedTo = lead.contactEmail;
       entry.emailStatus = result?.success ? "sent" : "failed";
       if (lead.stage === "new") lead.stage = "contacted";
@@ -315,10 +347,10 @@ exports.convert = async (req, res) => {
     }
 
     if (mode === "activation_link") {
-      const { link } = await leadConversion.createActivationLink(lead, req.body, req);
-      await writeAudit(req, "lead.activation_link_sent", { targetType: "lead", targetId: String(lead._id) });
+      const { link, emailStatus } = await leadConversion.createActivationLink(lead, req.body, req);
+      await writeAudit(req, "lead.activation_link_sent", { targetType: "lead", targetId: String(lead._id), meta: { emailStatus } });
       emitToSuperAdmins("lead:updated", { id: String(lead._id) });
-      return res.json({ message: "Activation link sent", lead, link });
+      return res.json({ message: "Activation link sent", lead, link, emailStatus });
     }
 
     if (billingMode === "charge_now") {
@@ -334,27 +366,27 @@ exports.convert = async (req, res) => {
     }
 
     if (billingMode === "send_link") {
-      const { link, organisation } = await leadConversion.sendPaymentLink(lead, req.body, req);
+      const { link, organisation, emailStatus } = await leadConversion.sendPaymentLink(lead, req.body, req);
       await writeAudit(req, "lead.payment_link_sent", {
         organisationId: organisation._id,
         targetType: "lead",
         targetId: String(lead._id),
-        meta: { billingMode },
+        meta: { billingMode, emailStatus },
       });
       emitToSuperAdmins("lead:updated", { id: String(lead._id) });
-      return res.json({ message: "Payment link sent", lead, organisation, link });
+      return res.json({ message: "Payment link sent", lead, organisation, link, emailStatus });
     }
 
-    const { organisation } = await leadConversion.manualProvision(lead, req.body, req);
+    const { organisation, emailStatus } = await leadConversion.manualProvision(lead, req.body, req);
     await writeAudit(req, "lead.converted", {
       organisationId: organisation._id,
       targetType: "lead",
       targetId: String(lead._id),
-      meta: { mode: "manual_provision", billingMode: "comp" },
+      meta: { mode: "manual_provision", billingMode: "comp", emailStatus },
     });
     emitToSuperAdmins("lead:converted", { id: String(lead._id), organisationId: String(organisation._id) });
     emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
-    res.json({ message: "Organisation created", lead, organisation });
+    res.json({ message: "Organisation created", lead, organisation, emailStatus });
   } catch (err) {
     console.error("Convert lead error:", err);
     res.status(err.statusCode || 500).json({ error: err.publicMessage || "Failed to convert lead" });

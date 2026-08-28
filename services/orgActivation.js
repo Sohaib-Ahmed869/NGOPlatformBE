@@ -19,7 +19,7 @@ const crypto = require("crypto");
 const Organisation = require("../models/organisation");
 const User = require("../models/user");
 const Lead = require("../models/lead");
-const { sendEmail } = require("./emailUtil");
+const { sendTemplateEmail } = require("./emailUtil");
 const { emitToSuperAdmins } = require("./socket");
 
 /** The tenant's portal host, e.g. `acme.charities.ltd`. */
@@ -192,30 +192,25 @@ async function activateOrgWithAdmin(organisation, { subscriptionId, customerId }
 
   const scheme = portalScheme();
   const host = portalHost(claim);
-  const emailBody = usingPassword
-    ? `
-    <h2>Welcome to the Platform, ${adminName}!</h2>
-    <p>Your organisation <strong>${claim.name}</strong> has been set up successfully.</p>
-    <p>Your portal is ready at: <a href="${scheme}://${host}">${scheme}://${host}</a></p>
-    <h3>Your Admin Account</h3>
-    <ul>
-      <li><strong>Email:</strong> ${adminEmail}</li>
-      <li><strong>Plan:</strong> ${claim.plan}</li>
-      <li><strong>Billing:</strong> ${claim.billingCycle}</li>
-    </ul>
-    <p>Log in at <a href="${scheme}://${host}/admin/login">${scheme}://${host}/admin/login</a> to start setting up your portal.</p>
-  `
-    : `
-    <h2>Welcome to the Platform, ${adminName}!</h2>
-    <p>Your organisation <strong>${claim.name}</strong> has been set up and your payment received — you're all set.</p>
-    <p>Your portal is ready at: <a href="${scheme}://${host}">${scheme}://${host}</a></p>
-    <p>Before you log in, set your password:</p>
-    <div style="text-align:center;margin:24px 0;">
-      <a href="${mainAppBaseUrl()}/reset-password/${resetToken}" style="background:#047857;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:600;">Set your password</a>
-    </div>
-    <p>This link expires in 7 days.</p>
-  `;
-  const mail = await sendEmail(adminEmail, emailBody, `Welcome to ${claim.name} - Your Portal is Ready!`);
+  const mail = await sendTemplateEmail("tenant.welcome", {
+    to: adminEmail,
+    data: {
+      recipient: { name: adminName, email: adminEmail },
+      tenant: {
+        name: claim.name,
+        portalUrl: `${scheme}://${host}`,
+        loginUrl: `${scheme}://${host}/admin/login`,
+        adminEmail,
+        plan: claim.plan || "",
+        billingCycle: claim.billingCycle || "",
+        // Exactly one of these is set. With a password we generated, the admin
+        // logs straight in; provisioned admins set their own from the link.
+        password: "",
+        setPasswordUrl: usingPassword ? "" : `${mainAppBaseUrl()}/reset-password/${resetToken}`,
+      },
+    },
+    meta: { organisationId: String(claim._id), slug: claim.slug },
+  });
   if (!mail?.success) {
     // Never fail activation over an email — but make it loud, because a silent
     // failure here means a paying tenant has no idea their portal is ready.

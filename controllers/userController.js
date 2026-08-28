@@ -7,8 +7,8 @@ require('dotenv').config();
 const crypto = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-const { sendEmail } = require("../services/emailUtil");
-const { MFA_REQUIRED_ROLES } = require("../config/platformRoles");
+const { sendTemplateEmail } = require("../services/emailUtil");
+const { mfaRequiredFor } = require("../config/platformRoles");
 
 const INSTAGRAM_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
 
@@ -226,10 +226,7 @@ exports.loginAdmin = async (req, res) => {
     // through the (already-authenticated) /users/mfa/setup + /mfa/enable
     // endpoints, then re-request the console.
     const mfaSetupRequired =
-      user.role === "superadmin" &&
-      MFA_REQUIRED_ROLES.includes(user.platformRole) &&
-      !user.twoFactorEnabled &&
-      !user.mfaExempt;
+      user.role === "superadmin" && mfaRequiredFor(user) && !user.twoFactorEnabled;
 
     // Admins don't need to change temporary passwords
     res.json({
@@ -346,34 +343,15 @@ exports.forgotPassword = async (req, res) => {
     // regardless of which tenant the user belongs to.
     const orgIdentity = await getOrgIdentity(user.organisationId);
 
-    // Email content
-    const emailBody = `
-     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
-  
-  <h2 style="color: #4CAF50; text-align: center;">Password Reset Request</h2>
-  
-  <p>Dear Valued Member,</p>
-  
-  <p>We received a request to reset your password for your ${orgIdentity.name} account. To complete the process and set a new password, please click the button below:</p>
-  
-  <div style="text-align: center; margin: 30px 0;">
-    <a href="${resetUrl}" style="background-color: #4CAF50; color: white; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">Reset Your Password</a>
-  </div>
-  
-  <p>This link will expire in 1 hour for security reasons.</p>
-  
-  <p>If you didn't request this password reset, please ignore this email or contact our support team if you have concerns about your account security.</p>
-  
-  <p>Warm regards,<br>The ${orgIdentity.name} Team</p>
-  
-  <div style="font-size: 12px; color: #666; border-top: 1px solid #e0e0e0; margin-top: 20px; padding-top: 20px;">
-    <p>This is an automated email. Please do not reply to this message.</p>
-    <p>If you're having trouble with the button above, copy and paste this link into your browser: ${resetUrl}</p>
-  </div>
-</div>
-    `;
-
-    await sendEmail(user.email, emailBody, "Password Reset Request", [], { organisationId: user.organisationId });
+    await sendTemplateEmail("account.passwordReset", {
+      to: user.email,
+      organisationId: user.organisationId,
+      data: {
+        recipient: { name: user.name || "", email: user.email },
+        reset: { url: resetUrl, expiresIn: "1 hour" },
+      },
+      meta: { userId: String(user._id) },
+    });
 
     res.status(200).json({
       status: "Success",
@@ -426,13 +404,14 @@ exports.resetPassword = async (req, res) => {
     
     await user.save();
 
-    // Send confirmation email
-    const emailBody = `
-      Your password has been successfully reset.\n\n
-      If you did not perform this action, please contact our support team immediately.
-    `;
-
-    await sendEmail(user.email, emailBody, "Password Reset Successful", [], { organisationId: user.organisationId });
+    await sendTemplateEmail("account.passwordResetSuccess", {
+      to: user.email,
+      organisationId: user.organisationId,
+      data: {
+        recipient: { name: user.name || "", email: user.email },
+      },
+      meta: { userId: String(user._id) },
+    });
 
     res.status(200).json({
       status: "Success",

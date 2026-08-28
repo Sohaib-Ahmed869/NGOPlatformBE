@@ -35,7 +35,7 @@ const Coupon = require("../models/coupon");
 const stripePrices = require("../config/stripePrices");
 const { refreshRedemptions, hasRedemptionsLeft } = require("../utils/couponRedemptions");
 const { stripe } = require("./platformStripe");
-const { sendEmail } = require("./emailUtil");
+const { sendTemplateEmail } = require("./emailUtil");
 const { seedPagesForOrg } = require("./pageService");
 const { getThemeColors } = require("../config/themePresets");
 
@@ -122,7 +122,7 @@ function resolveFormFields(lead, body) {
  * (a) Send the lead an activation link into the existing self-serve Registration
  * flow, pre-filled from the operator's (corrected) form — they complete BOTH
  * their org details review and their own payment.
- * @returns {Promise<{link: string}>}
+ * @returns {Promise<{link: string, emailStatus: "sent"|"failed"}>}
  */
 async function createActivationLink(lead, body, req) {
   const fields = resolveFormFields(lead, body);
@@ -178,27 +178,26 @@ async function createActivationLink(lead, body, req) {
   if (fields.couponCode) params.set("coupon", fields.couponCode.toUpperCase());
   const link = `${base}/register?${params.toString()}`;
 
-  const html = `
-    <h2>Let's get ${fields.orgName} set up</h2>
-    <p>Hi ${fields.adminName},</p>
-    <p>Thanks for your interest — here's your link to finish setting up your organisation's portal. Your details are already filled in.</p>
-    <div style="text-align:center;margin:24px 0;">
-      <a href="${link}" style="background:#047857;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:600;">Continue setup</a>
-    </div>
-    <p>This link expires in 14 days. If you have any questions, just reply to this email.</p>
-  `;
-  const mail = await sendEmail(fields.adminEmail, html, `Let's get ${fields.orgName} set up`);
+  const mail = await sendTemplateEmail("lead.onboardingInvite", {
+    to: fields.adminEmail,
+    data: {
+      recipient: { name: fields.adminName || "", email: fields.adminEmail },
+      lead: { orgName: fields.orgName },
+      onboarding: { url: link, expiresIn: "14 days" },
+    },
+    meta: { leadId: String(lead._id) },
+  });
   if (!mail?.success) {
     console.error(`Activation link email to ${fields.adminEmail} FAILED:`, mail?.error?.message || mail?.message);
   }
 
-  return { link };
+  return { link, emailStatus: mail?.success ? "sent" : "failed" };
 }
 
 /**
  * (b) Provision the Organisation + admin User directly — no Stripe
  * subscription, no client-side wizard. For comped/offline/negotiated deals.
- * @returns {Promise<{organisation: object, adminUser: object}>}
+ * @returns {Promise<{organisation: object, adminUser: object, emailStatus: "sent"|"failed"}>}
  */
 async function manualProvision(lead, body, req) {
   const fields = resolveFormFields(lead, body);
@@ -267,20 +266,25 @@ async function manualProvision(lead, body, req) {
   const setPasswordUrl = `${base}/reset-password/${resetToken}`;
   const portalBase = process.env.CLIENT_URL ? process.env.CLIENT_URL.replace(/^https?:\/\//, "") : base.replace(/^https?:\/\//, "");
   const scheme = /^https:/.test(base) ? "https" : "http";
-  const html = `
-    <h2>Welcome to the Platform, ${fields.adminName}!</h2>
-    <p>Your organisation <strong>${organisation.name}</strong> has been set up.</p>
-    <p>Your portal is ready at: <a href="${scheme}://${organisation.slug}.${portalBase}">${scheme}://${organisation.slug}.${portalBase}</a></p>
-    <p>Before you log in, set your password:</p>
-    <div style="text-align:center;margin:24px 0;">
-      <a href="${setPasswordUrl}" style="background:#047857;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:600;">Set your password</a>
-    </div>
-    <p>This link expires in 7 days.</p>
-  `;
-  const mail = await sendEmail(fields.adminEmail, html, `Welcome to ${organisation.name} — set up your account`);
+  const mail = await sendTemplateEmail("lead.convertedWelcome", {
+    to: fields.adminEmail,
+    data: {
+      recipient: { name: fields.adminName || "", email: fields.adminEmail },
+      tenant: {
+        name: organisation.name,
+        // The set-password link IS the way in here — there is no password to
+        // reveal, so the template's login button gives way to it.
+        loginUrl: setPasswordUrl,
+        portalUrl: `${scheme}://${organisation.slug}.${portalBase}`,
+        adminEmail: fields.adminEmail,
+      },
+    },
+    meta: { organisationId: String(organisation._id), leadId: String(lead._id) },
+  });
   if (!mail?.success) {
     console.error(`Welcome email to ${fields.adminEmail} FAILED for ${organisation.slug}:`, mail?.error?.message || mail?.message);
   }
+  const emailStatus = mail?.success ? "sent" : "failed";
 
   const prevStage = lead.stage;
   lead.orgName = fields.orgName;
@@ -301,7 +305,7 @@ async function manualProvision(lead, body, req) {
   });
   await lead.save();
 
-  return { organisation, adminUser };
+  return { organisation, adminUser, emailStatus };
 }
 
 async function seedOrgDefaults(organisationId, isMuslimCharity) {
@@ -487,21 +491,28 @@ async function sendPaymentLink(lead, body, req) {
 
   const base = clientBaseUrl(req);
   const link = `${base}/register?lead=${token}`;
-  const html = `
-    <h2>${organisation.name} is ready — just payment left</h2>
-    <p>Hi ${organisation.pendingAdminNoPassword?.name || ""},</p>
-    <p>Your organisation's portal is fully configured. Complete payment to activate it:</p>
-    <div style="text-align:center;margin:24px 0;">
-      <a href="${link}" style="background:#047857;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:600;">Complete payment</a>
-    </div>
-    <p>This link expires in 14 days. If you have any questions, just reply to this email.</p>
-  `;
-  const mail = await sendEmail(organisation.contactEmail, html, `${organisation.name} is ready — just payment left`);
+  const mail = await sendTemplateEmail("lead.paymentPending", {
+    to: organisation.contactEmail,
+    data: {
+      recipient: {
+        name: organisation.pendingAdminNoPassword?.name || "",
+        email: organisation.contactEmail,
+      },
+      tenant: { name: organisation.name },
+      billing: {
+        plan: organisation.plan || "",
+        amount: 0,
+        currency: "AUD",
+        payUrl: link,
+      },
+    },
+    meta: { organisationId: String(organisation._id), leadId: String(lead._id) },
+  });
   if (!mail?.success) {
     console.error(`Payment link email to ${organisation.contactEmail} FAILED:`, mail?.error?.message || mail?.message);
   }
 
-  return { link, organisation };
+  return { link, organisation, emailStatus: mail?.success ? "sent" : "failed" };
 }
 
 module.exports = { createActivationLink, manualProvision, beginChargeNow, sendPaymentLink };

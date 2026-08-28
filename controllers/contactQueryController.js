@@ -1,6 +1,6 @@
 const ContactQuery = require("../models/contactQuery");
 const User = require("../models/user");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const { emitToSuperAdmins } = require("../services/socket");
 const input = require("../utils/operatorInput");
 const { listAssignableStaff } = require("../utils/platformStaff");
@@ -112,7 +112,17 @@ exports.addMessage = async (req, res) => {
 
     if (entry.kind === "reply") {
       // `body` is already sanitized rich-text HTML from the editor.
-      const result = await sendEmail(query.email, entry.body, `Re: ${query.subject}`);
+      // The typed reply is framed by the "contactQuery.reply" template — see
+      // config/emailCatalog.js. `body` is already sanitized rich-text HTML.
+      const result = await sendTemplateEmail("contactQuery.reply", {
+        to: query.email,
+        data: {
+          recipient: { name: query.name || "", email: query.email },
+          message: { body: entry.body, originalSubject: query.subject || "" },
+          staff: { name: req.user?.name || req.user?.email || "" },
+        },
+        meta: { queryId: String(query._id) },
+      });
       entry.emailedTo = query.email;
       entry.emailStatus = result?.success ? "sent" : "failed";
       if (query.status !== "closed") query.status = "replied";
@@ -128,7 +138,7 @@ exports.addMessage = async (req, res) => {
     const populated = await ContactQuery.findById(query._id)
       .populate("assignee.userId", "name email profileImage")
       .populate("thread.author", "name email");
-    emitToSuperAdmins("contactQuery:message", { id: String(query._id), status: query.status });
+    emitToSuperAdmins("contactQuery:message", { id: String(query._id), status: query.status, actorSocketId: req.headers["x-socket-id"] || null });
 
     const last = populated.thread[populated.thread.length - 1];
     res.json({
@@ -153,7 +163,7 @@ exports.updateStatus = async (req, res) => {
       { new: true }
     ).populate("assignee.userId", "name email profileImage");
     if (!query) return res.status(404).json({ error: "Query not found" });
-    emitToSuperAdmins("contactQuery:updated", { id: String(query._id), status });
+    emitToSuperAdmins("contactQuery:updated", { id: String(query._id), status, actorSocketId: req.headers["x-socket-id"] || null });
     res.json({ query });
   } catch (err) {
     console.error("Update status error:", err);
@@ -182,7 +192,14 @@ exports.assign = async (req, res) => {
     }
     await query.save();
     const populated = await ContactQuery.findById(query._id).populate("assignee.userId", "name email profileImage");
-    emitToSuperAdmins("contactQuery:assigned", { id: String(query._id) });
+    // Carry the (populated) assignee: one row changed, and shipping the new
+    // value means every other console can patch it in place instead of
+    // refetching the inbox to discover a name it could have been told.
+    emitToSuperAdmins("contactQuery:assigned", {
+      id: String(query._id),
+      assignee: populated.assignee || null,
+      actorSocketId: req.headers["x-socket-id"] || null,
+    });
     res.json({ query: populated });
   } catch (err) {
     console.error("Assign error:", err);
@@ -208,7 +225,7 @@ exports.remove = async (req, res) => {
   try {
     const q = await ContactQuery.findByIdAndDelete(req.params.id);
     if (!q) return res.status(404).json({ error: "Query not found" });
-    emitToSuperAdmins("contactQuery:deleted", { id: String(req.params.id) });
+    emitToSuperAdmins("contactQuery:deleted", { id: String(req.params.id), actorSocketId: req.headers["x-socket-id"] || null });
     res.json({ message: "Deleted" });
   } catch (err) {
     console.error("Delete contact query error:", err);

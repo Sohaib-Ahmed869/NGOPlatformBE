@@ -4,7 +4,7 @@ const ContactRequest = require("../models/contact");
 const ContactMessage = require("../models/contactMessage");
 const ContactRead = require("../models/contactRead");
 const User = require("../models/user");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const { emitToOrg } = require("../services/socket");
 
 /* ── helpers ─────────────────────────────────────────────────────────── */
@@ -175,24 +175,25 @@ exports.addMessage = async (req, res) => {
 
     // A reply is emailed to the submitter; record the outcome on the message.
     if (kind === "reply") {
-      const orgName = req.organisation?.name || "our team";
-      const subject = `Re: your message to ${orgName}`;
-      // `body` is already a sanitised rich-text HTML subset from the editor.
-      const html = `
-        <div style="font-family:Arial,sans-serif;font-size:14px;color:#222;line-height:1.6">
-          ${body}
-          <hr style="border:none;border-top:1px solid #eee;margin:18px 0"/>
-          <p style="color:#888;font-size:12px">
-            This is a reply from ${orgName}${contact.purpose ? ` regarding "${contact.purpose}"` : ""}.
-          </p>
-        </div>`;
-      // Per-tenant sender identity: tenant name as the from-name and the org's
-      // own contact email as reply-to, so the submitter replies to the tenant
-      // (not the shared platform mailbox).
-      const result = await sendEmail(contact.email, html, subject, [], {
+      // `body` is already a sanitised rich-text HTML subset from the editor;
+      // the template frames it (greeting, sign-off, branded shell).
+      // Per-tenant sender identity: the org's own contact email as reply-to, so
+      // the submitter replies to the tenant, not the shared platform mailbox.
+      const result = await sendTemplateEmail("contact.reply", {
+        to: contact.email,
         org: req.organisation,
-        fromName: req.organisation?.name,
         replyTo: req.organisation?.contactEmail || undefined,
+        data: {
+          recipient: { name: contact.name || "", email: contact.email },
+          message: {
+            body,
+            originalSubject: contact.purpose || contact.subject || `your message to ${
+              req.organisation?.name || "us"
+            }`,
+          },
+          staff: { name: req.user?.name || "" },
+        },
+        meta: { contactId: String(contact._id || "") },
       });
       message.emailedTo = contact.email;
       message.emailStatus = result?.success ? "sent" : "failed";

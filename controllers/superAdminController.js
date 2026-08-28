@@ -12,7 +12,8 @@ const Join = require("../models/join");
 const Order = require("../models/order");
 const GoFundMe = require("../models/goFundMe");
 const writeAudit = require("../utils/writeAudit");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
+const { adminPortalUrl } = require("../utils/tenantUrls");
 const { getEffectiveLimits } = require("../utils/effectiveLimits");
 const { METER_KEYS } = require("../config/featureCatalog");
 const bcrypt = require("bcrypt");
@@ -46,18 +47,20 @@ async function notifyBrandingDecision(request, decision) {
     const cc = requesterEmail && requesterEmail !== to ? requesterEmail : undefined;
     const orgName = org.name || "your organisation";
     const approved = decision === "approved";
-    const noteHtml = request.reviewNote
-      ? `<p style="margin:16px 0 0;color:#475569;font-family:sans-serif;line-height:1.5;"><strong>Note from the team:</strong> ${escapeHtml(request.reviewNote)}</p>`
-      : "";
-    const subject = approved
-      ? `Your branding change for ${orgName} was approved`
-      : `Update on your branding change for ${orgName}`;
-    const body = approved
-      ? `<h2 style="margin:0 0 8px;color:#0f172a;font-family:sans-serif;">Branding change approved ✅</h2>
-         <p style="margin:0;color:#475569;font-family:sans-serif;line-height:1.5;">Good news — the branding changes you requested for <strong>${escapeHtml(orgName)}</strong> have been approved and are now live on your site. You may need to refresh to see them.</p>${noteHtml}`
-      : `<h2 style="margin:0 0 8px;color:#0f172a;font-family:sans-serif;">Branding change not approved</h2>
-         <p style="margin:0;color:#475569;font-family:sans-serif;line-height:1.5;">We reviewed the branding changes you requested for <strong>${escapeHtml(orgName)}</strong>, and they weren't applied this time. You can adjust and submit a new request anytime from your admin settings.</p>${noteHtml}`;
-    await sendEmail(to, body, subject, [], cc ? { cc } : {});
+    await sendTemplateEmail("tenant.brandingDecision", {
+      to,
+      cc,
+      data: {
+        recipient: { name: request.requestedBy?.name || "", email: to },
+        tenant: { name: orgName },
+        branding: {
+          approved,
+          note: request.reviewNote || "",
+          settingsUrl: adminPortalUrl(org, "/admin/branding"),
+        },
+      },
+      meta: { requestId: String(request._id || ""), decision },
+    });
   } catch (e) {
     console.error("Branding decision email failed:", e.message);
   }
@@ -133,6 +136,28 @@ const input = require("../utils/operatorInput");
 const LIST_PROJECTION = "-payment -paypal -bankDetails -pendingAdmin -draftDesign -volunteerQuestions -eventAudiences";
 
 /**
+ * Columns the organisations table may sort by. Every path here is one the
+ * console actually renders — sorting by something the operator can't see is
+ * how a list stops being explicable.
+ */
+const ORGANISATION_SORTS = {
+  name: "name",
+  slug: "slug",
+  plan: "plan",
+  status: "subscriptionStatus",
+  created: "createdAt",
+};
+
+/** Columns the invoices table may sort by. */
+const INVOICE_SORTS = {
+  invoice: "number",
+  period: "periodStart",
+  amount: "amountDue",
+  status: "status",
+  date: "createdAt",
+};
+
+/**
  * GET /api/superadmin/organisations
  * List all organisations with pagination, search, and filter.
  */
@@ -140,7 +165,8 @@ exports.listOrganisations = async (req, res) => {
   try {
     const { page, limit, skip } = input.paging(req.query, { defaultLimit: 20, maxLimit: 100 });
 
-    const filter = {};
+    // Soft-deleted orgs never show up on the operator console.
+    const filter = { deletedAt: null };
     const rx = input.searchRegex(req.query.search);
     if (rx) filter.$or = [{ name: rx }, { slug: rx }];
     // `?plan[$ne]=null` arrives as an object and used to reach Mongo as a query
@@ -153,11 +179,15 @@ exports.listOrganisations = async (req, res) => {
     if (plan.value) filter.plan = plan.value;
     if (status.value) filter.subscriptionStatus = status.value;
 
+    const { sort, key: sortKey, dir: sortDir } = input.sorting(req.query, ORGANISATION_SORTS, {
+      defaultKey: "created",
+    });
+
     const [organisations, total] = await Promise.all([
       Organisation.find(filter)
         .select(LIST_PROJECTION)
         .populate("adminUserId", "name email")
-        .sort({ createdAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(limit),
       Organisation.countDocuments(filter),
@@ -168,8 +198,10 @@ exports.listOrganisations = async (req, res) => {
       pagination: {
         total,
         page,
+        limit,
         pages: Math.ceil(total / limit),
       },
+      sort: { key: sortKey, dir: sortDir },
     });
   } catch (error) {
     console.error("List organisations error:", error);
@@ -289,6 +321,56 @@ exports.suspendOrg = async (req, res) => {
   } catch (error) {
     console.error("Suspend org error:", error);
     res.status(500).json({ error: "Failed to suspend organisation" });
+  }
+};
+
+/**
+ * DELETE /api/superadmin/organisations/:id  { confirmName }
+ * Soft-deletes an organisation — same lifecycle effect as suspend (Stripe
+ * subscription cancelled, portal locked) plus `deletedAt`/`deletedBy`, which
+ * hides it from every SuperAdmin list/stat. Nothing is actually erased: donor
+ * orders, invoices and the audit trail stay in Mongo. Gated on the operator
+ * typing the organisation's exact name, mirroring the confirm-by-name pattern
+ * used for destructive actions elsewhere.
+ */
+exports.deleteOrganisation = async (req, res) => {
+  try {
+    const org = await Organisation.findById(req.params.id);
+    if (!org) return res.status(404).json({ error: "Organisation not found" });
+    if (org.deletedAt) return res.status(409).json({ error: "Organisation already deleted" });
+
+    const confirmName = input.text(req.body?.confirmName, "Confirmation", { max: 200, required: true, allowEmpty: false });
+    if (confirmName.error) return res.status(400).json({ error: confirmName.error });
+    if (confirmName.value !== org.name) {
+      return res.status(400).json({ error: "Typed name doesn't match the organisation's name" });
+    }
+
+    if (org.stripeSubscriptionId) {
+      try {
+        await stripe.subscriptions.cancel(org.stripeSubscriptionId);
+      } catch (stripeErr) {
+        console.error("Stripe cancellation failed (DB will still update):", stripeErr.message);
+      }
+    }
+
+    org.isActive = false;
+    org.subscriptionStatus = "cancelled";
+    org.deletedAt = new Date();
+    org.deletedBy = req.user?._id || null;
+    await org.save();
+
+    await writeAudit(req, "org.deleted", {
+      organisationId: org._id,
+      targetType: "organisation",
+      targetId: String(org._id),
+      meta: { name: org.name, slug: org.slug },
+    });
+    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+
+    res.json({ message: "Organisation deleted", organisation: org });
+  } catch (error) {
+    console.error("Delete org error:", error);
+    res.status(500).json({ error: "Failed to delete organisation" });
   }
 };
 
@@ -720,6 +802,11 @@ exports.endSupportSession = async (req, res) => {
 exports.listInvoices = async (req, res) => {
   try {
     const { page, limit, skip } = input.paging(req.query, { defaultLimit: 30, maxLimit: 100 });
+    // "Tenant" isn't sortable: the name lives on the populated Organisation,
+    // not on the invoice, so Mongo can't order by it without a $lookup — and
+    // sorting a page by a field the query can't reach would silently do
+    // nothing. The table renders that column unsortable rather than lying.
+    const invoiceSort = input.sorting(req.query, INVOICE_SORTS, { defaultKey: "date" });
 
     const filter = {};
     const status = input.filterValue(req.query.status);
@@ -747,7 +834,7 @@ exports.listInvoices = async (req, res) => {
     const [invoices, summaryAgg, collectedAgg] = await Promise.all([
       PlatformInvoice.find(filter)
         .populate("organisationId", "name slug branding")
-        .sort({ createdAt: -1 })
+        .sort(invoiceSort.sort)
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -786,7 +873,8 @@ exports.listInvoices = async (req, res) => {
         outstandingAmount: s.outstanding?.[0]?.amount || 0,
         outstandingCount: s.outstanding?.[0]?.count || 0,
       },
-      pagination: { total, page, pages: Math.ceil(total / limit) },
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+      sort: { key: invoiceSort.key, dir: invoiceSort.dir },
     });
   } catch (err) {
     console.error("List invoices error:", err);
@@ -804,8 +892,8 @@ exports.getBillingStats = async (req, res) => {
     // services/subscriptionMetrics.js so this screen and the Dashboard can never
     // quote different numbers again.
     const [orgFacetRes, recentSignups, planDocs, collectedAgg] = await Promise.all([
-      Organisation.aggregate([subscriptionMetrics.orgFacet()]),
-      Organisation.find()
+      Organisation.aggregate([{ $match: { deletedAt: null } }, subscriptionMetrics.orgFacet()]),
+      Organisation.find({ deletedAt: null })
         .populate("adminUserId", "name email")
         .sort({ createdAt: -1 })
         .limit(10)
@@ -859,6 +947,7 @@ exports.getDashboardStats = async (req, res) => {
     const [orgFacetRes, recentSignups, planDocs, collectedAgg, donationsAgg, counts] =
       await Promise.all([
         Organisation.aggregate([
+          { $match: { deletedAt: null } },
           subscriptionMetrics.orgFacet({
             newThisMonth: [{ $match: { createdAt: { $gte: startOfMonth } } }, { $count: "n" }],
             newLastMonth: [
@@ -876,7 +965,7 @@ exports.getDashboardStats = async (req, res) => {
             ],
           }),
         ]),
-        Organisation.find()
+        Organisation.find({ deletedAt: null })
           .populate("adminUserId", "name email")
           .sort({ createdAt: -1 })
           .limit(8)

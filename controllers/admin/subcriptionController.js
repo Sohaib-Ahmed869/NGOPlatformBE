@@ -6,7 +6,7 @@ const { getTenantStripe } = require("../../services/tenantStripe");
 // Send email when admin approves a cancellation request
 const sendCancellationApprovalEmail = async (subscription) => {
   try {
-    const { sendEmail } = require("../../services/emailUtil");
+    const { sendTemplateEmail } = require("../../services/emailUtil");
     const User = require("../../models/user");
     
     // Get user from the subscription
@@ -20,42 +20,23 @@ const sendCancellationApprovalEmail = async (subscription) => {
 
     const orgIdentity = await getOrgIdentity(subscription.organisationId);
 
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            orgIdentity.logo
-              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #4a7c59;">Subscription Cancellation Approved</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>We are writing to confirm that your request to cancel your recurring donation has been approved.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Subscription Details:</h3>
-          <p><strong>Amount:</strong> $${subscription.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${subscription.recurringDetails.frequency}</p>
-          <p><strong>Cancellation Date:</strong> ${new Date().toLocaleDateString()}</p>
-        </div>
-
-        <p>Thank you for your generous support. We hope you will consider supporting our cause again in the future.</p>
-        
-        <p>If you have any questions, please don't hesitate to contact us.</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      user.email,
-      emailBody,
-      `Subscription Cancellation Approved - ${orgIdentity.name}`,
-      [],
-      { organisationId: subscription.organisationId }
-    );
+    const result = await sendTemplateEmail("subscription.cancellationApproved", {
+      to: user.email,
+      organisationId: subscription.organisationId,
+      data: {
+        donor: { name: user.name || "", email: user.email },
+        subscription: {
+          id: subscription.donationId,
+          amount: subscription.recurringDetails?.amount || subscription.totalAmount,
+          currency: "AUD",
+          frequency: subscription.recurringDetails?.frequency || "",
+          startDate: subscription.recurringDetails?.startDate || subscription.createdAt,
+          paymentsMade: subscription.recurringDetails?.paymentHistory?.length || 0,
+          totalGiven: subscription.totalAmount,
+        },
+      },
+      meta: { donationId: subscription.donationId },
+    });
 
     if (!result.success) {
       console.error("Failed to send cancellation approval email:", result.error);
@@ -70,7 +51,7 @@ const sendCancellationApprovalEmail = async (subscription) => {
 // Send email when admin denies a cancellation request
 const sendCancellationDenialEmail = async (subscription) => {
   try {
-    const { sendEmail } = require("../../services/emailUtil");
+    const { sendTemplateEmail } = require("../../services/emailUtil");
     const User = require("../../models/user");
     
     // Get user from the subscription
@@ -84,41 +65,21 @@ const sendCancellationDenialEmail = async (subscription) => {
 
     const orgIdentity = await getOrgIdentity(subscription.organisationId);
 
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            orgIdentity.logo
-              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #dc2626;">Subscription Cancellation Request Denied</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>We are writing to inform you that your request to cancel your recurring donation could not be processed at this time.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Subscription Details:</h3>
-          <p><strong>Amount:</strong> $${subscription.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${subscription.recurringDetails.frequency}</p>
-        </div>
-
-        ${orgIdentity.email ? `<p>If you have any questions or would like to discuss this further, please contact us at ${orgIdentity.email}.</p>` : ""}
-        
-        <p>Thank you for your continued support.</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      user.email,
-      emailBody,
-      `Subscription Cancellation Request Update - ${orgIdentity.name}`,
-      [],
-      { organisationId: subscription.organisationId }
-    );
+    const result = await sendTemplateEmail("subscription.cancellationDeclined", {
+      to: user.email,
+      organisationId: subscription.organisationId,
+      data: {
+        donor: { name: user.name || "", email: user.email },
+        subscription: {
+          id: subscription.donationId,
+          amount: subscription.recurringDetails?.amount || subscription.totalAmount,
+          currency: "AUD",
+          frequency: subscription.recurringDetails?.frequency || "",
+        },
+        note: req.body?.reason || req.body?.note || "",
+      },
+      meta: { donationId: subscription.donationId },
+    });
 
     if (!result.success) {
       console.error("Failed to send cancellation denial email:", result.error);

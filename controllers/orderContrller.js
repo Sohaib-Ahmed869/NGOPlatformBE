@@ -13,7 +13,7 @@ const {
 } = require("../services/stripeCustomers");
 const { cancelAtUnix, clampNextPaymentDate } = require("../services/recurringDates");
 const { sendReceiptEmail } = require("../services/recieptUtils");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 const { upload } = require("../config/s3");
@@ -99,48 +99,19 @@ const createUserForDonor = async (donorDetails, donationId, organisationId = nul
     const identity = await getOrgIdentity(organisationId);
     const loginUrl = identity.loginUrl || "";
 
-    const emailSubject = `Welcome to ${identity.name} - Your Account Details`;
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 5px;">
-      
-        
-        <h2 style="color: #4CAF50; text-align: center;">Thank You for Your Donation!</h2>
-        
-        <p>Dear ${donorDetails.name},</p>
-        
-        <p>Thank you for your generous donation (ID: <strong>${donationId}</strong>) to ${identity.name}. Your contribution will help us make a meaningful difference in the lives of those in need.</p>
-        
-        <p>We've created an account for you so you can easily track your donations and manage your giving in the future.</p>
-        
-        <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <p><strong>Your Account Details:</strong></p>
-          <p>Email: ${donorDetails.email}</p>
-          <p>Password: ${password}</p>
-          <p style="font-size: 12px; color: #666;">Please keep this information secure. We recommend changing your password after your first login.</p>
-        </div>
-        
-        ${
-          loginUrl
-            ? `<div style="text-align: center; margin: 30px 0;">
-          <a href="${loginUrl}" style="background-color: #4CAF50; color: white; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">Login to Your Account</a>
-        </div>`
-            : ""
-        }
-        
-        <p>If you have any questions or need assistance, please don't hesitate to contact our team.</p>
-        
-        <p>Warm regards,<br>The ${identity.name} Team</p>
-        
-        <div style="font-size: 12px; color: #666; border-top: 1px solid #e0e0e0; margin-top: 20px; padding-top: 20px;">
-          <p>This is an automated email. Please do not reply to this message.</p>
-        </div>
-      </div>
-    `;
-
     // Welcome email is best-effort — never let a delivery failure prevent the
     // account from being created/linked to the order.
     try {
-      await sendEmail(donorDetails.email, emailBody, emailSubject, [], { organisationId });
+      await sendTemplateEmail("account.donorWelcome", {
+        to: donorDetails.email,
+        organisationId,
+        data: {
+          donor: { name: donorDetails.name || "", email: donorDetails.email },
+          donation: { id: donationId },
+          account: { password, loginUrl },
+        },
+        meta: { donationId },
+      });
       console.log(`Sent welcome email to: ${donorDetails.email}`);
     } catch (emailErr) {
       console.error(`Welcome email failed for ${donorDetails.email}:`, emailErr.message);
@@ -305,54 +276,23 @@ const sendBankTransferPendingEmail = async (order) => {
     // one charity's, on every tenant's email.
     const identity = await getOrgIdentity(order.organisationId);
 
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            identity.logo
-              ? `<img src="${identity.logo}" alt="${identity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${identity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #4a7c59;">Bank Transfer Donation Pending</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>Thank you for your generous donation to ${identity.name}. Your donation is currently pending approval.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Donation Details:</h3>
-          <p><strong>Donation ID:</strong> ${order.donationId}</p>
-          <p><strong>Date:</strong> ${new Date(
-            order.createdAt
-          ).toLocaleDateString()}</p>
-          <p><strong>Amount:</strong> $${order.totalAmount.toFixed(2)} AUD</p>
-        </div>
-
-        <div style="background-color: #fffaed; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #ffc107;">
-          <h3 style="margin-top: 0; color: #856404;">Next Steps:</h3>
-          <p>To complete your donation, please either:</p>
-          <ol style="padding-left: 20px;">
-            <li>Upload proof of payment through our website using your donation ID: ${
-              order.donationId
-            }</li>
-            ${identity.email ? `<li>Email your payment proof to: ${identity.email}</li>` : ""}
-          </ol>
-          <p>Your donation will be processed once we receive and verify your payment proof.</p>
-        </div>
-        
-        <p>Thank you for your support!</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      user.email,
-      emailBody,
-      `Bank Transfer Donation Pending - ${identity.name}`,
-      [],
-      { organisationId: order.organisationId }
-    );
+    const result = await sendTemplateEmail("donation.bankTransferPending", {
+      to: user.email,
+      organisationId: order.organisationId,
+      data: {
+        donor: { name: user.name || "", email: user.email },
+        donation: {
+          id: order.donationId,
+          amount: order.totalAmount,
+          currency: "AUD",
+          date: order.createdAt,
+        },
+        proof: {
+          uploadUrl: identity.portalUrl ? `${identity.portalUrl}/upload-proof` : "",
+        },
+      },
+      meta: { donationId: order.donationId },
+    });
 
     if (!result.success) {
       console.error(
@@ -396,72 +336,41 @@ const sendCancellationRequestEmail = async (order) => {
     // disclosed to a third party. Route it to the tenant that owns the donation.
     const adminRecipient = await getOrgAdminEmail(order.organisationId);
 
-    const adminEmailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #4a7c59;">Subscription Cancellation Request</h2>
-        
-        <p>A donor has requested to cancel their recurring donation.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Donation Details:</h3>
-          <p><strong>Donation ID:</strong> ${order.donationId}</p>
-          <p><strong>Donor Name:</strong> ${user.name}</p>
-          <p><strong>Donor Email:</strong> ${user.email}</p>
-          <p><strong>Amount:</strong> $${order.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${order.recurringDetails.frequency}</p>
-          <p><strong>Start Date:</strong> ${new Date(
-            order.recurringDetails.startDate
-          ).toLocaleDateString()}</p>
-        </div>
-
-        <p>Please review this request and take appropriate action through the admin panel.</p>
-      </div>
-    `;
+    const subscriptionVars = {
+      id: order.donationId,
+      amount: order.totalAmount,
+      currency: "AUD",
+      frequency: order.recurringDetails?.frequency || "",
+      startDate: order.recurringDetails?.startDate || order.createdAt,
+      manageUrl: identity.portalUrl ? `${identity.portalUrl}/user/subscriptions` : "",
+    };
+    const donorVars = { name: user.name || "", email: user.email, phone: user.phone || "" };
 
     if (adminRecipient) {
-      await sendEmail(
-        adminRecipient,
-        adminEmailBody,
-        `Subscription Cancellation Request - ${identity.name}`,
-        [],
-        { organisationId: order.organisationId }
-      );
+      await sendTemplateEmail("subscription.cancellationRequestAdmin", {
+        to: adminRecipient,
+        organisationId: order.organisationId,
+        data: {
+          donor: donorVars,
+          subscription: subscriptionVars,
+          reason: order.cancellationReason || "",
+          adminUrl: identity.portalUrl ? `${identity.portalUrl}/admin/subscriptions` : "",
+        },
+        meta: { donationId: order.donationId },
+      });
     } else {
       // Better to log loudly than to email donor details to whoever is hardcoded.
       console.error(
-        `No admin contact for organisation ${order.organisationId}; cancellation request for ${order.donationId} was not emailed.`
+        `No admin contact for organisation ${order.organisationId}; cancellation request for ${order.donationId} was not emailed.`,
       );
     }
 
-    // Send confirmation email to donor
-    const donorEmailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #4a7c59;">Cancellation Request Received</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>We have received your request to cancel your recurring donation.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Donation Details:</h3>
-          <p><strong>Donation ID:</strong> ${order.donationId}</p>
-          <p><strong>Amount:</strong> $${order.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${order.recurringDetails.frequency}</p>
-        </div>
-
-        <p>Our admin team will review your request and process it accordingly. You will receive another email once the cancellation is confirmed.</p>
-        
-        <p>Thank you for your support!</p>
-      </div>
-    `;
-
-    await sendEmail(
-      user.email,
-      donorEmailBody,
-      `Cancellation Request Received - ${identity.name}`,
-      [],
-      { organisationId: order.organisationId }
-    );
+    await sendTemplateEmail("subscription.cancellationRequestDonor", {
+      to: user.email,
+      organisationId: order.organisationId,
+      data: { donor: donorVars, subscription: subscriptionVars },
+      meta: { donationId: order.donationId },
+    });
 
     console.log(
       `Cancellation request emails sent for order: ${order.donationId}`

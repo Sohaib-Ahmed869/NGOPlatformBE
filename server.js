@@ -87,7 +87,9 @@ app.use(
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS' ,'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Slug'],
+    // X-Socket-Id: the caller's live socket connection, echoed back on the
+    // event we emit so that tab can skip refetching its own change.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Slug', 'X-Socket-Id'],
     // Let browsers cache preflight (OPTIONS) responses for 10 minutes instead
     // of Chrome's 5-second default — halves the request rows in devtools.
     maxAge: 600
@@ -193,6 +195,7 @@ tenantRouter.use("/api/admin/pages", adminPageRoutes);
 tenantRouter.use("/api/admin/payment-config", require("./routes/admin/paymentConfig.routes"));
 tenantRouter.use("/api/admin/email-config", require("./routes/admin/emailConfig.routes"));
 tenantRouter.use("/api/admin/mailboxes", require("./routes/admin/mailbox.routes"));
+tenantRouter.use("/api/admin/email-templates", require("./routes/admin/emailTemplates.routes"));
 tenantRouter.use("/api/admin/paypal-config", require("./routes/admin/paypalConfig.routes"));
 tenantRouter.use("/api/paypal", require("./routes/paypalRoutes"));
 

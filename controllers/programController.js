@@ -1,5 +1,6 @@
 const Program = require("../models/program");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
+const { publicSiteUrl } = require("../utils/tenantUrls");
 const { deleteS3Object } = require("../config/s3");
 
 /**
@@ -224,21 +225,32 @@ exports.postFollowUp = async (req, res) => {
     // Email donors
     const donorEmails = [...new Set(program.donors.map((d) => d.email).filter(Boolean))];
     if (donorEmails.length > 0) {
-      const imgHtml = imageUrls.length > 0
-        ? imageUrls.map((url) => `<img src="${url}" style="max-width:400px;border-radius:8px;margin:8px 0;" />`).join("")
-        : "";
-      const emailBody = `
-        <h2>Update on "${program.title}"</h2>
-        <p>${text}</p>
-        ${imgHtml}
-        <p><em>Thank you for your generous support!</em></p>
-      `;
-      const promises = donorEmails.map((email) =>
-        sendEmail(email, emailBody, `Update: ${program.title}`, [], { organisationId: program.organisationId }).catch((err) =>
-          console.error(`Failed to email ${email}:`, err)
-        )
+      const data = {
+        program: {
+          title: program.title,
+          url: publicSiteUrl(req.organisation, `/programs/${program.slug || program._id}`),
+          raised: program.raisedAmount || 0,
+          goal: program.goalAmount || 0,
+          currency: program.currency || "AUD",
+        },
+        update: {
+          title: `Update on "${program.title}"`,
+          body: text,
+          // One hero image — an email is not a gallery, and every extra remote
+          // image is another thing a client can block.
+          image: imageUrls[0] || "",
+        },
+      };
+      await Promise.allSettled(
+        donorEmails.map((email) =>
+          sendTemplateEmail("program.update", {
+            to: email,
+            organisationId: program.organisationId,
+            data: { ...data, recipient: { email } },
+            meta: { programId: String(program._id) },
+          }),
+        ),
       );
-      await Promise.allSettled(promises);
     }
 
     res.json({ message: "Follow-up update posted", update });
@@ -445,26 +457,30 @@ async function sendCompletionEmails(program) {
   const donorEmails = [...new Set(program.donors.map((d) => d.email).filter(Boolean))];
   if (donorEmails.length === 0) return;
 
-  const pct = program.goalAmount > 0
-    ? Math.round((program.raisedAmount / program.goalAmount) * 100)
-    : 0;
+  const pct =
+    program.goalAmount > 0 ? Math.round((program.raisedAmount / program.goalAmount) * 100) : 0;
 
-  const emailBody = `
-    <h2>"${program.title}" Has Been Completed</h2>
-    <p>We're pleased to share the final results of this program:</p>
-    <ul>
-      <li><strong>Goal:</strong> $${program.goalAmount.toLocaleString()}</li>
-      <li><strong>Raised:</strong> $${program.raisedAmount.toLocaleString()}</li>
-      <li><strong>Achievement:</strong> ${pct}%</li>
-      <li><strong>Total Donors:</strong> ${program.donors.length}</li>
-    </ul>
-    <p>Thank you for your generous contribution to making this possible!</p>
-  `;
+  const data = {
+    program: {
+      title: program.title,
+      url: "",
+      raised: program.raisedAmount || 0,
+      goal: program.goalAmount || 0,
+      currency: program.currency || "AUD",
+      summary: `${pct}% of the goal, from ${program.donors.length} ${
+        program.donors.length === 1 ? "donor" : "donors"
+      }.`,
+    },
+  };
 
-  const promises = donorEmails.map((email) =>
-    sendEmail(email, emailBody, `Program Completed: ${program.title}`, [], { organisationId: program.organisationId }).catch((err) =>
-      console.error(`Failed to email ${email}:`, err)
-    )
+  await Promise.allSettled(
+    donorEmails.map((email) =>
+      sendTemplateEmail("program.completed", {
+        to: email,
+        organisationId: program.organisationId,
+        data: { ...data, recipient: { email } },
+        meta: { programId: String(program._id) },
+      }),
+    ),
   );
-  await Promise.allSettled(promises);
 }

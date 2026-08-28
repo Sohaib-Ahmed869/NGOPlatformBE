@@ -4,7 +4,7 @@ const Event = require("../models/event");
 const EventRegistration = require("../models/eventRegistration");
 const User = require("../models/user");
 const Organisation = require("../models/organisation");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const { emitToOrg } = require("../services/socket");
 const { runCappedExport } = require("../utils/exportLimit");
 
@@ -47,80 +47,38 @@ const EMAILABLE = ["shortlisted", "approved", "rejected"];
 
 const fullName = (v) => `${v.firstName || ""} ${v.lastName || ""}`.trim() || "there";
 
-const esc = (s) =>
-  String(s == null ? "" : s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-
-// Tenant-branded email shell so volunteer mail matches the contact-reply look.
-function emailShell(orgName, inner) {
-  return `
-    <div style="font-family:Arial,sans-serif;font-size:14px;color:#222;line-height:1.6">
-      ${inner}
-      <hr style="border:none;border-top:1px solid #eee;margin:18px 0"/>
-      <p style="color:#888;font-size:12px">Sent by ${esc(orgName)}.</p>
-    </div>`;
-}
-
-// Subject + body for each volunteer-facing email. Returns null when a status
-// has no template (so we simply don't email).
-function volunteerEmail(kind, { orgName, volunteer }) {
-  const name = esc(volunteer.firstName || "there");
-  switch (kind) {
-    case "confirmation":
-      return {
-        subject: `We received your volunteer application — ${orgName}`,
-        html: emailShell(
-          orgName,
-          `<p>Hi ${name},</p>
-           <p>Thank you for offering to volunteer with <strong>${esc(orgName)}</strong>. We've received your
-           application and our team will review it shortly. We'll be in touch with the next steps.</p>
-           <p>With gratitude,<br/>The ${esc(orgName)} team</p>`
-        ),
-      };
-    case "shortlisted":
-      return {
-        subject: `You've been shortlisted — ${orgName}`,
-        html: emailShell(
-          orgName,
-          `<p>Hi ${name},</p>
-           <p>Good news — you've been <strong>shortlisted</strong> to volunteer with ${esc(orgName)}.
-           A member of our team will reach out soon with what happens next.</p>`
-        ),
-      };
-    case "approved":
-      return {
-        subject: `Welcome aboard — your volunteer application was approved`,
-        html: emailShell(
-          orgName,
-          `<p>Hi ${name},</p>
-           <p>We're delighted to let you know your application to volunteer with
-           <strong>${esc(orgName)}</strong> has been <strong>approved</strong>. Welcome to the team!
-           We'll follow up with details about upcoming opportunities.</p>`
-        ),
-      };
-    case "rejected":
-      return {
-        subject: `An update on your volunteer application`,
-        html: emailShell(
-          orgName,
-          `<p>Hi ${name},</p>
-           <p>Thank you for your interest in volunteering with ${esc(orgName)} and for the time you put
-           into your application. After careful review we're unable to move forward at this time, but we'd
-           love for you to apply again in the future.</p>`
-        ),
-      };
-    default:
-      return null;
-  }
-}
+// Which catalog template each volunteer-facing moment maps to. A status with no
+// entry simply isn't emailed about. Content lives in config/emailCatalog.js and
+// is editable in the console — see services/emailTemplates.js.
+const VOLUNTEER_TEMPLATES = {
+  confirmation: "volunteer.applicationReceived",
+  shortlisted: "volunteer.shortlisted",
+  approved: "volunteer.approved",
+  rejected: "volunteer.rejected",
+};
 
 // Fire-and-log: never let an email failure break the request flow.
-async function tryEmail(to, tmpl, organisation) {
-  if (!to || !tmpl) return { success: false };
+async function tryEmail(kind, volunteer, organisation) {
+  const key = VOLUNTEER_TEMPLATES[kind];
+  if (!key || !volunteer?.email) return { success: false };
   try {
-    return await sendEmail(to, tmpl.html, tmpl.subject, [], {
+    return await sendTemplateEmail(key, {
+      to: volunteer.email,
       org: organisation,
-      fromName: organisation?.name,
       replyTo: organisation?.contactEmail || undefined,
+      data: {
+        recipient: {
+          name: fullName(volunteer),
+          firstName: volunteer.firstName || "",
+          email: volunteer.email,
+        },
+        volunteer: {
+          interests: Array.isArray(volunteer.interests)
+            ? volunteer.interests.join(", ")
+            : volunteer.interests || "",
+        },
+      },
+      meta: { volunteerId: String(volunteer._id || ""), status: kind },
     });
   } catch (err) {
     console.error("Volunteer email failed:", err.message);
@@ -158,14 +116,7 @@ exports.createJoin = async (req, res) => {
     emitToOrg(join.organisationId, "volunteer:new", { volunteer: join });
 
     // Best-effort confirmation email to the applicant.
-    tryEmail(
-      join.email,
-      volunteerEmail("confirmation", {
-        orgName: req.organisation?.name || "our team",
-        volunteer: join,
-      }),
-      req.organisation
-    );
+    tryEmail("confirmation", join, req.organisation);
 
     res.status(201).json(join);
   } catch (error) {
@@ -419,11 +370,7 @@ exports.updateJoinStatus = async (req, res) => {
     // Notify the applicant when asked and the status has a template.
     let emailed = false;
     if (notify && EMAILABLE.includes(status)) {
-      const result = await tryEmail(
-        join.email,
-        volunteerEmail(status, { orgName: req.organisation?.name || "our team", volunteer: join }),
-        req.organisation
-      );
+      const result = await tryEmail(status, join, req.organisation);
       emailed = !!result?.success;
     }
 

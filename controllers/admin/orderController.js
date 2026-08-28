@@ -2,7 +2,7 @@
 const { getOrgIdentity } = require("../../utils/orgIdentity");
 const Order = require("../../models/order");
 const User = require("../../models/user");
-const { sendEmail } = require("../../services/emailUtil");
+const { sendTemplateEmail } = require("../../services/emailUtil");
 const { getTenantStripe } = require("../../services/tenantStripe");
 const { runCappedExport, toCsv } = require("../../utils/exportLimit");
 
@@ -681,43 +681,26 @@ const sendCancellationConfirmationEmail = async (donation) => {
     // Tenant identity — logo and contact address were one charity's, on every tenant's email.
     const orgIdentity = await getOrgIdentity(donation.organisationId);
 
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            orgIdentity.logo
-              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #4a7c59;">Subscription Cancelled</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>Your request to cancel your recurring donation has been processed.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Donation Details:</h3>
-          <p><strong>Donation ID:</strong> ${donation.donationId}</p>
-          <p><strong>Date:</strong> ${new Date(donation.createdAt).toLocaleDateString()}</p>
-          <p><strong>Amount:</strong> $${donation.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${donation.recurringDetails.frequency}</p>
-        </div>
-
-        <p>Your recurring donation has been cancelled and no further payments will be processed.</p>
-        
-        <p>Thank you for your past support!</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      user.email,
-      emailBody,
-      `Subscription Cancelled - ${orgIdentity.name}`,
-      [],
-      { organisationId: donation.organisationId }
-    );
+    const result = await sendTemplateEmail("subscription.cancelled", {
+      to: user.email,
+      organisationId: donation.organisationId,
+      data: {
+        donor: { name: user.name || "", email: user.email },
+        subscription: {
+          id: donation.donationId,
+          amount: donation.recurringDetails?.amount || donation.totalAmount,
+          // The Order schema has no currency field — every tenant bills in AUD
+          // today. When that changes this is the one place to read it from.
+          currency: "AUD",
+          frequency: donation.recurringDetails?.frequency || "",
+          startDate: donation.recurringDetails?.startDate || donation.createdAt,
+          paymentsMade: donation.recurringDetails?.paymentHistory?.length || 0,
+          totalGiven: donation.totalAmount,
+          manageUrl: orgIdentity.portalUrl ? `${orgIdentity.portalUrl}/user/subscriptions` : "",
+        },
+      },
+      meta: { donationId: donation.donationId },
+    });
 
     if (!result.success) {
       console.error("Failed to send cancellation confirmation email:", result.error);
@@ -1191,42 +1174,22 @@ const sendBankTransferApprovalEmail = async (donation) => {
 
     const orgIdentity = await getOrgIdentity(donation.organisationId);
 
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            orgIdentity.logo
-              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #4a7c59;">Donation Approved</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>We are pleased to inform you that your bank transfer donation has been approved.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Donation Details:</h3>
-          <p><strong>Donation ID:</strong> ${donation.donationId}</p>
-          <p><strong>Date:</strong> ${new Date(donation.createdAt).toLocaleDateString()}</p>
-          <p><strong>Amount:</strong> $${donation.totalAmount.toFixed(2)} AUD</p>
-        </div>
-
-        <p>You can download your tax receipt from the "My donations" page after logging in to your account.</p>
-        
-        <p>Thank you for your generous support!</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      user.email,
-      emailBody,
-      `Donation Approved - ${orgIdentity.name}`,
-      [],
-      { organisationId: donation.organisationId }
-    );
+    const result = await sendTemplateEmail("donation.approved", {
+      to: user.email,
+      organisationId: donation.organisationId,
+      data: {
+        donor: { name: user.name || "", email: user.email },
+        donation: {
+          id: donation.donationId,
+          amount: donation.totalAmount,
+          currency: "AUD",
+          date: donation.createdAt,
+          cause: donation.donationType || "",
+          receiptUrl: orgIdentity.portalUrl ? `${orgIdentity.portalUrl}/user/donations` : "",
+        },
+      },
+      meta: { donationId: donation.donationId },
+    });
 
     if (!result.success) {
       console.error("Failed to send donation approval email:", result.error);
@@ -1261,42 +1224,21 @@ const sendBankTransferCancellationEmail = async (donation) => {
 
     const orgIdentity = await getOrgIdentity(donation.organisationId);
 
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            orgIdentity.logo
-              ? `<img src="${orgIdentity.logo}" alt="${orgIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${orgIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #dc2626;">Donation Cancelled</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>We regret to inform you that your bank transfer donation has been cancelled.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Donation Details:</h3>
-          <p><strong>Donation ID:</strong> ${donation.donationId}</p>
-          <p><strong>Date:</strong> ${new Date(donation.createdAt).toLocaleDateString()}</p>
-          <p><strong>Amount:</strong> $${donation.totalAmount.toFixed(2)} AUD</p>
-        </div>
-
-        ${orgIdentity.email ? `<p>If you believe this is an error, please contact us at ${orgIdentity.email}</p>` : ""}
-        
-        <p>Thank you for your interest in supporting our cause.</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      user.email,
-      emailBody,
-      `Donation Cancelled - ${orgIdentity.name}`,
-      [],
-      { organisationId: donation.organisationId }
-    );
+    const result = await sendTemplateEmail("donation.cancelled", {
+      to: user.email,
+      organisationId: donation.organisationId,
+      data: {
+        donor: { name: user.name || "", email: user.email },
+        donation: {
+          id: donation.donationId,
+          amount: donation.totalAmount,
+          currency: "AUD",
+          date: donation.createdAt,
+        },
+        reason: donation.cancellationReason || "",
+      },
+      meta: { donationId: donation.donationId },
+    });
 
     if (!result.success) {
       console.error("Failed to send donation cancellation email:", result.error);
@@ -1331,45 +1273,36 @@ const sendDonorUpdateEmail = async (donation, update) => {
     }
 
     const isCloseOff = update.type === "close-off";
-    const heading = isCloseOff ? "Your Donation Is Complete" : "An Update on Your Donation";
-    const accent = isCloseOff ? "#4a7c59" : "#2563eb";
+    const identity = await getOrgIdentity(donation.organisationId);
 
-    const imagesHtml =
-      update.images && update.images.length > 0
-        ? `<div style="margin-top:15px;">${update.images
-            .map(
-              (img) =>
-                `<img src="${img}" alt="Update image" style="max-width:100%;border-radius:8px;margin-bottom:10px;" />`
-            )
-            .join("")}</div>`
-        : "";
-
-    const emailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: ${accent};">${heading}</h2>
-        <p>Dear ${donation.donorDetails?.name || "Donor"},</p>
-        <p>${
-          isCloseOff
-            ? "We're writing to let you know your contribution has been put to work. Thank you for your generosity."
-            : "We wanted to share an update on the cause you supported."
-        }</p>
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <p><strong>Donation ID:</strong> ${donation.donationId}</p>
-          ${update.comment ? `<p style="white-space:pre-line;">${update.comment}</p>` : ""}
-          ${imagesHtml}
-        </div>
-        <p>Thank you for your continued support.</p>
-      </div>
-    `;
-
-    const result = await sendEmail(
-      recipient,
-      emailBody,
-      isCloseOff
-        ? "Your donation is complete — thank you"
-        : "An update on your donation",
-      [],
-      { organisationId: donation.organisationId }
+    // Two genuinely different emails, so two templates rather than one that
+    // branches on a flag — each is editable on its own in the console.
+    const result = await sendTemplateEmail(
+      isCloseOff ? "donation.completed" : "donation.update",
+      {
+        to: recipient,
+        organisationId: donation.organisationId,
+        data: {
+          donor: { name: donation.donorDetails?.name || "", email: recipient },
+          donation: {
+            id: donation.donationId,
+            amount: donation.totalAmount,
+            totalPaid: donation.totalAmount,
+            currency: "AUD",
+            cause: donation.donationType || "",
+            receiptUrl: identity.portalUrl ? `${identity.portalUrl}/user/donations` : "",
+          },
+          isCloseOff,
+          note: isCloseOff ? update.comment || "" : "",
+          update: {
+            body: update.comment || "",
+            // One hero image: an email is not a gallery, and every extra remote
+            // image is another thing a mail client can block.
+            image: (update.images || [])[0] || "",
+          },
+        },
+        meta: { donationId: donation.donationId, updateType: update.type },
+      },
     );
 
     if (!result.success) {

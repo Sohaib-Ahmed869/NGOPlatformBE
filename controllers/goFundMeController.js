@@ -3,7 +3,7 @@ const GoFundMeDonation = require("../models/goFundMeDonations");
 const User = require("../models/user");
 const mongoose = require("mongoose");
 const { deleteS3Object } = require("../config/s3");
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const { getTenantStripe } = require("../services/tenantStripe");
 const { getPaypalClient } = require("../services/tenantPaypal");
 
@@ -32,16 +32,8 @@ const CATEGORY_SYNONYMS = {
 const money = (n) => `$${Number(n || 0).toFixed(2)} AUD`;
 
 // Tenant-branded email shell (no hardcoded foundation branding).
-function shell(orgName, inner) {
-  return `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#222">
-      ${inner}
-      <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
-      <p style="font-size:12px;color:#888">Sent by ${orgName}.</p>
-    </div>`;
-}
 function emailOpts(org) {
-  return { org, fromName: org?.name, replyTo: org?.contactEmail || undefined };
+  return { org, replyTo: org?.contactEmail || undefined };
 }
 
 // Notify the tenant's admins that a new request needs review.
@@ -55,21 +47,32 @@ async function notifyAdmins(campaign, org) {
     if (!emails.length) return;
 
     const requester = await User.findById(campaign.userId).select("name email");
-    const html = shell(
-      org?.name || "your organisation",
-      `<h2 style="color:#4a7c59">New fundraiser request</h2>
-       <p>A supporter submitted a fundraiser that needs review.</p>
-       <div style="background:#f9f9f9;padding:15px;border-radius:6px;margin:16px 0">
-         <p><strong>Title:</strong> ${campaign.title}</p>
-         <p><strong>Category:</strong> ${displayCategory(campaign.category, campaign.customCategory)}</p>
-         <p><strong>Target:</strong> ${money(campaign.targetAmount)}</p>
-         <p><strong>Urgency:</strong> ${campaign.urgencyLevel}</p>
-         <p><strong>By:</strong> ${requester?.name || "Unknown"} (${requester?.email || "—"})</p>
-       </div>
-       <p>Review it in the admin panel to approve or reject.</p>`
-    );
+    const data = {
+      fundraiser: {
+        title: campaign.title,
+        goal: campaign.targetAmount,
+        currency: "AUD",
+        organiser: requester?.name || "Unknown",
+        organiserEmail: requester?.email || "",
+        story: [
+          `Category: ${displayCategory(campaign.category, campaign.customCategory)}`,
+          `Urgency: ${campaign.urgencyLevel}`,
+          campaign.story || campaign.description || "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      },
+      adminUrl: `${req_origin_fallback(org)}/admin/p2p-campaigns`,
+    };
     await Promise.allSettled(
-      emails.map((e) => sendEmail(e, html, `New fundraiser request — ${org?.name || ""}`, [], emailOpts(org)))
+      emails.map((e) =>
+        sendTemplateEmail("fundraiser.submittedAdminAlert", {
+          to: e,
+          ...emailOpts(org),
+          data,
+          meta: { campaignId: String(campaign._id) },
+        }),
+      ),
     );
   } catch (err) {
     console.error("notifyAdmins error:", err.message);
@@ -83,17 +86,21 @@ async function notifyRequester(campaign, org, status, adminNotes) {
     if (!user?.email) return;
     const approved = status === "approved";
     const base = req_origin_fallback(org);
-    const html = shell(
-      org?.name || "your organisation",
-      `<h2 style="color:${approved ? "#4a7c59" : "#d32f2f"}">Fundraiser ${approved ? "approved" : "rejected"}</h2>
-       <p>Dear ${user.name || "supporter"},</p>
-       <p>Your fundraiser "<strong>${campaign.title}</strong>" has been <strong>${status}</strong>.</p>
-       ${adminNotes ? `<div style="background:#f9f9f9;padding:15px;border-radius:6px;margin:16px 0"><strong>Notes:</strong><p>${adminNotes}</p></div>` : ""}
-       ${approved
-         ? `<p>It's now live and can receive donations:</p><p><a href="${base}/p2p-campaigns/${campaign.slug}" style="background:#4a7c59;color:#fff;padding:10px 18px;text-decoration:none;border-radius:6px">View your fundraiser</a></p>`
-         : `<p>If you have questions about this decision, please get in touch.</p>`}`
-    );
-    await sendEmail(user.email, html, `Fundraiser ${status} — ${org?.name || ""}`, [], emailOpts(org));
+    await sendTemplateEmail("fundraiser.statusUpdate", {
+      to: user.email,
+      ...emailOpts(org),
+      data: {
+        recipient: { name: user.name || "", email: user.email },
+        fundraiser: {
+          title: campaign.title,
+          status,
+          isApproved: approved,
+          url: `${base}/p2p-campaigns/${campaign.slug}`,
+        },
+        reason: adminNotes || "",
+      },
+      meta: { campaignId: String(campaign._id), status },
+    });
   } catch (err) {
     console.error("notifyRequester error:", err.message);
   }
@@ -533,19 +540,22 @@ function campaignSummary(c) {
 
 function sendDonorReceipt(org, donorEmail, donorName, campaign, gross, method) {
   try {
-    const html = shell(
-      org?.name || "your organisation",
-      `<h2 style="color:#4a7c59">Thank you for your donation!</h2>
-       <p>Dear ${donorName || "Donor"},</p>
-       <p>We've received your donation to <strong>${campaign?.title || "a fundraiser"}</strong>.</p>
-       <div style="background:#f9f9f9;padding:15px;border-radius:6px;margin:16px 0">
-         <p><strong>Amount:</strong> ${money(gross)}</p>
-         <p><strong>Method:</strong> ${method}</p>
-         <p><strong>Date:</strong> ${new Date().toLocaleDateString()}</p>
-       </div>
-       <p>Your support makes a real difference. Thank you!</p>`
-    );
-    return sendEmail(donorEmail, html, `Thank you for your donation — ${org?.name || ""}`, [], emailOpts(org));
+    return sendTemplateEmail("fundraiser.donationThankYou", {
+      to: donorEmail,
+      ...emailOpts(org),
+      data: {
+        donor: { name: donorName || "", email: donorEmail },
+        donation: { amount: gross, currency: "AUD", method },
+        fundraiser: {
+          title: campaign?.title || "",
+          organiser: campaign?.organiserName || "",
+          url: campaign?.slug ? `${req_origin_fallback(org)}/p2p-campaigns/${campaign.slug}` : "",
+          raised: campaign?.currentAmount || 0,
+          goal: campaign?.targetAmount || 0,
+        },
+      },
+      meta: { campaignSlug: campaign?.slug || "" },
+    });
   } catch (e) {
     console.error("sendDonorReceipt error:", e.message);
   }

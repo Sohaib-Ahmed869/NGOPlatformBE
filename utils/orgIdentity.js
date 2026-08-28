@@ -65,7 +65,11 @@ async function getOrgIdentity(orgOrId) {
   if (org && typeof org !== "object") {
     try {
       org = await Organisation.findById(org)
-        .select("name slug contactEmail contactPhone website email branding.logo branding.logoDark")
+        .select(
+          "name slug contactEmail contactPhone website email " +
+            "branding.logo branding.logoDark branding.primaryColor branding.accentColor " +
+            "branding.backgroundColor",
+        )
         .lean();
     } catch {
       org = null;
@@ -85,9 +89,21 @@ async function getOrgIdentity(orgOrId) {
   const email = clean(org?.contactEmail) || clean(org?.email);
   const phone = clean(org?.contactPhone);
   const website = clean(org?.website);
-  // Email clients render on a light background, so prefer the dark-on-light
-  // variant — the same rule the public navbar uses.
-  const logo = clean(org?.branding?.logoDark) || clean(org?.branding?.logo);
+
+  // Two logo variants, because an email has two backgrounds. The body card is
+  // white, so it wants the dark-on-light mark; the branded header band is the
+  // organisation's primary colour, so it wants the light-on-dark one. Each
+  // falls back to the other rather than rendering nothing.
+  const brand = org?.branding || {};
+  const logo = clean(brand.logoDark) || clean(brand.logo);
+  const logoLight = clean(brand.logo) || clean(brand.logoDark);
+
+  // The same palette the tenant's portal is painted with, so their email looks
+  // like the site the donor just came from instead of a generic template.
+  // Defaults mirror the Organisation schema's.
+  const primaryColor = clean(brand.primaryColor) || "#2C2418";
+  const accentColor = clean(brand.accentColor) || "#C9A84C";
+  const backgroundColor = clean(brand.backgroundColor) || "#FAF7F2";
 
   // The tenant's own portal, built the same way activation emails build it.
   let portalUrl = "";
@@ -103,14 +119,42 @@ async function getOrgIdentity(orgOrId) {
   // "example.org | hello@example.org | 1300 000 000" — only the parts we have.
   const footer = [bareDomain(website || portalUrl), email, phone].filter(Boolean).join(" | ");
 
+  // Absolute links into the tenant's own portal. A relative href is dead in an
+  // email — the client has no base URL — and every one of these is a real route
+  // (see the tenant router in the frontend). They resolve to "" when the tenant
+  // has no portal and no website, which the block compiler reads as "drop this
+  // button" rather than rendering a link to nowhere.
+  const at = (path) => (portalUrl ? `${portalUrl}${path}` : "");
+
   return {
     name,
     email,
     phone,
     website,
     logo,
+    logoLight,
+    primaryColor,
+    accentColor,
+    backgroundColor,
     portalUrl,
-    loginUrl: portalUrl ? `${portalUrl}/login` : "",
+    loginUrl: at("/login"),
+    // public pages
+    donateUrl: at("/donate"),
+    eventsUrl: at("/events"),
+    programsUrl: at("/programs"),
+    campaignsUrl: at("/p2p-campaigns"),
+    contactUrl: at("/contact-us"),
+    aboutUrl: at("/about"),
+    getInvolvedUrl: at("/get-involved"),
+    // the donor's own portal
+    dashboardUrl: at("/user/dashboard"),
+    donationsUrl: at("/user/donations"),
+    subscriptionsUrl: at("/user/subscriptions"),
+    paymentsUrl: at("/user/payments"),
+    profileUrl: at("/user/settings/profile"),
+    unsubscribeUrl: at("/unsubscribe"),
+    // staff
+    adminUrl: at("/admin/dashboard"),
     footer,
   };
 }

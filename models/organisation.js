@@ -243,6 +243,12 @@ const organisationSchema = new mongoose.Schema(
       setBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
       setAt: { type: Date, default: null },
     },
+    // Soft delete — set from the SuperAdmin console's Danger Zone. A deleted org
+    // is deactivated (isActive false, subscriptionStatus cancelled, same as
+    // suspend) AND hidden from every SuperAdmin list/stat, but the row and all
+    // of its data stay in Mongo for financial/audit records.
+    deletedAt: { type: Date, default: null },
+    deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   {
     timestamps: true,

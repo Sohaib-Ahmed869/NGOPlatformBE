@@ -3,7 +3,8 @@ const Organisation = require("../../models/organisation");
 const User = require("../../models/user");
 const StripeEvent = require("../../models/stripeEvent");
 const PlatformInvoice = require("../../models/platformInvoice");
-const { sendEmail } = require("../../services/emailUtil");
+const { sendTemplateEmail } = require("../../services/emailUtil");
+const { platformAppUrl } = require("../../utils/tenantUrls");
 const { activateOrgWithAdmin } = require("../../services/orgActivation");
 const { emitToSuperAdmins } = require("../../services/socket");
 
@@ -176,20 +177,25 @@ async function handleCheckoutCompleted(session) {
     ? `${organisation.slug}.${process.env.CLIENT_URL.replace(/^https?:\/\//, "")}`
     : `${organisation.slug}.${process.env.CORS_DOMAIN || "localhost"}`;
 
-  const emailBody = `
-    <h2>Welcome to the Platform, ${adminName}!</h2>
-    <p>Your organisation <strong>${organisation.name}</strong> has been set up successfully.</p>
-    <p>Your portal is ready at: <a href="http://${subdomainUrl}">http://${subdomainUrl}</a></p>
-    <h3>Your Admin Account</h3>
-    <ul>
-      <li><strong>Email:</strong> ${adminEmail}</li>
-      <li><strong>Plan:</strong> ${plan}</li>
-      <li><strong>Billing:</strong> ${billingCycle}</li>
-    </ul>
-    <p>Log in to your admin dashboard at <a href="http://${subdomainUrl}/admin/login">http://${subdomainUrl}/admin/login</a> to start setting up your portal.</p>
-  `;
-
-  await sendEmail(adminEmail, emailBody, `Welcome to ${organisation.name} - Your Portal is Ready!`);
+  await sendTemplateEmail("tenant.welcome", {
+    to: adminEmail,
+    data: {
+      recipient: { name: adminName, email: adminEmail },
+      tenant: {
+        name: organisation.name,
+        portalUrl: `http://${subdomainUrl}`,
+        loginUrl: `http://${subdomainUrl}/admin/login`,
+        adminEmail,
+        plan,
+        billingCycle,
+        // This path creates the admin with a password chosen at signup, so
+        // there is nothing to reveal and no set-password link to send.
+        password: "",
+        setPasswordUrl: "",
+      },
+    },
+    meta: { organisationId: String(organisation._id), slug: organisation.slug },
+  });
 
   console.log(`Organisation ${organisation.slug} activated successfully`);
 }
@@ -261,12 +267,20 @@ async function handleSubscriptionDeleted(subscription) {
   if (organisation.adminUserId) {
     const admin = await User.findById(organisation.adminUserId);
     if (admin) {
-      const emailBody = `
-        <h2>Subscription Cancelled</h2>
-        <p>Your subscription for <strong>${organisation.name}</strong> has been cancelled.</p>
-        <p>Your portal will be deactivated. To reactivate, please subscribe again.</p>
-      `;
-      await sendEmail(admin.email, emailBody, `${organisation.name} - Subscription Cancelled`);
+      await sendTemplateEmail("tenant.subscriptionCancelled", {
+        to: admin.email,
+        data: {
+          recipient: { name: admin.name || "", email: admin.email },
+          tenant: { name: organisation.name, plan: organisation.plan || "" },
+          billing: {
+            accessUntil: subscription.current_period_end
+              ? new Date(subscription.current_period_end * 1000)
+              : null,
+            reactivateUrl: platformAppUrl("/pricing"),
+          },
+        },
+        meta: { organisationId: String(organisation._id) },
+      });
     }
   }
 
@@ -298,12 +312,22 @@ async function handlePaymentFailed(invoice) {
   if (organisation.adminUserId) {
     const admin = await User.findById(organisation.adminUserId);
     if (admin) {
-      const emailBody = `
-        <h2>Payment Failed</h2>
-        <p>We were unable to process the payment for your <strong>${organisation.name}</strong> subscription.</p>
-        <p>Please update your payment method to avoid service interruption.</p>
-      `;
-      await sendEmail(admin.email, emailBody, `${organisation.name} - Payment Failed`);
+      await sendTemplateEmail("tenant.paymentFailed", {
+        to: admin.email,
+        data: {
+          recipient: { name: admin.name || "", email: admin.email },
+          tenant: { name: organisation.name, plan: organisation.plan || "" },
+          billing: {
+            amount: (invoice.amount_due || 0) / 100,
+            currency: (invoice.currency || "aud").toUpperCase(),
+            retryDate: invoice.next_payment_attempt
+              ? new Date(invoice.next_payment_attempt * 1000)
+              : null,
+            updateUrl: platformAppUrl("/billing"),
+          },
+        },
+        meta: { organisationId: String(organisation._id), invoiceId: invoice.id },
+      });
     }
   }
 

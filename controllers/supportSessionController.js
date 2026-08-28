@@ -69,6 +69,30 @@ async function sweepExpired() {
 // state can never be filterable on one side and rejected on the other.
 const STATUSES = ["all", ...SupportSession.schema.path("status").enumValues];
 
+/**
+ * Sortable columns for the sessions table and the audit table.
+ *
+ * "Tenant" sorts by the denormalised `orgSlug` rather than the populated
+ * organisation name: the name lives on another collection, so ordering by it
+ * would need a $lookup, and the slug is derived from the name — close enough
+ * to alphabetical that the column does what it looks like it does.
+ */
+const SESSION_SORTS = {
+  tenant: "orgSlug",
+  operator: "impersonatorEmail",
+  actingAs: "targetEmail",
+  status: "status",
+  started: "startedAt",
+  expires: "expiresAt",
+};
+
+const AUDIT_SORTS = {
+  action: "action",
+  operator: "actorEmail",
+  tenant: "organisationId",
+  when: "createdAt",
+};
+
 // Distinct-count helper shared by both facets.
 const distinctCount = (field) => [
   { $group: { _id: `$${field}` } },
@@ -85,6 +109,9 @@ exports.listSessions = async (req, res) => {
   try {
     const { search } = req.query;
     const { page, limit } = input.paging(req.query, { defaultLimit: 100, maxLimit: 500 });
+    // Ordered newest-first by default: the question this screen exists to
+    // answer is "who is inside a tenant right now".
+    const sessionSort = input.sorting(req.query, SESSION_SORTS, { defaultKey: "started" });
 
     // Retire lapsed sessions BEFORE counting, so "Active now" and the status
     // filter agree with what the middleware would actually let through.
@@ -126,8 +153,8 @@ exports.listSessions = async (req, res) => {
     // hide. Everything else describes the filtered set.
     const [sessions, summaryAgg, liveNow] = await Promise.all([
       SupportSession.find(filter)
-        .populate("organisationId", "name slug")
-        .sort({ startedAt: -1 })
+        .populate("organisationId", "name slug branding.logo branding.logoDark branding.iconLogo branding.iconLogoDark")
+        .sort(sessionSort.sort)
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
@@ -161,6 +188,7 @@ exports.listSessions = async (req, res) => {
       },
       page,
       limit,
+      sort: { key: sessionSort.key, dir: sessionSort.dir },
       // The screen counts down to `expiresAt` and decides when a row has
       // lapsed. Anchoring that to server time stops a skewed operator clock
       // from showing a live session as expired (or the reverse).
@@ -184,7 +212,7 @@ exports.getSession = async (req, res) => {
     await sweepExpired();
 
     const session = await SupportSession.findOne({ sessionId })
-      .populate("organisationId", "name slug")
+      .populate("organisationId", "name slug branding.logo branding.logoDark branding.iconLogo branding.iconLogoDark")
       .populate("endedBy", "name email")
       .lean();
     if (!session) return res.status(404).json({ error: "Support session not found" });
@@ -245,7 +273,7 @@ exports.revokeSession = async (req, res) => {
       { $set: { status: "revoked", endedAt: new Date(), endedBy: req.user._id } },
       { new: true }
     )
-      .populate("organisationId", "name slug")
+      .populate("organisationId", "name slug branding.logo branding.logoDark branding.iconLogo branding.iconLogoDark")
       .populate("endedBy", "name email")
       .lean();
 
@@ -319,6 +347,7 @@ exports.listAudit = async (req, res) => {
   try {
     const { from, to, search } = req.query;
     const { page, limit } = input.paging(req.query, { defaultLimit: 100, maxLimit: 500 });
+    const auditSort = input.sorting(req.query, AUDIT_SORTS, { defaultKey: "when" });
 
     const filter = {};
     const org = idFilter(req.query.organisationId, "organisation id");
@@ -362,8 +391,8 @@ exports.listAudit = async (req, res) => {
 
     const [entries, summaryAgg] = await Promise.all([
       PlatformAuditLog.find(filter)
-        .populate("organisationId", "name slug")
-        .sort({ createdAt: -1 })
+        .populate("organisationId", "name slug branding.logo branding.logoDark branding.iconLogo branding.iconLogoDark")
+        .sort(auditSort.sort)
         .skip((page - 1) * limit)
         .limit(limit)
         .lean(),
@@ -395,6 +424,7 @@ exports.listAudit = async (req, res) => {
       },
       page,
       limit,
+      sort: { key: auditSort.key, dir: auditSort.dir },
     });
   } catch (err) {
     console.error("List audit error:", err);

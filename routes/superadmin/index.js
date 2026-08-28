@@ -44,6 +44,12 @@ router.post("/support-session/end", superAdminController.endSupportSession);
 router.get("/users/accept-invite/:token", superAdminUserController.getInvite);
 router.post("/users/accept-invite/:token", superAdminUserController.acceptInvite);
 
+// Forgot-password — a locked-out operator can't authenticate, so this has to
+// run before the guard too. email -> 6-digit code -> verify -> reset.
+router.post("/auth/forgot-password", superAdminUserController.forgotPassword);
+router.post("/auth/forgot-password/verify", superAdminUserController.verifyResetCode);
+router.post("/auth/forgot-password/reset", superAdminUserController.resetPasswordWithCode);
+
 // Everything below requires the superadmin role.
 router.use(isSuperAdmin);
 
@@ -52,6 +58,7 @@ router.get("/organisations/:id", canTenants, orgId, superAdminController.getOrga
 router.patch("/organisations/:id/plan", canTenants, orgId, superAdminController.changePlan);
 router.patch("/organisations/:id/suspend", canTenants, orgId, superAdminController.suspendOrg);
 router.patch("/organisations/:id/status", canTenants, orgId, superAdminController.updateStatus);
+router.delete("/organisations/:id", canTenants, orgId, superAdminController.deleteOrganisation);
 router.post("/organisations/:id/act-as", canSupport, orgId, superAdminController.actAs);
 router.post("/organisations/:id/comp", canTenants, orgId, superAdminController.compOrg);
 router.put("/organisations/:id/override", canTenants, orgId, superAdminController.setOverride);
@@ -64,8 +71,10 @@ router.get("/invoices", canBilling, superAdminController.listInvoices);
 // Team / platform-operator management (Owner/Admin only).
 router.get("/users", canOps, superAdminUserController.list);
 router.post("/users", canOps, superAdminUserController.invite);
+router.patch("/users/:id/invite", canOps, docId, superAdminUserController.updateInvite);
 router.patch("/users/:id/role", canOps, docId, superAdminUserController.changeRole);
 router.patch("/users/:id/status", canOps, docId, superAdminUserController.changeStatus);
+router.patch("/users/:id/mfa-policy", canOps, docId, superAdminUserController.setMfaPolicy);
 router.post("/users/:id/resend-invite", canOps, docId, superAdminUserController.resendInvite);
 router.post("/users/:id/force-logout", canOps, docId, superAdminUserController.forceLogout);
 
@@ -128,6 +137,40 @@ router.patch("/contact-queries/:id/status", canSupport, docId, contactQueryContr
 router.patch("/contact-queries/:id/assign", canSupport, docId, contactQueryController.assign);
 router.post("/contact-queries/:id/read", canSupport, docId, contactQueryController.markRead);
 router.delete("/contact-queries/:id", canSupport, docId, contactQueryController.remove);
+
+// Dynamic email templates — the platform-default layer of every transactional
+// email (see config/emailCatalog.js), the shared branded layout, and the
+// platform-wide send log. `emailScope = "platform"` is set by the mount so the
+// shared controller writes to the platform row rather than a tenant's.
+router.use(
+  "/email",
+  canOps,
+  (req, _res, next) => {
+    req.emailScope = "platform";
+    next();
+  },
+  (() => {
+    const email = express.Router();
+    const emailCtrl = require("../../controllers/emailTemplateController");
+
+    email.get("/templates", emailCtrl.listTemplates);
+    email.get("/layout", emailCtrl.getLayout);
+    email.put("/layout", emailCtrl.saveLayout);
+    email.post("/layout/reset", emailCtrl.resetLayout);
+    email.get("/logs", emailCtrl.listLogs);
+    email.get("/logs/stats", emailCtrl.logStats);
+
+    // Ahead of "/templates/:key" so these aren't read as a template key.
+    email.post("/templates/:key/preview", emailCtrl.previewTemplate);
+    email.post("/templates/:key/test", emailCtrl.sendTest);
+    email.post("/templates/:key/reset", emailCtrl.resetTemplate);
+    email.patch("/templates/:key/toggle", emailCtrl.toggleTemplate);
+    email.get("/templates/:key", emailCtrl.getTemplate);
+    email.put("/templates/:key", emailCtrl.saveTemplate);
+
+    return email;
+  })(),
+);
 
 // Leads CRM — public "Talk to Sales" capture, sales pipeline + convert-to-tenant.
 // Ahead of /:id — otherwise "new-count"/"board"/"staff" is read as a lead id.

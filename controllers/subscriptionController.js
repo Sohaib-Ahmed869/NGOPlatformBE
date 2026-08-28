@@ -250,7 +250,7 @@ exports.resumeSubscription = async (req, res) => {
   }
 };
 
-const { sendEmail } = require("../services/emailUtil");
+const { sendTemplateEmail } = require("../services/emailUtil");
 const { sendReceiptEmail } = require("../services/recieptUtils");
 const User = require("../models/user");
 
@@ -266,88 +266,40 @@ const sendCancellationRequestEmail = async (subscription) => {
     }
 
     // Send email to admin
-    const adminEmailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            subIdentity.logo
-              ? `<img src="${subIdentity.logo}" alt="${subIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${subIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #4a7c59;">Subscription Cancellation Request</h2>
-        
-        <p>A donor has requested to cancel their recurring donation.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Subscription Details:</h3>
-          <p><strong>Subscription ID:</strong> ${subscription._id}</p>
-          <p><strong>Donor Name:</strong> ${user.name}</p>
-          <p><strong>Donor Email:</strong> ${user.email}</p>
-          <p><strong>Amount:</strong> $${subscription.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${subscription.recurringDetails.frequency}</p>
-          <p><strong>Start Date:</strong> ${new Date(subscription.recurringDetails.startDate).toLocaleDateString()}</p>
-          <p><strong>Cancellation Reason:</strong> ${subscription.cancellationDetails?.reason || "Not provided"}</p>
-        </div>
+    const subscriptionVars = {
+      id: subscription.donationId,
+      amount: subscription.totalAmount,
+      currency: "AUD",
+      frequency: subscription.recurringDetails?.frequency || "",
+      startDate: subscription.recurringDetails?.startDate || subscription.createdAt,
+      manageUrl: subIdentity.portalUrl ? `${subIdentity.portalUrl}/user/subscriptions` : "",
+    };
+    const donorVars = { name: user.name || "", email: user.email, phone: user.phone || "" };
 
-        <p>Please review this request and take appropriate action through the admin panel.</p>
-      </div>
-    `;
-
-    // Carries donor details, so it must reach the tenant that owns the
-    // subscription — not a hardcoded inbox.
-    const subAdminRecipient = await getOrgAdminEmail(subscription.organisationId);
     if (subAdminRecipient) {
-      await sendEmail(
-        subAdminRecipient,
-        adminEmailBody,
-        `Subscription Cancellation Request - ${subIdentity.name}`,
-        [],
-        { organisationId: subscription.organisationId }
-      );
+      await sendTemplateEmail("subscription.cancellationRequestAdmin", {
+        to: subAdminRecipient,
+        organisationId: subscription.organisationId,
+        data: {
+          donor: donorVars,
+          subscription: subscriptionVars,
+          reason: subscription.cancellationReason || "",
+          adminUrl: subIdentity.portalUrl ? `${subIdentity.portalUrl}/admin/subscriptions` : "",
+        },
+        meta: { donationId: subscription.donationId },
+      });
     } else {
       console.error(
-        `No admin contact for organisation ${subscription.organisationId}; subscription cancellation request was not emailed.`
+        `No admin contact for organisation ${subscription.organisationId}; cancellation request for ${subscription.donationId} was not emailed.`,
       );
     }
 
-    // Send confirmation email to donor
-    const donorEmailBody = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="text-align: center; padding: 20px 0;">
-          ${
-            subIdentity.logo
-              ? `<img src="${subIdentity.logo}" alt="${subIdentity.name}" style="max-width: 150px;">`
-              : `<h1 style="margin:0; font-size:22px; color:#4a7c59;">${subIdentity.name}</h1>`
-          }
-        </div>
-        
-        <h2 style="color: #4a7c59;">Cancellation Request Received</h2>
-        
-        <p>Dear ${user.name},</p>
-        
-        <p>We have received your request to cancel your recurring donation.</p>
-        
-        <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
-          <h3 style="margin-top: 0;">Subscription Details:</h3>
-          <p><strong>Amount:</strong> $${subscription.totalAmount.toFixed(2)} AUD</p>
-          <p><strong>Frequency:</strong> ${subscription.recurringDetails.frequency}</p>
-        </div>
-
-        <p>Our admin team will review your request and process it accordingly. You will receive another email once the cancellation is confirmed.</p>
-        
-        <p>Thank you for your support!</p>
-      </div>
-    `;
-
-    await sendEmail(
-      user.email,
-      donorEmailBody,
-      `Cancellation Request Received - ${subIdentity.name}`,
-      [],
-      { organisationId: subscription.organisationId }
-    );
+    await sendTemplateEmail("subscription.cancellationRequestDonor", {
+      to: user.email,
+      organisationId: subscription.organisationId,
+      data: { donor: donorVars, subscription: subscriptionVars },
+      meta: { donationId: subscription.donationId },
+    });
 
     console.log(`Cancellation request emails sent for subscription: ${subscription._id}`);
     return true;
