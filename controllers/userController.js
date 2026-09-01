@@ -225,8 +225,12 @@ exports.loginAdmin = async (req, res) => {
     // console — the token is still issued so the frontend can drive them
     // through the (already-authenticated) /users/mfa/setup + /mfa/enable
     // endpoints, then re-request the console.
-    const mfaSetupRequired =
-      user.role === "superadmin" && mfaRequiredFor(user) && !user.twoFactorEnabled;
+    // Applies to BOTH staff populations. For an operator `mfaRequiredFor` falls
+    // back to the role table (Owner/Admin must enrol); a tenant admin has no
+    // platformRole, so it is true only when an operator has explicitly set
+    // mfaPolicy: "required" on them from Team -> Tenant admins. Without this the
+    // toggle over there would store a preference nothing ever read.
+    const mfaSetupRequired = mfaRequiredFor(user) && !user.twoFactorEnabled;
 
     // Admins don't need to change temporary passwords
     res.json({

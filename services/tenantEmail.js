@@ -8,45 +8,24 @@ const nodemailer = require("nodemailer");
 const { decrypt } = require("../utils/crypto");
 const Organisation = require("../models/organisation");
 
-// Only used for PLATFORM-level mail (SaaS billing, operator notices). Tenant
-// mail falls back to the organisation's own name — see getFromIdentity.
+// The platform mailbox now lives in services/platformEmail.js, which resolves
+// PlatformSettings.email first and the EMAIL_* env vars second. `platformTransport`
+// re-exported below is that module's PROXY, so this file keeps its old name and
+// every call site keeps its old syntax.
+//
+// It used to be a transport built right here, at require time, from
+// process.env. That is why changing the platform mailbox meant editing .env and
+// redeploying: the credentials were captured once when the process booted and
+// nothing could replace them afterwards. Do not reintroduce a module-scope
+// createTransport() — the same mistake as a module-scope Stripe client, and it
+// silently disables the console screen that is meant to configure this.
+const platformEmail = require("./platformEmail");
+const platformTransport = platformEmail.platformTransport;
+
+// Only used for PLATFORM-level mail (SaaS billing, operator notices) when no
+// better name is available. Tenant mail falls back to the organisation's own
+// name — see getFromIdentity.
 const PLATFORM_FROM_NAME = process.env.EMAIL_FROM_NAME || "NGO Platform";
-
-// Leaving EMAIL_HOST unset while EMAIL_USER points at another provider sends the
-// right credentials to the wrong server, which the provider rejects as
-// "535 Authentication unsuccessful" — a login error for what is really a host
-// misconfiguration. Infer the host from the address domain instead of assuming.
-const SMTP_BY_DOMAIN = {
-  "gmail.com": "smtp.gmail.com",
-  "googlemail.com": "smtp.gmail.com",
-  "outlook.com": "smtp-mail.outlook.com",
-  "hotmail.com": "smtp-mail.outlook.com",
-  "live.com": "smtp-mail.outlook.com",
-  "yahoo.com": "smtp.mail.yahoo.com",
-  "zoho.com": "smtp.zoho.com",
-};
-const isOutlookHost = (host) => /outlook|hotmail|live|office365/i.test(host || "");
-
-function defaultSmtpHost(user) {
-  const domain = String(user || "").split("@")[1];
-  return SMTP_BY_DOMAIN[(domain || "").toLowerCase()] || "smtp-mail.outlook.com";
-}
-
-const PLATFORM_HOST = process.env.EMAIL_HOST || defaultSmtpHost(process.env.EMAIL_USER);
-if (!process.env.EMAIL_HOST && process.env.EMAIL_USER) {
-  console.warn(`[email] EMAIL_HOST not set — using ${PLATFORM_HOST} for ${process.env.EMAIL_USER}`);
-}
-
-// The platform's own SMTP transport (today's global account).
-const platformTransport = nodemailer.createTransport({
-  host: PLATFORM_HOST,
-  port: Number(process.env.EMAIL_PORT) || 587,
-  secure: process.env.EMAIL_SECURE === "true" || false,
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-  // Legacy workaround for Outlook's SMTP only — forcing it on other providers
-  // (Gmail especially) breaks the TLS handshake.
-  ...(isOutlookHost(PLATFORM_HOST) ? { tls: { ciphers: "SSLv3" } } : {}),
-});
 
 // Cache built transports by config signature so we don't rebuild one per send.
 const cache = new Map();
@@ -97,8 +76,18 @@ function getFromIdentity(org, options = {}) {
   // from-name should still send as themselves, not as the platform (previously
   // this made every such tenant's mail arrive from one hardcoded charity).
   const fromName =
-    e.fromName || options.fromName || (org && org.name) || PLATFORM_FROM_NAME;
-  const fromEmail = tenant ? e.fromEmail || e.username : process.env.EMAIL_USER;
+    e.fromName ||
+    options.fromName ||
+    (org && org.name) ||
+    platformEmail.getIdentity().fromName ||
+    PLATFORM_FROM_NAME;
+  // Platform fallback: ask the resolver, not the environment — on a
+  // console-configured mailbox process.env.EMAIL_USER is empty or, worse,
+  // stale, which put a From address on the mail that the authenticated
+  // mailbox does not own and providers reject outright.
+  const fromEmail = tenant
+    ? e.fromEmail || e.username
+    : platformEmail.getIdentity().fromEmail || process.env.EMAIL_USER || "";
   const replyTo = options.replyTo || e.replyTo || "";
   return { fromName, fromEmail, replyTo, tenant };
 }
@@ -133,6 +122,7 @@ async function resolveOrg(orgOrId) {
 
 module.exports = {
   platformTransport,
+  platformEmail,
   isEmailConfigured,
   buildTransport,
   getTenantTransport,

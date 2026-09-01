@@ -95,7 +95,7 @@ const TICKETS = [
   },
   {
     summary: "How do I issue an end-of-year tax receipt?",
-    description: "A donor has asked for a consolidated tax receipt for all their 2025 gifts. How do I generate that?",
+    description: "A donor has asked for a consolidated tax receipt for all their 2025 donations. How do I generate that?",
     category: "account", priority: "low", status: "solved", ageDays: 9,
     reporter: { name: "Priya Nair", email: "priya@givewell-local.org" },
     assign: true, resolved: true, resolutionNotes: "Walked them through Donors → select donor → Annual statement → download PDF.",
@@ -145,7 +145,7 @@ const TICKETS = [
   },
   {
     summary: "Please add recurring donation reminder emails",
-    description: "It would be great if monthly donors got a friendly reminder/receipt each time their gift renews.",
+    description: "It would be great if monthly donors got a friendly reminder/receipt each time their donation renews.",
     category: "feature_request", priority: "medium", status: "new", ageDays: 5,
     reporter: { name: "Liam Foster", email: "liam@youthrising.org" },
     triage: "feature", kanban: "todo", triageNotes: "Reasonable — tie into the existing subscription renewal webhook to send a templated receipt. Medium effort.",
@@ -211,7 +211,7 @@ const TICKETS = [
   // ── Tickets from the tenant's own donors/customers (kind: "customer") ──
   {
     summary: "My monthly donation didn't go through this month",
-    description: "I'm a monthly donor and this month's gift didn't come out of my account. I don't want my giving to lapse — how do I update the card on file?",
+    description: "I'm a monthly donor and this month's donation didn't come out of my account. I don't want my giving to lapse — how do I update the card on file?",
     category: "billing", priority: "medium", status: "in_progress", ageDays: 2,
     reporter: { name: "Rebecca Cole", email: "rebecca.cole@gmail.com" }, kind: "customer",
     comments: [
@@ -244,7 +244,7 @@ const TICKETS = [
   },
   {
     summary: "Is my donation tax-deductible before I give?",
-    description: "Before I donate I wanted to check whether gifts made through your site are tax-deductible and whether I'll receive a receipt.",
+    description: "Before I donate I wanted to check whether donations made through your site are tax-deductible and whether I'll receive a receipt.",
     category: "general", priority: "low", status: "solved", ageDays: 4,
     reporter: { name: "Lauren Santos", email: "lauren.k.santos@gmail.com" }, kind: "public",
     assign: true, resolved: true, resolutionNotes: "Prospective donor (no account) — confirmed tax-deductibility and that a receipt is emailed automatically after giving.",

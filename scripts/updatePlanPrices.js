@@ -37,7 +37,7 @@ const APPLY = process.argv.includes("--apply");
 
 // plan/cycle → env var name (mirrors config/stripePrices.js)
 const ENV_KEYS = {
-  basic: { monthly: "STRIPE_PRICE_BASIC_MONTHLY", annual: "STRIPE_PRICE_BASIC_ANNUAL" },
+  essentials: { monthly: "STRIPE_PRICE_BASIC_MONTHLY", annual: "STRIPE_PRICE_BASIC_ANNUAL" },
   professional: { monthly: "STRIPE_PRICE_PRO_MONTHLY", annual: "STRIPE_PRICE_PRO_ANNUAL" },
   enterprise: { monthly: "STRIPE_PRICE_ENT_MONTHLY", annual: "STRIPE_PRICE_ENT_ANNUAL" },
 };
@@ -45,7 +45,7 @@ const ENV_KEYS = {
 async function run() {
   console.log(`\n=== Plan price update — ${APPLY ? "APPLY MODE" : "DRY RUN"} ===\n`);
 
-  const plans = ["basic", "professional", "enterprise"];
+  const plans = ["essentials", "professional", "enterprise"];
   const cycles = ["monthly", "annual"];
 
   // oldPriceId → newPriceId, and plan/cycle → newPriceId

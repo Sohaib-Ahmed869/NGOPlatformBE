@@ -539,3 +539,212 @@ test("every link the layout emits is absolute", () => {
     );
   }
 });
+
+/* ── manual send: attachments ────────────────────────────────────────────── */
+
+const { toMailAttachments, MAX_TOTAL_BYTES } = require("../middleware/emailAttachments");
+
+const upload = (name, size, mimetype = "application/octet-stream") => ({
+  originalname: name,
+  size,
+  mimetype,
+  buffer: Buffer.alloc(Math.min(size, 8)),
+});
+
+test("attachments: nothing attached is not an error", () => {
+  assert.deepEqual(toMailAttachments(undefined), { attachments: [], summary: [] });
+  assert.deepEqual(toMailAttachments([]), { attachments: [], summary: [] });
+});
+
+test("attachments: the declared type comes from the extension, not the browser", () => {
+  // A PDF the client labelled as a generic blob would otherwise arrive in the
+  // recipient's inbox as an unopenable, nameless attachment.
+  const { attachments } = toMailAttachments([upload("receipt.pdf", 1024)]);
+  assert.equal(attachments[0].contentType, "application/pdf");
+  assert.ok(Buffer.isBuffer(attachments[0].content));
+});
+
+test("attachments: a Windows client's full path is reduced to the filename", () => {
+  const { attachments } = toMailAttachments([upload("C:\\Users\\ada\\Desktop\\report.xlsx", 10)]);
+  assert.equal(attachments[0].filename, "report.xlsx");
+});
+
+test("attachments: the TOTAL is bounded, not just each file", () => {
+  // Every one of these passes multer's per-file limit and the set still bounces
+  // at the provider, so the sum has to be checked somewhere.
+  const nine = 9 * 1024 * 1024;
+  const out = toMailAttachments([
+    upload("a.pdf", nine),
+    upload("b.pdf", nine),
+    upload("c.pdf", nine),
+  ]);
+  assert.ok(out.error, "27MB of attachments must be refused");
+  assert.ok(!out.attachments, "a refusal must not also return a payload");
+  assert.ok(3 * nine > MAX_TOTAL_BYTES);
+});
+
+test("attachments: the summary records names and sizes, which is all that survives", () => {
+  // The bytes are discarded with the request — this is what the audit row and
+  // the send log get.
+  const { summary } = toMailAttachments([upload("letter.pdf", 2048)]);
+  assert.deepEqual(summary, [{ name: "letter.pdf", size: 2048 }]);
+});
+
+/* ── manual send: the free-form composer ─────────────────────────────────── */
+
+const emailTemplates = require("../services/emailTemplates");
+
+// Supplying `org` in the data is what buildContext checks before it goes to the
+// database, so these render offline exactly as the composer's preview does.
+const OFFLINE_ORG = {
+  org: { name: "Hope Trust", email: "hello@hope.example", primaryColor: "#102A23" },
+  recipient: { firstName: "Sarah", name: "Sarah Whitfield" },
+};
+
+test("custom email: hand-written content is wrapped in the branded layout", async () => {
+  const out = await emailTemplates.renderCustom({
+    subject: "A note from {{org.name}}",
+    mode: "blocks",
+    blocks: [
+      { id: "c1", type: "heading", level: 2, text: "Hi {{recipient.firstName}}" },
+      { id: "c2", type: "paragraph", text: "The document you asked for is attached." },
+    ],
+    data: OFFLINE_ORG,
+  });
+
+  assert.equal(out.subject, "A note from Hope Trust");
+  // XHTML transitional — what wrapInLayout emits, and what Outlook wants.
+  assert.ok(/^<!DOCTYPE html/i.test(out.html.trim()), "must be a complete document");
+  assert.ok(out.html.includes("</html>"));
+  assert.ok(out.html.includes("Hi Sarah"), "the body renders its variables");
+  assert.ok(out.html.includes("Hope Trust"), "the layout carries the org identity");
+  assert.ok(out.text.includes("Hi Sarah"), "a plain-text part is derived");
+});
+
+test("custom email: the body is escaped by the same renderer as a template", async () => {
+  const out = await emailTemplates.renderCustom({
+    subject: "hi",
+    mode: "blocks",
+    blocks: [{ id: "c1", type: "paragraph", text: "Hello {{recipient.firstName}}" }],
+    data: { ...OFFLINE_ORG, recipient: { firstName: '<script>alert("x")</script>' } },
+  });
+  assert.ok(!out.html.includes("<script>alert"), "an operator's value must not become markup");
+});
+
+test("custom email: an empty subject is reported, not sent", async () => {
+  const out = await emailTemplates.sendCustomEmail({
+    to: "someone@example.com",
+    subject: "   ",
+    mode: "blocks",
+    blocks: [{ id: "c1", type: "paragraph", text: "x" }],
+    data: OFFLINE_ORG,
+  });
+  assert.equal(out.success, false);
+  assert.equal(out.reason, "empty_subject");
+});
+
+test("custom email: no recipient is a skip, never a throw", async () => {
+  // Mirrors sendTemplateEmail's contract: mail is always a side effect of
+  // something more important and must not be able to fail it.
+  const out = await emailTemplates.sendCustomEmail({ to: "", subject: "hi" });
+  assert.equal(out.success, false);
+  assert.equal(out.skipped, true);
+  assert.equal(out.reason, "no_recipient");
+});
+
+/* ── manual send: the preview must not lie ───────────────────────────────── */
+
+test("preview with samples off shows the blanks the send will actually have", async () => {
+  const key = "donation.receipt";
+  const org = { org: OFFLINE_ORG.org };
+
+  const withSamples = await emailTemplates.previewTemplate(key, { data: org });
+  const asComposed = await emailTemplates.previewTemplate(key, { data: org, samples: false });
+
+  // The catalog's example donor must not appear in a composer preview where
+  // nobody typed a name: sendTemplateEmail would not send it, so a preview that
+  // showed it would be previewing a different email from the one going out.
+  const sampleFirstName = catalog.sampleContext(key).donor.firstName;
+  assert.equal(sampleFirstName, "Sarah");
+  assert.ok(withSamples.html.includes("Thank you, Sarah"));
+  assert.ok(
+    !asComposed.html.includes("Sarah"),
+    "an untouched field must render blank, not as its example value",
+  );
+  assert.ok(
+    asComposed.html.includes("Thank you, friend"),
+    "the template's own default fills the gap, exactly as it will on the real send",
+  );
+});
+
+test("an unresolved DOTTED filter argument is not printed as a literal", () => {
+  // Regression: the composer lets a human leave `donation.currency` empty, and
+  // the literal fallback rendered the total as "250.00 DONATION.CURRENCY".
+  // A dotted argument is unambiguously a path, so it yields nothing and the
+  // filter's own default takes over.
+  assert.equal(renderString("{{a.amount | money:a.currency}}", { a: { amount: 250 } }), "$250.00");
+
+  // The two shapes the fallback exists for still work.
+  assert.equal(renderString("{{n | money:GBP}}", { n: 10 }), "£10.00", "a bare literal code");
+  assert.equal(renderString("{{n | money:cur}}", { n: 10, cur: "EUR" }), "€10.00", "a bare path");
+  assert.equal(renderString("{{n | money:cur}}", { n: 10 }), "10.00 CUR", "an unresolved bare word");
+});
+
+/* ── the header must not say the brand name twice ────────────────────────── */
+
+const brandCtx = (org) => ({ ...ctx, org: { ...ctx.org, name: "Donexus", ...org } });
+const imgSrcs = (html) => [...html.matchAll(/<img[^>]+src="([^"]+)"/g)].map((m) => m[1]);
+
+test("header shows the MARK, not the wordmark, when the name is set in type", () => {
+  // The platform's own logo IS a wordmark, so pairing it with the name in type
+  // rendered "Donexus | Donexus" on every platform email that went out.
+  const html = wrapInLayout(
+    "<p>x</p>",
+    DEFAULT_LAYOUT,
+    brandCtx({ logoLight: "https://x.test/wordmark.png", logoIconLight: "https://x.test/mark.png" }),
+    BRAND,
+  );
+  assert.ok(imgSrcs(html).includes("https://x.test/mark.png"), "the mark belongs beside the name");
+  assert.ok(!imgSrcs(html).includes("https://x.test/wordmark.png"), "the wordmark would repeat the name");
+  assert.ok(html.includes("Donexus"), "the name is still set in type");
+});
+
+test("with the name switched off the full logo carries the identity", () => {
+  const html = wrapInLayout(
+    "<p>x</p>",
+    { ...DEFAULT_LAYOUT, showBrandName: false },
+    brandCtx({ logoLight: "https://x.test/wordmark.png", logoIconLight: "https://x.test/mark.png" }),
+    BRAND,
+  );
+  assert.ok(imgSrcs(html).includes("https://x.test/wordmark.png"));
+  assert.ok(!imgSrcs(html).includes("https://x.test/mark.png"));
+});
+
+test("an organisation with no mark uploaded is completely unaffected", () => {
+  // This is what lets the change ship without anyone re-uploading anything.
+  const html = wrapInLayout(
+    "<p>x</p>",
+    DEFAULT_LAYOUT,
+    brandCtx({ logoLight: "https://x.test/wordmark.png" }),
+    BRAND,
+  );
+  assert.ok(imgSrcs(html).includes("https://x.test/wordmark.png"));
+});
+
+test("an operator's own logo URL is never swapped out for the mark", () => {
+  // Typing a URL into the layout means THAT image.
+  const html = wrapInLayout(
+    "<p>x</p>",
+    { ...DEFAULT_LAYOUT, logoUrlOnDark: "https://x.test/chosen.png" },
+    brandCtx({ logoLight: "https://x.test/wordmark.png", logoIconLight: "https://x.test/mark.png" }),
+    BRAND,
+  );
+  assert.ok(imgSrcs(html).includes("https://x.test/chosen.png"));
+  assert.ok(!imgSrcs(html).includes("https://x.test/mark.png"));
+});
+
+test("no logo and no mark still falls back to the initials chip", () => {
+  const html = wrapInLayout("<p>x</p>", DEFAULT_LAYOUT, brandCtx({ logo: "", logoLight: "" }), BRAND);
+  assert.equal(imgSrcs(html).length, 0);
+  assert.ok(html.includes(">D<"), "initials stand in for a missing logo");
+});

@@ -393,6 +393,98 @@ exports.archiveCoupon = async (req, res) => {
 };
 
 /**
+ * POST /api/superadmin/coupons/:code/restore
+ *
+ * Puts an archived coupon back into circulation. This is NOT a mirror image of
+ * archive, and the asymmetry is Stripe's: archiveStripeCoupon() calls
+ * `stripe.coupons.del()`, and a deleted Stripe Coupon cannot be undeleted. So
+ * restoring means CREATING a new Stripe Coupon (and a new Promotion Code) with
+ * the same terms, then repointing our row at them. The old
+ * stripeCouponId/stripePromotionCodeId are dead ids and are overwritten.
+ *
+ * Because those terms are re-submitted to Stripe, they have to be legal AGAIN
+ * at restore time, and three of them can rot while a coupon sits archived:
+ *   - redeemBy may now be in the past. Stripe rejects a past `redeem_by`.
+ *   - maxRedemptions may already be exhausted by the redemptions it collected
+ *     before archiving.
+ *   - percent_off may exceed 100 — coupons created before that validation
+ *     existed are still in the collection (there are some at 554%).
+ * Each is reported by name with the fix, rather than surfacing a raw Stripe
+ * error, because in every case the answer is the same: use Replace, which
+ * archives and recreates with new terms.
+ */
+exports.restoreCoupon = async (req, res) => {
+  try {
+    const coupon = await Coupon.findOne({ code: String(req.params.code).toUpperCase() });
+    if (!coupon) return res.status(404).json({ error: "Coupon not found" });
+    if (!coupon.archivedAt && coupon.isActive) {
+      return res.status(409).json({ error: `${coupon.code} is already active` });
+    }
+
+    const blockers = [];
+    if (coupon.type === "percent" && Number(coupon.value) > 100) {
+      // Each blocker has to be a self-contained clause with no internal
+      // ", and" — they get joined into one sentence.
+      blockers.push(`its ${coupon.value}% discount is above the 100% Stripe allows`);
+    }
+    if (coupon.redeemBy && new Date(coupon.redeemBy).getTime() <= Date.now()) {
+      blockers.push(`it expired on ${new Date(coupon.redeemBy).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" })}`);
+    }
+    // Trust Stripe's count over the local mirror where we still have the id —
+    // the mirror is only refreshed on list, so it can be stale by any amount.
+    const used = coupon.stripeCouponId
+      ? await refreshRedemptions(coupon).catch(() => coupon.timesRedeemed || 0)
+      : coupon.timesRedeemed || 0;
+    if (coupon.maxRedemptions && used >= coupon.maxRedemptions) {
+      blockers.push(`it has already been redeemed ${used} of ${coupon.maxRedemptions} times`);
+    }
+    if (blockers.length) {
+      // "a, b and c" — joining every clause with ", and " reads as a stutter
+      // once there is more than one, and two of these commonly co-occur.
+      const reasons =
+        blockers.length > 1
+          ? `${blockers.slice(0, -1).join(", ")} and ${blockers[blockers.length - 1]}`
+          : blockers[0];
+      return res.status(400).json({
+        error: `${coupon.code} can't be restored as it stands: ${reasons}.`,
+        hint: "Use Replace to reissue this code with new terms.",
+      });
+    }
+
+    // A brand-new Stripe Coupon + Promotion Code. createPromotionCode() already
+    // retires a leftover code of the same name and retries, which is exactly the
+    // collision this path creates: the promotion code from before the archive
+    // still exists (Stripe deactivates them, never deletes them).
+    let synced = { stripeCouponId: "", stripePromotionCodeId: "" };
+    try {
+      synced = await stripeCouponService.createStripeCoupon(coupon);
+    } catch (e) {
+      console.error("Stripe coupon restore failed:", e.message);
+      return res.status(502).json({
+        error: `Stripe would not recreate ${coupon.code}: ${e.message}`,
+      });
+    }
+
+    coupon.stripeCouponId = synced.stripeCouponId;
+    coupon.stripePromotionCodeId = synced.stripePromotionCodeId;
+    coupon.isActive = true;
+    coupon.archivedAt = null;
+    await coupon.save();
+
+    await writeAudit(req, "coupon.restored", {
+      targetType: "coupon",
+      targetId: coupon.code,
+      meta: { stripeCouponId: coupon.stripeCouponId, timesRedeemed: used },
+    });
+    announceCoupons(coupon.code);
+    res.json({ coupon, ...syncWarning(coupon) });
+  } catch (err) {
+    console.error("Restore coupon error:", err);
+    res.status(500).json({ error: "Failed to restore coupon" });
+  }
+};
+
+/**
  * GET /api/saas/coupon/:code?plan=xxx   (public — pricing/registration page)
  * Validates a coupon and returns its discount, without exposing Stripe ids.
  */

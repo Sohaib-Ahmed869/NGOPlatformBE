@@ -494,7 +494,7 @@ exports.getPublicPlans = async (req, res) => {
     const Plan = require("../../models/plan");
     const plans = await Plan.find({ isActive: true, isPublic: true })
       .sort({ sortOrder: 1, "price.monthly": 1 })
-      .select("code name description currency price features color limits featureFlags isPopular sortOrder")
+      .select("code name description currency price onboardingFee features color limits featureFlags isPopular sortOrder")
       .lean();
     res.json(plans);
   } catch (err) {

@@ -11,10 +11,10 @@ inject("models/plan", {
 // Real resolver, running against the faked Plan model.
 const { getEffectiveEntitlements, getEffectiveLimits } = load("utils/effectiveLimits");
 
-test("no dynamic plan → legacy static fallback (basic)", async () => {
+test("no dynamic plan → legacy static fallback (essentials)", async () => {
   nextPlanDoc = null;
-  const { features, limits } = await getEffectiveEntitlements({ plan: "basic" });
-  // Legacy config/planLimits.basic = { campaigns:3, volunteers:0, volunteerEnabled:false }
+  const { features, limits } = await getEffectiveEntitlements({ plan: "essentials" });
+  // Legacy config/planLimits.essentials = { campaigns:3, volunteers:0, volunteerEnabled:false }
   assert.equal(limits.campaigns, 3);
   assert.equal(limits.volunteers, 0);
   assert.equal(features.volunteers, false, "volunteerEnabled:false → volunteers flag off");

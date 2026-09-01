@@ -42,6 +42,11 @@ const planSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     currency: { type: String, default: "aud", lowercase: true },
     price: { type: priceSchema, default: () => ({}) },
+    // One-off setup charge, in whole currency units, quoted alongside the
+    // recurring price. It is NOT a Stripe recurring Price and has no entry in
+    // stripePriceIds — onboarding is invoiced separately, so nothing here syncs
+    // it to a subscription. 0 = no setup fee.
+    onboardingFee: { type: Number, default: 0 },
     // Metered quotas keyed by config/featureCatalog.js meter keys (e.g.
     // { campaigns: 5, volunteers: 50 }). A `null` value = UNLIMITED; an absent
     // key = fall back to the catalog/legacy default. Mixed so any future metric

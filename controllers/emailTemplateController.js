@@ -20,6 +20,7 @@ const EmailLog = require("../models/emailLog");
 const emailTemplates = require("../services/emailTemplates");
 const { BLOCK_TYPES, DEFAULT_THEME, DEFAULT_LAYOUT } = require("../services/emailBlocks");
 const { collectTokens } = require("../services/emailRender");
+const { toMailAttachments } = require("../middleware/emailAttachments");
 const writeAudit = require("../utils/writeAudit");
 
 /* -- scope ---------------------------------------------------------------- */
@@ -148,6 +149,144 @@ function unknownTokens(key, draft) {
     if (t.startsWith("this.")) return false;
     return ![...known].some((k) => t.startsWith(`${k}.`) || k.startsWith(`${t}.`));
   });
+}
+
+/* -- manual send: input ---------------------------------------------------- */
+
+/**
+ * How many people one manual send may address.
+ *
+ * This is a composer, not a mailing list. Newsletter campaigns already exist for
+ * a broadcast -- with an audience query, unsubscribe headers, per-recipient rows
+ * and a retry queue -- and none of that is here. A generous cap keeps "email the
+ * six people on the committee" easy and quietly refuses to become the thing that
+ * mails four thousand donors with no unsubscribe link.
+ */
+const MAX_RECIPIENTS = 25;
+const MAX_DATA_BYTES = 100_000;
+// Depth 6 clears the deepest thing the catalog declares (an array of objects
+// under a namespace) with room to spare; beyond that it is not a form, it is a
+// payload.
+const MAX_DATA_DEPTH = 6;
+
+// Deliberately stricter than the renderer needs: this is an address an operator
+// typed, and the useful answer to a typo is "that isn't an address", not a
+// bounce three minutes later.
+const EMAIL_RE = /^[^\s@,;<>()]+@[^\s@,;<>()]+\.[a-z]{2,}$/i;
+
+/**
+ * Parse a recipient field -- an array, or one string of comma / semicolon /
+ * newline separated addresses, because operators paste all three.
+ * Returns `{ list }` or `{ error }`; never throws.
+ */
+function parseRecipients(raw, { field = "Recipients", max = MAX_RECIPIENTS } = {}) {
+  const parts = (Array.isArray(raw) ? raw : String(raw ?? "").split(/[,;\n]/))
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean);
+
+  const seen = new Set();
+  const list = [];
+  for (const addr of parts) {
+    if (!EMAIL_RE.test(addr)) return { error: `"${addr}" doesn't look like an email address.` };
+    // Case-insensitive de-dupe: the same person twice is one email, and the
+    // provider would count it twice against the cap.
+    const k = addr.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    list.push(addr);
+  }
+  if (list.length > max) {
+    return { error: `${field}: ${list.length} addresses — the limit is ${max}. Use a newsletter campaign for a larger send.` };
+  }
+  return { list };
+}
+
+// Assigning any of these from parsed JSON walks up the prototype chain, and the
+// rendered context is spread and then walked key by key.
+const FORBIDDEN_KEY = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * The operator-supplied template values.
+ *
+ * Arrives as a JSON string under multipart (a form field can't be an object) and
+ * as a real object otherwise, so both are accepted. Values are NOT escaped here:
+ * services/emailRender.js escapes every interpolation on the way out, and
+ * escaping twice would show a donor `&amp;` in their own surname.
+ */
+function cleanData(raw) {
+  if (raw === undefined || raw === null || raw === "") return { data: {} };
+
+  let obj = raw;
+  if (typeof raw === "string") {
+    if (raw.length > MAX_DATA_BYTES) return { error: "Those template values are too large." };
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return { error: "The template values weren't valid JSON." };
+    }
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return { data: {} };
+
+  const prune = (node, depth) => {
+    if (depth > MAX_DATA_DEPTH) return null;
+    if (Array.isArray(node)) return node.slice(0, 100).map((v) => prune(v, depth + 1));
+    if (node && typeof node === "object") {
+      const out = {};
+      for (const [k, v] of Object.entries(node)) {
+        if (FORBIDDEN_KEY.has(k)) continue;
+        out[k] = prune(v, depth + 1);
+      }
+      return out;
+    }
+    // Scalars pass through with their type intact -- a boolean has to stay a
+    // boolean or `{{#if donation.isRecurring}}` reads "false" as truthy.
+    if (typeof node === "string") return node.slice(0, 10_000);
+    return node;
+  };
+
+  const data = prune(obj, 0);
+  if (JSON.stringify(data).length > MAX_DATA_BYTES) {
+    return { error: "Those template values are too large." };
+  }
+  return { data };
+}
+
+/** True for the strings a checkbox or a query param sends for "yes". */
+const isTrue = (v) => v === true || v === "true" || v === "1" || v === 1 || v === "on";
+
+/**
+ * The shared preamble of both send endpoints: who it goes to, what is attached,
+ * and the breadcrumbs the log and audit trail need. Answers the response itself
+ * on bad input and returns null, so the caller reads as a straight line.
+ */
+function readSendEnvelope(req, res) {
+  const reject = (error) => {
+    res.status(400).json({ error });
+    return null;
+  };
+
+  const to = parseRecipients(req.body.to);
+  if (to.error) return reject(to.error);
+  if (!to.list.length) return reject("Add at least one recipient.");
+
+  const cc = parseRecipients(req.body.cc, { field: "Cc" });
+  if (cc.error) return reject(cc.error);
+
+  const replyToRaw = String(req.body.replyTo || "").trim();
+  if (replyToRaw && !EMAIL_RE.test(replyToRaw)) {
+    return reject(`"${replyToRaw}" doesn't look like an email address.`);
+  }
+
+  const files = toMailAttachments(req.files);
+  if (files.error) return reject(files.error);
+
+  return {
+    to: to.list,
+    cc: cc.list,
+    replyTo: replyToRaw,
+    attachments: files.attachments,
+    attachmentSummary: files.summary,
+  };
 }
 
 /* -- templates: read ------------------------------------------------------ */
@@ -471,8 +610,19 @@ exports.previewTemplate = async (req, res) => {
     const { organisationId } = scopeOf(req);
     const draft = cleanDraft(req.body.draft);
 
+    // The composer previews against the values an operator has actually typed,
+    // not the catalog's samples -- otherwise you approve an email addressed to
+    // "Sarah Whitfield" and send one addressed to someone else. Absent (the
+    // editor's own preview) it stays sample-driven.
+    const values = cleanData(req.body.data);
+    if (values.error) return res.status(400).json({ error: values.error });
+
     const out = await emailTemplates.previewTemplate(entry.key, {
       draft,
+      data: values.data,
+      // Composer previews render ONLY what was typed; the editor's own preview
+      // keeps the samples, which is the whole point of having them.
+      samples: !req.body.data,
       organisationId: entry.scope === "platform" ? null : organisationId,
     });
 
@@ -534,6 +684,250 @@ exports.sendTest = async (req, res) => {
   } catch (error) {
     console.error("sendTest error:", error);
     res.status(500).json({ error: "Failed to send the test email" });
+  }
+};
+
+/* -- manual send ----------------------------------------------------------- */
+
+/**
+ * POST /email/templates/:key/send
+ *
+ * Send a catalogued email FOR REAL, right now, to addresses an operator typed —
+ * with the template's variables filled in by hand and, optionally, files
+ * attached. This is the difference between the console and the send path: until
+ * now an email existed only as something the system emits when a donation
+ * clears. Some of them need to be emitted on purpose — a receipt that bounced,
+ * a volunteer confirmation for someone who applied over the phone, a partner
+ * pack going to an address that never went through the form.
+ *
+ * Deliberately NOT `sendTest`:
+ *   - no "[TEST]" in the subject; the recipient is a real person
+ *   - the recipient is chosen, not forced to the signed-in operator
+ *   - variables come from the request, so the email says the true thing
+ *   - attachments are carried
+ *   - it is written to the audit log, because it is an outbound communication
+ *     sent in the organisation's name by a named person
+ *
+ * Multipart when there are attachments, JSON when there aren't; both shapes are
+ * accepted so the common case doesn't have to build a FormData.
+ */
+exports.sendManual = async (req, res) => {
+  try {
+    const entry = catalog.get(req.params.key);
+    if (!entry) return res.status(404).json({ error: "Unknown email template" });
+    if (!guardTenantAccess(req, res, entry)) return;
+
+    const envelope = readSendEnvelope(req, res);
+    if (!envelope) return; // readSendEnvelope already answered
+
+    const values = cleanData(req.body.data);
+    if (values.error) return res.status(400).json({ error: values.error });
+
+    const { organisationId } = scopeOf(req);
+    // Platform-scope mail is never signed by a tenant, exactly as in sendTest.
+    const orgId = entry.scope === "platform" ? null : organisationId;
+    const org = entry.scope === "platform" ? null : req.organisation || null;
+
+    const result = await emailTemplates.sendTemplateEmail(entry.key, {
+      to: envelope.to,
+      cc: envelope.cc.length ? envelope.cc.join(", ") : undefined,
+      replyTo: envelope.replyTo || undefined,
+      org,
+      organisationId: orgId === null ? undefined : orgId,
+      data: values.data,
+      attachments: envelope.attachments,
+      // An operator who typed a recipient and pressed Send has already made the
+      // call the toggle makes automatically; the UI asks before setting this.
+      ignoreDisabled: isTrue(req.body.force),
+      meta: {
+        manual: true,
+        by: req.user?.email || "",
+        layer: entry.scope === "platform" ? "platform" : "tenant",
+        recipients: envelope.to.length,
+        ...(envelope.attachmentSummary.length ? { files: envelope.attachmentSummary } : {}),
+      },
+    });
+
+    if (!result.success) {
+      if (result.reason === "template_disabled") {
+        return res.status(409).json({
+          error: "This email is switched off. Turn it on, or send it anyway.",
+          reason: "template_disabled",
+        });
+      }
+      return res.status(502).json({
+        error: "The email couldn't be sent — check the SMTP settings.",
+        detail: result.error?.message || result.reason || "",
+      });
+    }
+
+    // Recipients are recorded, the body is not: the same rule the send log
+    // follows, and for the same reason — these carry receipts and reset links.
+    writeAudit(req, "email.manual_send", {
+      organisationId: orgId || undefined,
+      targetType: "emailTemplate",
+      targetId: entry.key,
+      meta: {
+        to: envelope.to,
+        cc: envelope.cc,
+        attachments: envelope.attachmentSummary,
+        forced: isTrue(req.body.force),
+      },
+    });
+
+    res.json({
+      message:
+        envelope.to.length === 1
+          ? `Sent to ${envelope.to[0]}`
+          : `Sent to ${envelope.to.length} recipients`,
+      to: envelope.to,
+      messageId: result.messageId || "",
+    });
+  } catch (error) {
+    console.error("sendManual error:", error);
+    res.status(500).json({ error: "Failed to send the email" });
+  }
+};
+
+/* -- free-form composer ---------------------------------------------------- */
+
+const MAX_CUSTOM_SUBJECT = 300;
+
+/**
+ * A hand-written email, sanitised the same way a saved template is.
+ * Shared by the preview and the send so the two can never diverge.
+ */
+function readCustomBody(req) {
+  const subject = String(req.body.subject || "").trim().slice(0, MAX_CUSTOM_SUBJECT);
+  const mode = req.body.mode === "html" ? "html" : "blocks";
+  const html = String(req.body.html || "").slice(0, MAX_HTML);
+
+  // Multipart can only carry strings, so the block document arrives encoded.
+  let rawBlocks = req.body.blocks;
+  if (typeof rawBlocks === "string") {
+    try {
+      rawBlocks = JSON.parse(rawBlocks);
+    } catch {
+      return { error: "The message content couldn't be read." };
+    }
+  }
+
+  return { subject, mode, html, blocks: cleanBlocks(rawBlocks) };
+}
+
+/**
+ * POST /email/custom/preview
+ * The composer's live preview for a free-form email — the branded layout, the
+ * real org identity, the real colours, rendered before anyone commits.
+ */
+exports.previewCustom = async (req, res) => {
+  try {
+    const content = readCustomBody(req);
+    if (content.error) return res.status(400).json({ error: content.error });
+
+    const values = cleanData(req.body.data);
+    if (values.error) return res.status(400).json({ error: values.error });
+
+    const { layer, organisationId } = scopeOf(req);
+    const out = await emailTemplates.renderCustom({
+      organisationId: layer === "platform" ? null : organisationId,
+      scope: layer,
+      subject: content.subject,
+      preheader: String(req.body.preheader || "").slice(0, 300),
+      mode: content.mode,
+      blocks: content.blocks,
+      html: content.html,
+      data: values.data,
+    });
+
+    res.json({ subject: out.subject, html: out.html, text: out.text });
+  } catch (error) {
+    console.error("previewCustom error:", error);
+    res.status(500).json({ error: "Failed to render preview" });
+  }
+};
+
+/**
+ * POST /email/custom/send
+ *
+ * The catalogue answers "send one of the 43 things this platform says"; this
+ * answers "email this person this". It still goes through the template layer
+ * rather than straight to SMTP, so a hand-written note arrives wearing the same
+ * header, footer, colours and plain-text part as a receipt — and lands in the
+ * same send log, which is where anyone will look for it later.
+ */
+exports.sendCustom = async (req, res) => {
+  try {
+    const envelope = readSendEnvelope(req, res);
+    if (!envelope) return;
+
+    const content = readCustomBody(req);
+    if (content.error) return res.status(400).json({ error: content.error });
+    if (!content.subject) return res.status(400).json({ error: "A subject is required." });
+    const empty =
+      content.mode === "html" ? !content.html.trim() : !content.blocks.length;
+    if (empty) return res.status(400).json({ error: "Add some content to the message." });
+
+    const values = cleanData(req.body.data);
+    if (values.error) return res.status(400).json({ error: values.error });
+
+    const { layer, organisationId } = scopeOf(req);
+    const orgId = layer === "platform" ? null : organisationId;
+
+    const result = await emailTemplates.sendCustomEmail({
+      to: envelope.to,
+      cc: envelope.cc.length ? envelope.cc.join(", ") : undefined,
+      replyTo: envelope.replyTo || undefined,
+      org: layer === "platform" ? null : req.organisation || null,
+      organisationId: orgId === null ? undefined : orgId,
+      scope: layer,
+      subject: content.subject,
+      preheader: String(req.body.preheader || "").slice(0, 300),
+      mode: content.mode,
+      blocks: content.blocks,
+      html: content.html,
+      data: values.data,
+      attachments: envelope.attachments,
+      meta: {
+        manual: true,
+        custom: true,
+        by: req.user?.email || "",
+        layer,
+        recipients: envelope.to.length,
+        ...(envelope.attachmentSummary.length ? { files: envelope.attachmentSummary } : {}),
+      },
+    });
+
+    if (!result.success) {
+      return res.status(502).json({
+        error: "The email couldn't be sent — check the SMTP settings.",
+        detail: result.error?.message || result.reason || "",
+      });
+    }
+
+    writeAudit(req, "email.custom_send", {
+      organisationId: orgId || undefined,
+      targetType: "email",
+      targetId: "custom",
+      meta: {
+        subject: content.subject,
+        to: envelope.to,
+        cc: envelope.cc,
+        attachments: envelope.attachmentSummary,
+      },
+    });
+
+    res.json({
+      message:
+        envelope.to.length === 1
+          ? `Sent to ${envelope.to[0]}`
+          : `Sent to ${envelope.to.length} recipients`,
+      to: envelope.to,
+      messageId: result.messageId || "",
+    });
+  } catch (error) {
+    console.error("sendCustom error:", error);
+    res.status(500).json({ error: "Failed to send the email" });
   }
 };
 
@@ -695,6 +1089,9 @@ exports.listLogs = async (req, res) => {
 
     if (["sent", "failed", "skipped"].includes(req.query.status)) filter.status = req.query.status;
     if (req.query.templateKey && catalog.has(req.query.templateKey)) filter.templateKey = req.query.templateKey;
+    // "Who did we email by hand?" is a different question from "what did the
+    // system send", and after a support call it's the only one being asked.
+    if (isTrue(req.query.manual)) filter["meta.manual"] = true;
 
     const search = String(req.query.search || "").trim();
     if (search) {

@@ -19,7 +19,8 @@ function getModel(name) {
  * @deprecated Tier hierarchy gating doesn't understand custom dynamic plans.
  * Prefer capability gating via requireFeature(flag). Kept for any legacy callers.
  */
-const planHierarchy = { basic: 1, professional: 2, enterprise: 3 };
+// `basic` is the pre-rename alias for `essentials` — see config/planTiers.js.
+const planHierarchy = { essentials: 1, basic: 1, professional: 2, enterprise: 3 };
 const requirePlan = (minPlan) => (req, res, next) => {
   if (!req.organisation) {
     return res.status(400).json({ error: "No organisation context" });

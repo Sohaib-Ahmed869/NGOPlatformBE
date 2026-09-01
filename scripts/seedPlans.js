@@ -28,7 +28,7 @@ const platformStripe = require("../services/platformStripe");
 const stripe = platformStripe.stripe;
 
 const DEFS = [
-  { code: "basic", name: "Basic", color: "#06b6d4", sortOrder: 1, description: "For small charities getting started." },
+  { code: "essentials", name: "Essentials", color: "#0F3D2E", sortOrder: 1, description: "New and small charities. Core fundraising, one branded site, standard support." },
   { code: "professional", name: "Professional", color: "#10b981", sortOrder: 2, description: "Growing organisations that need more." },
   { code: "enterprise", name: "Enterprise", color: "#f59e0b", sortOrder: 3, description: "Unlimited scale for large charities." },
 ];
@@ -37,13 +37,13 @@ const DEFS = [
 // Capability flags that are ON for each tier; any flag not listed defaults OFF
 // (enterprise gets every flag). Operators tune these in the Features matrix.
 const TIER_FLAGS_ON = {
-  basic: ["donations", "recurringGiving", "programs", "volunteers", "contacts", "partners", "cmsPages", "initiatives", "islamicGiving", "ownStripe"],
+  essentials: ["donations", "recurringGiving", "programs", "volunteers", "contacts", "partners", "cmsPages", "initiatives", "islamicGiving", "ownStripe"],
   professional: ["donations", "recurringGiving", "programs", "p2pCampaigns", "store", "events", "volunteers", "newsletter", "contacts", "supportTickets", "partners", "cmsPages", "initiatives", "sectionBuilder", "islamicGiving", "ownStripe", "paypal", "customEmail", "savedCards"],
   enterprise: FLAG_KEYS, // everything
 };
 // Metered quotas per tier (null = Unlimited).
 const TIER_LIMITS = {
-  basic: { campaigns: 5, volunteers: 50, eventsQuota: 0, p2pQuota: 0, productsQuota: 0, adminSeats: 2 },
+  essentials: { campaigns: 5, volunteers: 50, eventsQuota: 0, p2pQuota: 0, productsQuota: 0, adminSeats: 2 },
   professional: { campaigns: 50, volunteers: 500, eventsQuota: 50, p2pQuota: 25, productsQuota: 100, adminSeats: 10 },
   enterprise: { campaigns: null, volunteers: null, eventsQuota: null, p2pQuota: null, productsQuota: null, adminSeats: null },
 };

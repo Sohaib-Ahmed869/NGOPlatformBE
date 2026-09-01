@@ -38,6 +38,12 @@ let platformIdentityCache = null;
 
 const cacheKey = (key, orgId) => `${key}:${orgId || "platform"}`;
 
+// The pseudo-key a free-form composer send is logged under when it fails before
+// it has a subject. It is deliberately NOT a catalog key -- `catalog.get()` must
+// keep returning null for it, or the console would try to render an editor for
+// an email that has no template.
+const CUSTOM_KEY = "custom.manual";
+
 /**
  * Mongoose BUFFERS queries when it isn't connected and only rejects them after
  * bufferTimeoutMS (10s by default). On a send path that would turn a database
@@ -93,6 +99,7 @@ async function platformIdentity() {
     const s = await PlatformSettings.findOne({ key: "platform" })
       .select(
         "name tagline contactEmail contactPhone branding.logo branding.logoDark " +
+          "branding.iconLogo branding.iconLogoDark " +
           "branding.primaryColor branding.accentColor branding.backgroundColor",
       )
       .lean();
@@ -108,6 +115,10 @@ async function platformIdentity() {
         // light mark for the branded header band.
         logo: b.logoDark || b.logo || "",
         logoLight: b.logo || b.logoDark || "",
+        // The square mark, same rule. The platform's own full logo IS a
+        // wordmark, so without this every platform email printed the name twice.
+        logoIcon: b.iconLogoDark || b.iconLogo || "",
+        logoIconLight: b.iconLogo || b.iconLogoDark || "",
         primaryColor: b.primaryColor || "",
         accentColor: b.accentColor || "",
         backgroundColor: b.backgroundColor || "",
@@ -259,6 +270,8 @@ async function buildContext(entry, org, data = {}) {
       supportEmail: platform.supportEmail,
       logo: platform.logo || "",
       logoLight: platform.logoLight || "",
+      logoIcon: platform.logoIcon || "",
+      logoIconLight: platform.logoIconLight || "",
     };
   }
 
@@ -277,6 +290,8 @@ async function buildContext(entry, org, data = {}) {
         website: base,
         logo: platform.logo || "",
         logoLight: platform.logoLight || "",
+        logoIcon: platform.logoIcon || "",
+        logoIconLight: platform.logoIconLight || "",
         primaryColor: platform.primaryColor || "",
         accentColor: platform.accentColor || "",
         backgroundColor: platform.backgroundColor || "",
@@ -407,6 +422,8 @@ async function renderTemplate(key, { org, organisationId, data = {}, template, l
  * @param {Array}  [opts.attachments]  nodemailer attachments
  * @param {string} [opts.replyTo]
  * @param {object} [opts.meta]         breadcrumbs written to the email log
+ * @param {boolean} [opts.ignoreDisabled] send even if the template is toggled off
+ *                                       (manual sends only -- see below)
  * @returns {Promise<{success:boolean, skipped?:boolean, reason?:string}>}
  *
  * Never throws: transactional email is always a side effect of something more
@@ -429,7 +446,11 @@ async function sendTemplateEmail(key, opts = {}) {
     const orgId = opts.organisationId !== undefined ? opts.organisationId : asId(opts.org);
     const tpl = await resolveTemplate(key, orgId);
 
-    if (!tpl.enabled) {
+    // `ignoreDisabled` is for a MANUAL send only: an operator who has opened the
+    // composer, typed a recipient and pressed Send has already made the decision
+    // the toggle exists to make automatically. Automatic call sites never pass
+    // it, so switching an email off still stops it being sent by the system.
+    if (!tpl.enabled && !opts.ignoreDisabled) {
       await logSkipped(key, { to, organisationId: orgId, reason: "template_disabled", meta: opts.meta });
       return { success: false, skipped: true, reason: "template_disabled" };
     }
@@ -496,7 +517,7 @@ async function logSkipped(key, { to, organisationId, reason, error, meta }) {
  * Render a template against the catalog's SAMPLE data, for the console's live
  * preview. Accepts an unsaved draft so the preview updates as it is typed.
  */
-async function previewTemplate(key, { draft, organisationId, data } = {}) {
+async function previewTemplate(key, { draft, organisationId, data, samples = true } = {}) {
   const entry = catalog.get(key);
   if (!entry) throw new Error(`Unknown email template "${key}"`);
 
@@ -521,7 +542,13 @@ async function previewTemplate(key, { draft, organisationId, data } = {}) {
     : await resolveTemplate(key, organisationId);
 
   // Sample values, overlaid with any real data the caller supplied.
-  const sample = { ...catalog.sampleContext(key), ...(data || {}) };
+  //
+  // The COMPOSER passes `samples: false`. It must not overlay: sendTemplateEmail
+  // renders the operator's `data` and nothing else, so a preview that quietly
+  // filled the blanks with "Sarah Whitfield" would be showing an email that is
+  // not the one about to be sent -- the single most expensive way this screen
+  // could be wrong. A field left empty has to LOOK empty.
+  const sample = samples ? { ...catalog.sampleContext(key), ...(data || {}) } : { ...(data || {}) };
   const layout = draft?.layout || (await resolveLayout(entry.scope === "platform" ? null : organisationId));
 
   return renderTemplate(key, {
@@ -535,12 +562,123 @@ async function previewTemplate(key, { draft, organisationId, data } = {}) {
   });
 }
 
+/* -- free-form mail -------------------------------------------------------- */
+
+/**
+ * A one-off email that is NOT in the catalog: the operator wrote the subject and
+ * the body themselves in the composer.
+ *
+ * It still goes through this module rather than straight to `sendEmail`, because
+ * everything that makes a transactional email look like it came from this
+ * charity lives here — the branded layout, the org identity block the header and
+ * footer read, the tenant's own colours, the plain-text part. A free-form email
+ * assembled anywhere else arrives as a bare <div> from a stranger.
+ *
+ * The synthetic entry is what lets the shared machinery run without a catalog
+ * key: `buildContext` and `platformDefaults` only ever read `entry.scope`.
+ */
+async function renderCustom({
+  organisationId,
+  org,
+  scope = "tenant",
+  subject = "",
+  preheader = "",
+  mode = "blocks",
+  blocks = [],
+  html = "",
+  data = {},
+} = {}) {
+  const entry = { key: CUSTOM_KEY, scope: scope === "platform" ? "platform" : "tenant" };
+  const orgId = organisationId !== undefined ? organisationId : asId(org);
+  const lay = platformDefaults(entry, await resolveLayout(entry.scope === "platform" ? null : orgId));
+
+  // Same reasoning as renderTemplate: an id, stringified, is not a loaded doc.
+  const orgForContext = org || (orgId ? String(orgId) : null);
+  const ctx = await buildContext(entry, orgForContext, data);
+
+  const brand = {
+    primaryColor: ctx.org?.primaryColor,
+    accentColor: ctx.org?.accentColor,
+    backgroundColor: ctx.org?.backgroundColor,
+  };
+
+  // The body is still rendered as a template, so `{{org.name}}` and the rest of
+  // the palette work in a hand-written email exactly as they do in a catalogued
+  // one — and are escaped by the same renderer.
+  const renderedSubject = renderString(subject || "", ctx).trim();
+  const inner =
+    mode === "html"
+      ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td>${renderString(html || "", ctx)}</td></tr></table>`
+      : blocksToHtml(blocks, ctx, lay.theme, brand);
+
+  const finalHtml = wrapInLayout(inner, { ...lay, preheader: preheader || lay.preheader }, ctx, brand);
+  return { subject: renderedSubject, html: finalHtml, text: htmlToText(finalHtml), context: ctx };
+}
+
+/**
+ * Send a free-form email. Mirrors sendTemplateEmail's contract — never throws,
+ * always logs — so the composer can treat both paths identically.
+ */
+async function sendCustomEmail(opts = {}) {
+  const { sendEmail } = require("./emailUtil");
+
+  const to = Array.isArray(opts.to) ? opts.to.filter(Boolean).join(", ") : opts.to;
+  if (!to) return { success: false, skipped: true, reason: "no_recipient" };
+
+  try {
+    const orgId = opts.organisationId !== undefined ? opts.organisationId : asId(opts.org);
+    const { subject, html, text } = await renderCustom({
+      organisationId: orgId,
+      org: opts.org,
+      scope: opts.scope,
+      subject: opts.subject,
+      preheader: opts.preheader,
+      mode: opts.mode,
+      blocks: opts.blocks,
+      html: opts.html,
+      data: opts.data,
+    });
+
+    if (!subject) {
+      await logSkipped(CUSTOM_KEY, { to, organisationId: orgId, reason: "empty_subject", meta: opts.meta });
+      return { success: false, skipped: true, reason: "empty_subject" };
+    }
+
+    return await sendEmail(to, html, subject, opts.attachments || [], {
+      org: opts.org,
+      organisationId: orgId,
+      replyTo: opts.replyTo,
+      cc: opts.cc,
+      headers: opts.headers,
+      fromName: opts.fromName,
+      text,
+      preRendered: true,
+      // No catalog key and no layer to attribute: the content came from the
+      // composer, which is exactly what "adhoc" means in the log.
+      log: { templateKey: "", source: "adhoc", meta: opts.meta },
+    });
+  } catch (err) {
+    console.error("[emailTemplates] custom send failed:", err.message);
+    await logSkipped(CUSTOM_KEY, {
+      to,
+      organisationId: asId(opts.org) || opts.organisationId,
+      reason: "render_error",
+      error: err.message,
+      meta: opts.meta,
+    });
+    return { success: false, reason: "render_error", error: err };
+  }
+}
+
 module.exports = {
+  CUSTOM_KEY,
   resolveTemplate,
   resolveLayout,
   renderTemplate,
   previewTemplate,
   sendTemplateEmail,
+  renderCustom,
+  sendCustomEmail,
   buildContext,
   platformIdentity,
   invalidate,

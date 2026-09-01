@@ -66,7 +66,7 @@ function buildSamples(orgId, createdBy) {
       subject: "Ramadan appeal — the final 10 days",
       body: body(
         { title: "The final stretch", lead: "There's still time to make your Ramadan giving count." },
-        ["Sponsor a family iftar", "Fund a water well", "Give a one-off gift"],
+        ["Sponsor a family iftar", "Fund a water well", "Give a one-off donation"],
       ),
       // Far-future date on purpose: the scheduler auto-sends "scheduled"
       // campaigns when due, so a demo one shouldn't fire on real subscribers.

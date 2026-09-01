@@ -10,6 +10,8 @@
     "seed:platform": "node scripts/seedPlatformSettings.js",
     "seed:tickets": "node scripts/seedTickets.js",
     "seed:plans": "node scripts/seedPlans.js",
+    "plans:apply": "node scripts/applyPlanCatalogue.js",
+    "plans:rename": "node scripts/renamePlanCode.js",
     "enrich:plans": "node scripts/enrichPlans.js",
     "verify:plans": "node scripts/verifyPlansLive.js",
     "mail:samples": "node scripts/sendTemplateSamples.js",

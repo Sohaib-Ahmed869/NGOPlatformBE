@@ -22,13 +22,13 @@ const Organisation = require("../models/organisation");
 const Coupon = require("../models/coupon");
 const PlatformInvoice = require("../models/platformInvoice");
 
-const PLAN_PRICE = { basic: 200, professional: 500, enterprise: 1000 };
+const PLAN_PRICE = { essentials: 499, professional: 899, enterprise: 1499 };
 
 // A realistic distribution — the obvious throwaway test orgs go on basic.
 const PLAN_BY_SLUG = {
-  testing: "basic",
-  logotest: "basic",
-  testcharity: "basic",
+  testing: "essentials",
+  logotest: "essentials",
+  testcharity: "essentials",
   matw2: "professional",
   "shahid-afridi-foundation": "professional",
   calcite: "professional",

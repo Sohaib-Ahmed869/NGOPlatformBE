@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const ctrl = require("../controllers/platformSettingsController");
 const stripeCtrl = require("../controllers/platformStripeController");
+const emailCtrl = require("../controllers/platformEmailController");
 const isSuperAdmin = require("../middleware/isSuperAdmin");
 const ipAllowlist = require("../middleware/ipAllowlist");
 const requireCapability = require("../middleware/requireCapability");
@@ -33,5 +34,13 @@ router.post("/settings/stripe/test", operator, stripeCtrl.testConnection);
 // capture its signing secret — Stripe only ever reveals it at creation.
 router.post("/settings/stripe/webhook", operator, stripeCtrl.createWebhook);
 router.delete("/settings/stripe", operator, stripeCtrl.clearConfig);
+
+// Superadmin only — the platform's own outbound mailbox. Same contract as the
+// Stripe routes above: the password is write-only over the wire, responses
+// carry a masked hint. Clearing drops back to the EMAIL_* environment vars.
+router.get("/settings/email", operator, emailCtrl.getConfig);
+router.put("/settings/email", operator, emailCtrl.updateConfig);
+router.post("/settings/email/test", operator, emailCtrl.testConnection);
+router.delete("/settings/email", operator, emailCtrl.clearConfig);
 
 module.exports = router;

@@ -187,11 +187,23 @@ function parseExpression(expr) {
  * (`default:"there"`), while an UNQUOTED one is first tried as a variable path
  * (`money:donation.currency`) and falls back to the literal when that resolves
  * to nothing (`money:GBP`).
+ *
+ * A DOTTED unquoted argument is the exception: it is unambiguously a path, and
+ * no currency code, date format or default string has a dot in it. Falling back
+ * to the literal there prints the path itself, which is how a receipt sent with
+ * no currency filled in rendered its total as "250.00 DONATION.CURRENCY". It
+ * yields `undefined` instead, so the filter applies its own default.
+ *
+ * This only ever showed up once emails could be sent BY HAND — an automatic
+ * call site always supplies the currency, so the fallback was never wrong until
+ * a human could leave the field empty.
  */
 function resolveArg(f, chain) {
   if (f.arg === undefined || f.quoted) return f.arg;
   const looked = lookup(f.arg, chain);
-  if (looked === undefined || looked === null || looked === "") return f.arg;
+  if (looked === undefined || looked === null || looked === "") {
+    return f.arg.includes(".") ? undefined : f.arg;
+  }
   return looked;
 }
 

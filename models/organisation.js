@@ -48,7 +48,7 @@ const organisationSchema = new mongoose.Schema(
     // operators can create custom dynamic plans beyond the original 3 tiers.
     plan: {
       type: String,
-      default: "basic",
+      default: "essentials",
     },
     billingCycle: {
       type: String,

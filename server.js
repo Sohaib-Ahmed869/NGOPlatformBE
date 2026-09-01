@@ -53,7 +53,11 @@ const stripe = platformStripe.stripe;
 
 // Connect to database, then load the stored Stripe credentials so the first
 // request already resolves to them instead of the env fallback.
-connectDB().then(() => platformStripe.prime());
+// Read the console-configured Stripe keys and outbound mailbox once the DB is
+// up. Both resolvers fall back to their environment variables, so a platform
+// that has never opened the console keeps working exactly as before.
+const platformEmail = require("./services/platformEmail");
+connectDB().then(() => Promise.all([platformStripe.prime(), platformEmail.prime()]));
 setupInstallmentProcessingJob();
 scheduleSubscriptionChecks();
 setupCampaignScheduler();

@@ -347,7 +347,7 @@ const SECTION_TYPES = [
       eyebrow: "Good to know",
       heading: "Frequently asked questions",
       items: [
-        { question: "Where does my donation go?", answer: "<p>Every gift goes directly to the cause you choose, with full transparency on impact.</p>" },
+        { question: "Where does my donation go?", answer: "<p>Every donation goes directly to the cause you choose, with full transparency on impact.</p>" },
         { question: "Is my donation tax-deductible?", answer: "<p>Yes — you'll receive a receipt for every donation you make.</p>" },
       ],
     },
@@ -624,7 +624,7 @@ function defaultInitiativesSections() {
       archived: false,
       data: {
         title: "Your support powers every initiative",
-        text: "From a child's first classroom to clean water and emergency relief — every gift turns into real, lasting change.",
+        text: "From a child's first classroom to clean water and emergency relief — every donation turns into real, lasting change.",
         primaryCtaText: "Donate now",
         primaryCtaLink: "/donate",
         secondaryCtaText: "Get involved",
@@ -716,7 +716,7 @@ function defaultGivingSections() {
         items: [
           { icon: "Coins", title: "Zakat", text: "2.5% of qualifying wealth held for a lunar year — one of the five pillars of Islam.", link: "/zakat/calculator" },
           { icon: "HandHeart", title: "Sadaqah", text: "Voluntary charity given any time, in any amount, for any cause close to your heart.", link: "/donate" },
-          { icon: "Sparkles", title: "Zakat al-Fitr", text: "A small obligatory gift given before Eid prayer that purifies the fast.", link: "" },
+          { icon: "Sparkles", title: "Zakat al-Fitr", text: "A small obligatory donation given before Eid prayer that purifies the fast.", link: "" },
           { icon: "Gem", title: "Fidya & Kaffarah", text: "Compensation for missed fasts — feeding those in need on your behalf.", link: "" },
         ],
       },
@@ -867,7 +867,7 @@ function defaultHomeSections() {
       archived: false,
       data: {
         title: "Ready to make a difference?",
-        text: "Join the community of donors changing lives. Every gift, big or small, creates lasting impact.",
+        text: "Join the community of donors changing lives. Every donation, big or small, creates lasting impact.",
         primaryCtaText: "Donate now",
         primaryCtaLink: "/donate",
         secondaryCtaText: "Explore our work",

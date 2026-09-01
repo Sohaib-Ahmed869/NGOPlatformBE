@@ -86,6 +86,39 @@ const platformSettingsSchema = new mongoose.Schema(
       allowTenantFallback: { type: Boolean, default: true },
     },
 
+    // The PLATFORM's own outbound mailbox — every transactional email that is
+    // not sent through a tenant's own SMTP account goes out of here: SaaS
+    // billing, registration, operator notices, and any tenant that hasn't
+    // connected their own. Same shape and same rules as `stripe` above: the
+    // password is AES-256-GCM encrypted (utils/crypto.js), stripped by the
+    // toJSON transform below, and falls back to the EMAIL_* environment
+    // variables when not enabled — see services/platformEmail.js.
+    email: {
+      enabled: { type: Boolean, default: false },
+      host: { type: String, default: "" },
+      port: { type: Number, default: 587 },
+      // 465 => true (implicit TLS), 587 => false (STARTTLS). Getting this
+      // backwards is the single most common SMTP misconfiguration: the client
+      // waits for a TLS handshake the server never starts, and the send hangs
+      // until it times out rather than failing with anything readable.
+      secure: { type: Boolean, default: false },
+      username: { type: String, default: "" },
+      passwordEnc: { type: String, default: "" },
+      // Display-only hint ("ab••••••yz"), computed at save time so the read
+      // path never decrypts just to render a mask.
+      passwordMask: { type: String, default: "" },
+      // Envelope identity. fromEmail defaults to `username` when blank, which
+      // is what most providers require anyway — they reject a From address the
+      // authenticated mailbox does not own.
+      fromName: { type: String, default: "" },
+      fromEmail: { type: String, default: "" },
+      replyTo: { type: String, default: "" },
+      lastVerifiedAt: { type: Date },
+      // The last failure text from a verify/test, kept so the console can show
+      // WHY the mailbox is unhealthy instead of a bare red dot.
+      lastVerifyError: { type: String, default: "" },
+    },
+
     contactEmail: { type: String, default: "support@ngoplatform.com" },
     contactPhone: { type: String, default: "" },
     address: { type: String, default: "Sydney, NSW, Australia" },
@@ -108,6 +141,9 @@ function scrubSecrets(_doc, ret) {
   if (ret.stripe) {
     delete ret.stripe.secretKeyEnc;
     delete ret.stripe.webhookSecretEnc;
+  }
+  if (ret.email) {
+    delete ret.email.passwordEnc;
   }
   return ret;
 }

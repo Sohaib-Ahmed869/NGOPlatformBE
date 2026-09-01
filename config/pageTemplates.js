@@ -640,7 +640,7 @@ const PAGE_TEMPLATES = [
       forms: [
         { icon: "Coins", title: "Zakat", text: "2.5% of qualifying wealth held for a lunar year — one of the five pillars of Islam." },
         { icon: "HandHeart", title: "Sadaqah", text: "Voluntary charity given any time, in any amount, for any cause close to your heart." },
-        { icon: "Sparkles", title: "Zakat al-Fitr", text: "A small obligatory gift given before Eid prayer that purifies the fast." },
+        { icon: "Sparkles", title: "Zakat al-Fitr", text: "A small obligatory donation given before Eid prayer that purifies the fast." },
         { icon: "Gem", title: "Fidya & Kaffarah", text: "Compensation for missed fasts — feeding those in need on your behalf." },
       ],
     },
@@ -739,13 +739,13 @@ const PAGE_TEMPLATES = [
         eyebrow: "The last 10 nights",
         title: "Targeted nightly giving",
         intro: "Pick a cause and let it give automatically every night of the final ten.",
-        cardButton: "Automate this gift",
+        cardButton: "Automate this donation",
       },
       dailySection: {
         eyebrow: "Flexible daily sadaqah",
         title: "Set an amount, give every night",
         intro: "Choose a nightly amount and we'll direct it where it's needed most.",
-        cardButton: "Automate this gift",
+        cardButton: "Automate this donation",
       },
       zakatCta: {
         title: "Don't forget your Zakat this Ramadan",
@@ -880,7 +880,7 @@ const PAGE_TEMPLATES = [
       },
       intro: {
         eyebrow: "Our programs",
-        heading: "Choose where your gift goes",
+        heading: "Choose where your donation goes",
         subtitle: "Browse our active campaigns and back the cause closest to your heart.",
       },
     },

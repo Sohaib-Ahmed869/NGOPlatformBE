@@ -69,6 +69,11 @@ const ORG_VARS = [
   v("org.website", "Website", "https://hopetrust.org.au"),
   v("org.logo", "Logo (dark, for light backgrounds)", ""),
   v("org.logoLight", "Logo (light, for the header band)", ""),
+  // The square mark, when one has been uploaded. The header uses it in place of
+  // the full logo whenever the name is also set in type -- a wordmark beside the
+  // same word reads as the name twice.
+  v("org.logoIcon", "Mark (dark, for light backgrounds)", ""),
+  v("org.logoIconLight", "Mark (light, for the header band)", ""),
   v("org.primaryColor", "Brand primary colour", "#2C2418"),
   v("org.accentColor", "Brand accent colour", "#C9A84C"),
   v("org.footer", "Contact line", "hopetrust.org.au | hello@hopetrust.org.au | 1300 000 000"),
@@ -95,6 +100,10 @@ const ORG_VARS = [
 
 const PLATFORM_VARS = [
   v("platform.name", "Platform name", "Donexus"),
+  v("platform.logo", "Platform logo (dark)", ""),
+  v("platform.logoLight", "Platform logo (light)", ""),
+  v("platform.logoIcon", "Platform mark (dark)", ""),
+  v("platform.logoIconLight", "Platform mark (light)", ""),
   v("platform.url", "Platform URL", "https://donexus.app"),
   v("platform.supportEmail", "Platform support email", "support@donexus.app"),
 ];
@@ -150,7 +159,7 @@ const SUBSCRIPTION_VARS = [
  *           turning these off breaks a legal or security obligation)
  */
 const GROUPS = [
-  { key: "donations", label: "Donations", description: "Receipts and the lifecycle of a single gift." },
+  { key: "donations", label: "Donations", description: "Receipts and the lifecycle of a single donation." },
   { key: "subscriptions", label: "Recurring giving", description: "Subscriptions, installments and cancellations." },
   { key: "accounts", label: "Donor accounts", description: "Sign-up, passwords and account security." },
   { key: "events", label: "Events", description: "Registrations and attendee communication." },
@@ -195,7 +204,7 @@ const TEMPLATES = [
       preheader: "Your receipt for {{donation.amount | money:donation.currency}}",
       blocks: [
         { ...h("Thank you, {{donor.firstName | default:\"friend\"}}"), eyebrow: "Your receipt" },
-        p("Your gift to {{org.name}} has been received, and your official tax receipt is attached to this email."),
+        p("Your donation to {{org.name}} has been received, and your official tax receipt is attached to this email."),
         // The figure led the email as a row inside a details panel, where it
         // read as a field rather than as the reason the email exists.
         hero(
@@ -280,7 +289,7 @@ const TEMPLATES = [
         steps([
           {
             title: "Make the transfer",
-            text: "Quote reference <strong>{{donation.id}}</strong> so we can match it to your gift.",
+            text: "Quote reference <strong>{{donation.id}}</strong> so we can match it to your donation.",
           },
           {
             title: "Send us the proof",
@@ -308,14 +317,14 @@ const TEMPLATES = [
     group: "donations",
     scope: "tenant",
     audience: "Donor",
-    description: "Sent when an admin manually approves a pending donation (bank transfer or offline gift).",
+    description: "Sent when an admin manually approves a pending donation (bank transfer or offline donation).",
     variables: [...DONOR_VARS, ...DONATION_VARS],
     defaults: {
       subject: "Your donation is confirmed — {{org.name}}",
       preheader: "Donation {{donation.id}} has been confirmed",
       blocks: [
         { ...h("Your donation is confirmed"), eyebrow: "Confirmed" },
-        p("Hi {{donor.firstName | default:\"there\"}}, we've received and confirmed your gift. Thank you for standing with us."),
+        p("Hi {{donor.firstName | default:\"there\"}}, we've received and confirmed your donation. Thank you for standing with us."),
         hero(
           "Amount received",
           "{{donation.amount | money:donation.currency}}",
@@ -401,12 +410,12 @@ const TEMPLATES = [
     scope: "tenant",
     audience: "Donor",
     description:
-      "A progress note an admin posts against one donor's gift — the mid-flight sibling of the completion email.",
+      "A progress note an admin posts against one donor's donation — the mid-flight sibling of the completion email.",
     variables: [
       ...DONOR_VARS,
       v("donation.id", "Donation ID", "DN-48210"),
       v("donation.cause", "Cause / program", "Clean Water Wells"),
-      v("update.body", "Update text", "Your gift funded the survey work — drilling starts next month."),
+      v("update.body", "Update text", "Your donation funded the survey work — drilling starts next month."),
       v("update.image", "Update image URL", ""),
       v("donation.receiptUrl", "My donations link", "https://hopetrust.donexus.app/user/donations"),
     ],
@@ -423,7 +432,7 @@ const TEMPLATES = [
           { label: "Supporting", value: "{{donation.cause}}", showIf: "donation.cause" },
         ]),
         btn("View my donations", "{{donation.receiptUrl}}", {
-          note: "Receipts and past gifts are all in one place.",
+          note: "Receipts and past donations are all in one place.",
         }),
         rule(),
         signOff(),
@@ -444,7 +453,7 @@ const TEMPLATES = [
       subject: "Your recurring donation has been cancelled — {{org.name}}",
       preheader: "No further payments will be taken",
       blocks: [
-        { ...h("Your recurring gift has been cancelled"), eyebrow: "Confirmed" },
+        { ...h("Your recurring donation has been cancelled"), eyebrow: "Confirmed" },
         p("Hi {{donor.firstName | default:\"there\"}}, your recurring donation to {{org.name}} has been cancelled and no further payments will be taken."),
         // What they gave deserves more room than the reference number does.
         stats([
@@ -471,7 +480,7 @@ const TEMPLATES = [
     group: "subscriptions",
     scope: "tenant",
     audience: "Donor",
-    description: "Sent when an admin approves a donor's request to cancel their recurring gift.",
+    description: "Sent when an admin approves a donor's request to cancel their recurring donation.",
     variables: [...DONOR_VARS, ...SUBSCRIPTION_VARS],
     defaults: {
       subject: "Your cancellation request is approved — {{org.name}}",
@@ -490,7 +499,7 @@ const TEMPLATES = [
             value: "{{subscription.amount | money:subscription.currency}} {{subscription.frequency | lower}}",
           },
         ]),
-        p("We're grateful for every gift you gave. Thank you."),
+        p("We're grateful for every donation you gave. Thank you."),
         rule(),
         signOff(),
       ],
@@ -523,7 +532,7 @@ const TEMPLATES = [
     group: "subscriptions",
     scope: "tenant",
     audience: "Charity staff",
-    description: "Internal alert telling the charity's team that a donor has asked to cancel a recurring gift.",
+    description: "Internal alert telling the charity's team that a donor has asked to cancel a recurring donation.",
     variables: [
       ...DONOR_VARS,
       ...SUBSCRIPTION_VARS,
@@ -532,7 +541,7 @@ const TEMPLATES = [
     ],
     defaults: {
       subject: "Cancellation request — {{donor.name}} ({{org.name}})",
-      preheader: "A donor has asked to cancel their recurring gift",
+      preheader: "A donor has asked to cancel their recurring donation",
       blocks: [
         { ...h("Cancellation request received"), eyebrow: "Action needed" },
         p("A donor has asked to cancel their recurring donation. Please review and action it in the admin portal."),
@@ -599,7 +608,7 @@ const TEMPLATES = [
       preheader: "Your donor account is ready",
       blocks: [
         { ...h("Thank you, {{donor.firstName | default:\"friend\"}}"), eyebrow: "Your account is ready" },
-        p("Your gift to {{org.name}} (reference <strong>{{donation.id}}</strong>) means a great deal. We've created an account so you can track your giving, download receipts and manage future donations."),
+        p("Your donation to {{org.name}} (reference <strong>{{donation.id}}</strong>) means a great deal. We've created an account so you can track your giving, download receipts and manage future donations."),
         panel("Your sign-in details", [
           { label: "Email", value: "{{donor.email}}", strong: true },
           { label: "Temporary password", value: "{{account.password}}" },
@@ -1014,8 +1023,8 @@ const TEMPLATES = [
       subject: "Thank you for your donation — {{org.name}}",
       preheader: "You supported {{fundraiser.title}}",
       blocks: [
-        { ...h("Thank you, {{donor.firstName | default:\"friend\"}}"), eyebrow: "Gift received" },
-        p("Your gift of <strong>{{donation.amount | money:donation.currency}}</strong> to <strong>{{fundraiser.title}}</strong> has been received."),
+        { ...h("Thank you, {{donor.firstName | default:\"friend\"}}"), eyebrow: "Donation received" },
+        p("Your donation of <strong>{{donation.amount | money:donation.currency}}</strong> to <strong>{{fundraiser.title}}</strong> has been received."),
         stats([
           { label: "Raised so far", value: "{{fundraiser.raised | money:donation.currency}}" },
           { label: "Goal", value: "{{fundraiser.goal | money:donation.currency}}" },
@@ -1025,7 +1034,7 @@ const TEMPLATES = [
           { label: "Fundraiser", value: "{{fundraiser.title}}" },
         ]),
         btn("See the fundraiser", "{{fundraiser.url}}", {
-          note: "Every gift moves this closer. Thank you for being part of it.",
+          note: "Every donation moves this closer. Thank you for being part of it.",
         }),
         rule(),
         signOff(),

@@ -877,7 +877,22 @@ function wrapInLayout(bodyHtml, layout, ctx, brand) {
   // inbox, and the monogram below is a far better failure than that.
   const darkLogo = absoluteUrl(renderString(l.logoUrl || "{{org.logo}}", ctx));
   const lightLogo = absoluteUrl(renderString(l.logoUrlOnDark || "{{org.logoLight}}", ctx));
-  const logo = l.showLogo === false ? "" : banded ? lightLogo || darkLogo : darkLogo || lightLogo;
+  const fullLogo = banded ? lightLogo || darkLogo : darkLogo || lightLogo;
+
+  // The square MARK, by the same light/dark rule. Read straight from the
+  // identity rather than from a layout field, because it is not an alternative
+  // logo an operator picks -- it is which CROP of the same brand belongs beside
+  // the name. Empty for an organisation that has never uploaded one.
+  const darkIcon = absoluteUrl(renderString("{{org.logoIcon}}", ctx));
+  const lightIcon = absoluteUrl(renderString("{{org.logoIconLight}}", ctx));
+  const iconLogo = banded ? lightIcon || darkIcon : darkIcon || lightIcon;
+
+  // An operator who typed their own logo URL into the layout means THAT image;
+  // the substitution below is only ever applied to the shipped default.
+  const defaultLogoUrls =
+    (!l.logoUrl || l.logoUrl === DEFAULT_LAYOUT.logoUrl) &&
+    (!l.logoUrlOnDark || l.logoUrlOnDark === DEFAULT_LAYOUT.logoUrlOnDark);
+
   const logoH = px(l.logoHeight, 40);
 
   const onBand = t.brandTextColor;
@@ -910,6 +925,32 @@ function wrapInLayout(bodyHtml, layout, ctx, brand) {
         `${escapeHtml(initials)}</td></tr></table>`
       : "";
 
+  // The name is set in TYPE, always. Images are blocked by default in a lot of
+  // clients, and a header that identifies the sender only through an image
+  // identifies nothing the moment that image fails to load.
+  const showName = l.showBrandName !== false && !!orgName;
+
+  /**
+   * Which image sits beside the name.
+   *
+   * A wordmark next to the same word in type says the name twice. That is not
+   * hypothetical: the platform's own header read "Donexus | Donexus" on every
+   * email it sent, because the shipped default shows the name AND the uploaded
+   * logo, and the uploaded logo is a wordmark.
+   *
+   * So when the name is in type, the MARK wins if there is one -- that is the
+   * composed look the header was designed around. With the name off, the full
+   * logo has to carry the identity by itself, so it wins instead. And an
+   * organisation with no mark uploaded keeps exactly what it has today, which
+   * is why this can go out without anyone re-uploading anything.
+   */
+  const logo =
+    l.showLogo === false
+      ? ""
+      : showName && defaultLogoUrls && iconLogo
+        ? iconLogo
+        : fullLogo || iconLogo;
+
   // An image that 404s or is blocked by the client falls back to its alt text,
   // so that text is styled too -- a broken logo should still read as the brand.
   const logoImg = logo
@@ -922,11 +963,6 @@ function wrapInLayout(bodyHtml, layout, ctx, brand) {
     logoImg ||
     chip(38, banded ? t.accentColor : t.brandColor, banded ? t.accentTextColor : t.brandTextColor, 15);
 
-  // The name is set in TYPE, always. Images are blocked by default in a lot of
-  // clients, and a header that identifies the sender only through an image
-  // identifies nothing the moment that image fails to load. Turn it off when
-  // the uploaded logo is already a wordmark.
-  const showName = l.showBrandName !== false && !!orgName;
   const nameHtml = showName
     ? `<div style="font-family:${t.headingFontFamily};font-size:19px;line-height:1.2;font-weight:700;` +
       `letter-spacing:-.01em;color:${nameColor};">${orgName}</div>`

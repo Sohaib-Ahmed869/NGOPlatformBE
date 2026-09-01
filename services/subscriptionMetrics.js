@@ -63,7 +63,7 @@ function orgFacet(extra = {}) {
 
 /** The legacy static tiers, used until the Plan collection has been seeded. */
 const LEGACY_TIERS = [
-  ["basic", "Basic", "#06b6d4"],
+  ["essentials", "Essentials", "#0F3D2E"],
   ["professional", "Professional", "#10b981"],
   ["enterprise", "Enterprise", "#f59e0b"],
 ];

@@ -19,7 +19,7 @@ const Plan = require("../models/plan");
 
 const ENRICH = [
   {
-    code: "basic",
+    code: "essentials",
     description: "For small charities getting started.",
     isPopular: false,
     features: [

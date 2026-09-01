@@ -105,9 +105,21 @@ function sanitizeFlags(flags = {}) {
 }
 
 // { code: { total, active } } subscriber counts across all organisations.
+//
+// `deletedAt: null` is load-bearing. Soft delete is the SuperAdmin console's
+// Danger Zone action, and models/organisation.js states the contract plainly:
+// a deleted org is "hidden from every SuperAdmin list/stat". This aggregate was
+// the one place that ignored it, so the plan cards were counting rows nobody
+// can see anywhere else in the console — 22 of 25 organisations on this
+// platform are soft-deleted, which is why every card read 11/11/3 when the real
+// tenant count is 0/2/1.
+//
+// `total` still includes suspended-but-not-deleted tenants on purpose: they are
+// on the plan and would come back if reactivated. `active` is the narrower
+// figure — a live subscription — and the two are meant to differ.
 async function subscriberCounts() {
   const rows = await Organisation.aggregate([
-    { $match: { plan: { $nin: [null, ""] } } },
+    { $match: { plan: { $nin: [null, ""] }, deletedAt: null } },
     {
       $group: {
         _id: "$plan",

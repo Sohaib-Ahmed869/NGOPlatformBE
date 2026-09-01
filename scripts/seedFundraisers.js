@@ -121,7 +121,7 @@ function buildSamples(orgId, userId) {
       description:
         "In loving memory of Brother Yusuf, we're funding clean-water wells for villages that walk hours each day for water.",
       personalStory:
-        "Yusuf spent his life quietly helping others. To honour his memory, his family and friends want to give a gift that keeps giving — clean water for communities that have none. Each well serves hundreds of people for decades.",
+        "Yusuf spent his life quietly helping others. To honour his memory, his family and friends want to give a donation that keeps giving — clean water for communities that have none. Each well serves hundreds of people for decades.",
       financialSituation:
         "The villages we're targeting have no access to safe water and no means to fund infrastructure. Children miss school to fetch water and waterborne illness is common.",
       reasonForFunding:

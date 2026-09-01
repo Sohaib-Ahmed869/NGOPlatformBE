@@ -1,5 +1,5 @@
 module.exports = {
-  basic: {
+  essentials: {
     monthly: process.env.STRIPE_PRICE_BASIC_MONTHLY,
     annual: process.env.STRIPE_PRICE_BASIC_ANNUAL,
   },

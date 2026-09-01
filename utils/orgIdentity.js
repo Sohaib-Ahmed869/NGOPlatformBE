@@ -67,8 +67,8 @@ async function getOrgIdentity(orgOrId) {
       org = await Organisation.findById(org)
         .select(
           "name slug contactEmail contactPhone website email " +
-            "branding.logo branding.logoDark branding.primaryColor branding.accentColor " +
-            "branding.backgroundColor",
+            "branding.logo branding.logoDark branding.iconLogo branding.iconLogoDark " +
+            "branding.primaryColor branding.accentColor branding.backgroundColor",
         )
         .lean();
     } catch {
@@ -97,6 +97,15 @@ async function getOrgIdentity(orgOrId) {
   const brand = org?.branding || {};
   const logo = clean(brand.logoDark) || clean(brand.logo);
   const logoLight = clean(brand.logo) || clean(brand.logoDark);
+
+  // The square MARK, in the same two variants. This is not a smaller logo: for
+  // an organisation whose logo is a wordmark it is the only image that can sit
+  // beside the name in type without saying the name twice, which is exactly
+  // what the platform's own header did -- "Donexus | Donexus". Empty for a
+  // tenant that has never uploaded one, and the header falls back to the full
+  // logo in that case.
+  const logoIcon = clean(brand.iconLogoDark) || clean(brand.iconLogo);
+  const logoIconLight = clean(brand.iconLogo) || clean(brand.iconLogoDark);
 
   // The same palette the tenant's portal is painted with, so their email looks
   // like the site the donor just came from instead of a generic template.
@@ -133,6 +142,8 @@ async function getOrgIdentity(orgOrId) {
     website,
     logo,
     logoLight,
+    logoIcon,
+    logoIconLight,
     primaryColor,
     accentColor,
     backgroundColor,

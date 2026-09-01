@@ -107,7 +107,7 @@ function resolveFormFields(lead, body) {
     orgName: String(body?.orgName || lead.orgName || "").trim(),
     adminName: String(body?.adminName || lead.contactName || "").trim(),
     adminEmail: String(body?.adminEmail || lead.contactEmail || "").trim().toLowerCase(),
-    plan: String(body?.plan || lead.interestedPlan || "basic"),
+    plan: String(body?.plan || lead.interestedPlan || "essentials"),
     billingCycle: ["monthly", "annual"].includes(body?.billingCycle) ? body.billingCycle : lead.interestedBillingCycle || "monthly",
     requestedSlug: body?.slug,
     isMuslimCharity: typeof body?.isMuslimCharity === "boolean" ? body.isMuslimCharity : lead.verticalType === "muslim",

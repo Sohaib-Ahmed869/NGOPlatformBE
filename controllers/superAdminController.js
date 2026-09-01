@@ -225,7 +225,7 @@ exports.changePlan = async (req, res) => {
     // Prefer a dynamic Plan; fall back to the legacy static tiers so this keeps
     // working before the Plan collection has been seeded.
     const planDoc = await Plan.findOne({ code: plan });
-    const legacyPlans = ["basic", "professional", "enterprise"];
+    const legacyPlans = ["essentials", "professional", "enterprise"];
     if (!planDoc && !legacyPlans.includes(plan)) {
       return res.status(400).json({ error: "Invalid plan" });
     }

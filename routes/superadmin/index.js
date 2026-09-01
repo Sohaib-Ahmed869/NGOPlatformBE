@@ -70,6 +70,19 @@ router.get("/invoices", canBilling, superAdminController.listInvoices);
 
 // Team / platform-operator management (Owner/Admin only).
 router.get("/users", canOps, superAdminUserController.list);
+// Read-only companion to the list above: the admin each tenant signs in with.
+// Registered before any "/users/:id" pattern so the literal path always wins.
+router.get("/users/tenant-admins", canOps, superAdminUserController.listTenantAdmins);
+// What an operator can do FOR (or TO) a charity's own admin. Separate paths
+// from the operator routes below because they guard on a different role —
+// these accept only `role: "admin"`, those only `role: "superadmin"`, so
+// neither set can be used to reach the other population.
+router.patch("/users/tenant-admins/:id/status", canOps, docId, superAdminUserController.setTenantAdminStatus);
+router.post("/users/tenant-admins/:id/force-logout", canOps, docId, superAdminUserController.forceLogoutTenantAdmin);
+router.post("/users/tenant-admins/:id/unlock", canOps, docId, superAdminUserController.unlockTenantAdmin);
+router.post("/users/tenant-admins/:id/reset-2fa", canOps, docId, superAdminUserController.resetTenantAdminMfa);
+router.patch("/users/tenant-admins/:id/mfa-policy", canOps, docId, superAdminUserController.setTenantAdminMfaPolicy);
+router.post("/users/tenant-admins/:id/password-reset", canOps, docId, superAdminUserController.sendTenantAdminPasswordReset);
 router.post("/users", canOps, superAdminUserController.invite);
 router.patch("/users/:id/invite", canOps, docId, superAdminUserController.updateInvite);
 router.patch("/users/:id/role", canOps, docId, superAdminUserController.changeRole);
@@ -92,6 +105,9 @@ router.get("/audit", canOps, supportSessionController.listAudit);
 router.get("/coupons", canBilling, couponController.listCoupons);
 router.post("/coupons", canBilling, couponController.createCoupon);
 router.post("/coupons/:code/archive", canBilling, couponController.archiveCoupon);
+// Archiving DELETES the Stripe coupon, so restoring has to recreate it rather
+// than flip a flag — see the note on restoreCoupon.
+router.post("/coupons/:code/restore", canBilling, couponController.restoreCoupon);
 // Stripe coupons are immutable, so editing is split: PATCH for the fields that
 // only live here (description, plan whitelist), /replace for the discount terms.
 router.patch("/coupons/:code", canBilling, couponController.updateCoupon);
@@ -152,6 +168,7 @@ router.use(
   (() => {
     const email = express.Router();
     const emailCtrl = require("../../controllers/emailTemplateController");
+    const { emailAttachmentUpload } = require("../../middleware/emailAttachments");
 
     email.get("/templates", emailCtrl.listTemplates);
     email.get("/layout", emailCtrl.getLayout);
@@ -160,9 +177,15 @@ router.use(
     email.get("/logs", emailCtrl.listLogs);
     email.get("/logs/stats", emailCtrl.logStats);
 
+    // The free-form composer -- an email that isn't in the catalog at all.
+    email.post("/custom/preview", emailCtrl.previewCustom);
+    email.post("/custom/send", emailAttachmentUpload, emailCtrl.sendCustom);
+
     // Ahead of "/templates/:key" so these aren't read as a template key.
     email.post("/templates/:key/preview", emailCtrl.previewTemplate);
     email.post("/templates/:key/test", emailCtrl.sendTest);
+    // A real send to real people, with attachments -- hence multipart.
+    email.post("/templates/:key/send", emailAttachmentUpload, emailCtrl.sendManual);
     email.post("/templates/:key/reset", emailCtrl.resetTemplate);
     email.patch("/templates/:key/toggle", emailCtrl.toggleTemplate);
     email.get("/templates/:key", emailCtrl.getTemplate);
