@@ -8,6 +8,35 @@ const stripePrices = require("../../config/stripePrices");
 const { sendEmail } = require("../../services/emailUtil");
 
 /**
+ * The subdomain rule, in ONE place.
+ *
+ * It used to be written out at the point of registration and the reserved list
+ * repeated again in checkSlug, which is how the two drifted apart in the way
+ * that matters: check-slug tested the reserved list but never the FORMAT. So
+ * "my--charity" or "-hope" came back `available: true`, the form showed a green
+ * tick, and the applicant filled in four more steps and reached the payment
+ * screen before the server finally refused the slug it had just approved.
+ *
+ * No leading or trailing hyphen and no doubled hyphen, because the slug becomes
+ * a DNS label in `<slug>.example.org` and those are not valid there.
+ */
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SLUG_MIN = 3;
+const SLUG_RESERVED = ["admin", "www", "api", "app", "mail", "ftp", "localhost"];
+
+/** null when the slug is usable, else the reason it is not. */
+function slugProblem(raw) {
+  const slug = String(raw || "").toLowerCase().trim();
+  if (!slug) return "A web address is required";
+  if (slug.length < SLUG_MIN) return `Web address must be at least ${SLUG_MIN} characters`;
+  if (!SLUG_RE.test(slug)) {
+    return "Web address must be lowercase letters, numbers and single hyphens between them";
+  }
+  if (SLUG_RESERVED.includes(slug)) return "This subdomain is reserved";
+  return null;
+}
+
+/**
  * POST /api/saas/register/upload-logo
  * Upload a logo during registration (before org is created).
  * Returns the S3 URL to be passed along with the registration request.
@@ -37,17 +66,9 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    // Validate slug format (lowercase alphanumeric + hyphens)
-    const slugRegex = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    if (!slugRegex.test(slug)) {
-      return res.status(400).json({ error: "Slug must be lowercase alphanumeric with hyphens only" });
-    }
-
-    // Reserved slugs
-    const reserved = ["admin", "www", "api", "app", "mail", "ftp", "localhost"];
-    if (reserved.includes(slug)) {
-      return res.status(400).json({ error: "This subdomain is reserved" });
-    }
+    // Format + reserved, from the one shared rule at the top of this file.
+    const slugIssue = slugProblem(slug);
+    if (slugIssue) return res.status(400).json({ error: slugIssue });
 
     // Check slug uniqueness
     const existingOrg = await Organisation.findOne({ slug });
@@ -316,13 +337,14 @@ exports.checkSlug = async (req, res) => {
       return res.status(400).json({ error: "Slug is required" });
     }
 
-    const reserved = ["admin", "www", "api", "app", "mail", "ftp", "localhost"];
-    if (reserved.includes(slug)) {
-      return res.json({ available: false, reason: "This subdomain is reserved" });
-    }
+    // Format is checked HERE too, not just at registration. This endpoint is
+    // what the form's live tick is driven by, so a slug it calls available must
+    // actually be registrable — otherwise the rejection lands four steps later.
+    const issue = slugProblem(slug);
+    if (issue) return res.json({ available: false, reason: issue });
 
-    const existing = await Organisation.findOne({ slug: slug.toLowerCase() });
-    res.json({ available: !existing });
+    const existing = await Organisation.findOne({ slug: String(slug).toLowerCase() });
+    res.json({ available: !existing, reason: existing ? "That web address is already taken" : undefined });
   } catch (error) {
     console.error("Check slug error:", error);
     res.status(500).json({ error: "Server error" });

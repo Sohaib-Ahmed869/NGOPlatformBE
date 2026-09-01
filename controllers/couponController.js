@@ -39,7 +39,11 @@ exports.listCoupons = async (req, res) => {
  */
 function parseCouponInput(body = {}) {
   const { code, description, type, value, currency, duration, durationInMonths, planCodes, maxRedemptions, redeemBy } = body;
-  if (!code || !value) return { error: "code and value are required" };
+  // `value == null` rather than `!value`: 0 is falsy, so a zero discount was
+  // reported as "code and value are required" — an odd thing to read when you
+  // have just typed both. It is still rejected, two checks down, by the message
+  // that actually describes the problem.
+  if (!code || value == null || value === "") return { error: "code and value are required" };
 
   // A promotion code is typed by customers at checkout and appears in URLs, so
   // it has to be a plain token. Spaces and markup were both accepted before,
