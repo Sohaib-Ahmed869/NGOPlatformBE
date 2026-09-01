@@ -3,7 +3,7 @@ const Lead = require("../../models/lead");
 const Organisation = require("../../models/organisation");
 const PlatformSettings = require("../../models/platformSettings");
 const { sendTemplateEmail } = require("../../services/emailUtil");
-const { platformAppUrl } = require("../../utils/tenantUrls");
+const { platformConsoleUrl } = require("../../utils/tenantUrls");
 const { emitToSuperAdmins } = require("../../services/socket");
 const { stripe } = require("../../services/platformStripe");
 
@@ -149,7 +149,8 @@ exports.submitLead = async (req, res) => {
                 ]
                   .filter(Boolean)
                   .join("\n\n"),
-                url: platformAppUrl(`/leads/${lead._id}`),
+                // The console, not the marketing site — /leads only exists there.
+                url: platformConsoleUrl(`/leads/${lead._id}`),
               },
             },
             meta: { leadId: String(lead._id) },

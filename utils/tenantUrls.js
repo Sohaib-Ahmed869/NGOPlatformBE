@@ -61,4 +61,31 @@ function platformAppUrl(path = "") {
   return `${base}${path}`;
 }
 
-module.exports = { portalOrigin, portalUrl, adminPortalUrl, publicSiteUrl, platformAppUrl };
+/**
+ * The SuperAdmin CONSOLE's origin — where /leads/:id and /tasks/:id live.
+ *
+ * Not the same place as platformAppUrl. The console is served from the `admin.`
+ * subdomain (see App.jsx's host switch), so a console path hung off CLIENT_URL
+ * resolves against the public marketing site, which has no such route and
+ * bounces the operator to the homepage. That is exactly what the "Open the
+ * lead" button in the new-lead alert did.
+ *
+ * SUPERADMIN_URL overrides it outright, for a deployment that serves the
+ * console from somewhere the host name cannot describe.
+ */
+function platformConsoleUrl(path = "") {
+  const explicit = trim(process.env.SUPERADMIN_URL);
+  if (explicit) return `${explicit}${path}`;
+  const client = trim(process.env.CLIENT_URL) || "http://localhost:5173";
+  try {
+    const url = new URL(client);
+    if (!url.hostname.startsWith("admin.")) url.hostname = `admin.${url.hostname}`;
+    return `${trim(url.toString())}${path}`;
+  } catch {
+    // CLIENT_URL isn't a parseable URL. A link to the wrong host still beats
+    // throwing inside an email that is only trying to be helpful.
+    return `${client}${path}`;
+  }
+}
+
+module.exports = { portalOrigin, portalUrl, adminPortalUrl, publicSiteUrl, platformAppUrl, platformConsoleUrl };

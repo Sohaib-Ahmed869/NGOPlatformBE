@@ -42,6 +42,7 @@ const {
   scheduleSubscriptionChecks,
 } = require("./services/subscriptionScheduler");
 const { setupCampaignScheduler } = require("./jobs/processCampaigns");
+const { setupTaskDigestJob } = require("./jobs/processTaskReminders");
 const { initSocket } = require("./services/socket");
 const app = express();
 
@@ -61,6 +62,7 @@ connectDB().then(() => Promise.all([platformStripe.prime(), platformEmail.prime(
 setupInstallmentProcessingJob();
 scheduleSubscriptionChecks();
 setupCampaignScheduler();
+setupTaskDigestJob();
 
 // CORS — dynamic origin to support tenant subdomains
 app.use(

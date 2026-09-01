@@ -15,6 +15,20 @@ const threadEntrySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// A secondary contact at the prospect organisation. Only `name` is required —
+// an operator who has a name and no email yet still needs somewhere to put it,
+// and a form that refuses the half-known contact is a form nobody fills in.
+const additionalContactSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    email: { type: String, default: "", trim: true, lowercase: true },
+    phone: { type: String, default: "" },
+    role: { type: String, default: "" },
+    note: { type: String, default: "" },
+  },
+  { timestamps: true }
+);
+
 const stageHistorySchema = new mongoose.Schema(
   {
     from: { type: String, default: "" },
@@ -43,10 +57,20 @@ const leadSchema = new mongoose.Schema(
     country: { type: String, default: "" },
 
     // ── Contact person ──
+    // The PRIMARY contact — whoever filled the form in. Kept as flat fields
+    // rather than folded into `contacts` below because conversion, the reply
+    // email and every existing query read them by name, and because a lead
+    // always has exactly one of these while `contacts` may be empty.
     contactName: { type: String, required: true, trim: true },
     contactEmail: { type: String, required: true, trim: true, lowercase: true },
     contactPhone: { type: String, default: "" },
     contactRole: { type: String, default: "" },
+
+    // Everyone else at the organisation who matters to the deal — the finance
+    // approver, the board sponsor, the person who actually runs the website.
+    // Charity software is rarely bought by one person, and a note saying "spoke
+    // to their treasurer" is worth much less without the treasurer's number.
+    contacts: { type: [additionalContactSchema], default: [] },
 
     // ── Size / budget ──
     staffSize: { type: String, enum: ["1-5", "6-20", "21-50", "51-200", "200+", ""], default: "" },
@@ -107,6 +131,22 @@ const leadSchema = new mongoose.Schema(
     fastSubmit: { type: Boolean, default: false },
     flaggedSpam: { type: Boolean, default: false },
     submitIp: { type: String, default: "" },
+
+    // ── Deal ──
+    // What the deal is worth per year if it closes. Annualised on purpose: the
+    // catalogue sells monthly and yearly, and summing a mix of the two gives a
+    // pipeline figure that means nothing. The console labels it "annual value"
+    // and converts a monthly plan on the way in.
+    dealValue: { type: Number, default: 0, min: 0 },
+    currency: { type: String, default: "aud", lowercase: true },
+    expectedCloseAt: { type: Date, default: null },
+    // Sales-attention priority. Distinct from CrmTask.priority, which is about
+    // one piece of work — this is about the account.
+    priority: { type: String, enum: ["low", "normal", "high"], default: "normal" },
+    // Free-form operator labels ("inbound", "conference-2026", "needs-legal").
+    // Not an enum: the whole value of a tag is that nobody had to ship a
+    // migration to invent one.
+    tags: [{ type: String, trim: true }],
 
     // ── CRM mechanics ──
     stage: { type: String, enum: STAGES, default: "new" },

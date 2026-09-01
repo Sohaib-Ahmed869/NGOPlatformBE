@@ -10,6 +10,8 @@ const supportTicketController = require("../../controllers/supportTicketControll
 const couponController = require("../../controllers/couponController");
 const contactQueryController = require("../../controllers/contactQueryController");
 const leadController = require("../../controllers/leadController");
+const crmTaskController = require("../../controllers/crmTaskController");
+const crmOverviewController = require("../../controllers/crmOverviewController");
 const supportSessionController = require("../../controllers/supportSessionController");
 const { requireObjectId } = require("../../utils/operatorInput");
 
@@ -24,6 +26,10 @@ const canOps = requireCapability("ops");
 // controller can assume the id is castable.
 const orgId = requireObjectId("id", "organisation id");
 const docId = requireObjectId("id", "id");
+// Sub-document routes carry a second id (a checklist item inside a task); it
+// needs the same guard, since `task.checklist.id("abc")` throws rather than
+// answering "no such item".
+const itemId = requireObjectId("itemId", "item id");
 
 // Network guard runs BEFORE auth on every operator route (no-op unless
 // SUPERADMIN_IP_ALLOWLIST is set).
@@ -200,7 +206,9 @@ router.use(
 router.get("/leads/new-count", canTenants, leadController.newCount);
 router.get("/leads/board", canTenants, leadController.board);
 router.get("/leads/staff", canTenants, leadController.getStaff);
+router.get("/leads/options", canTenants, leadController.options);
 router.get("/leads", canTenants, leadController.list);
+router.post("/leads", canTenants, leadController.create);
 router.get("/leads/:id", canTenants, docId, leadController.get);
 router.patch("/leads/:id", canTenants, docId, leadController.update);
 router.patch("/leads/:id/stage", canTenants, docId, leadController.changeStage);
@@ -208,5 +216,28 @@ router.post("/leads/:id/messages", canTenants, docId, leadController.addMessage)
 router.patch("/leads/:id/assign", canTenants, docId, leadController.assign);
 router.post("/leads/:id/convert", canTenants, docId, leadController.convert);
 router.delete("/leads/:id", canTenants, docId, leadController.remove);
+
+// The CRM's front page — pipeline, follow-ups and what needs attention.
+router.get("/crm/overview", canTenants, crmOverviewController.overview);
+
+// CRM tasks — the follow-up work behind the pipeline. Same "tenants" capability
+// as leads: a task is sales work, and an operator who can see the deal is the
+// operator who can be asked to chase it.
+// Static segments ahead of /:id, for the same reason as the lead routes above.
+router.get("/tasks/board", canTenants, crmTaskController.board);
+router.get("/tasks/stats", canTenants, crmTaskController.stats);
+router.get("/tasks/staff", canTenants, crmTaskController.getStaff);
+router.post("/tasks/bulk", canTenants, crmTaskController.bulk);
+router.get("/tasks", canTenants, crmTaskController.list);
+router.post("/tasks", canTenants, crmTaskController.create);
+router.get("/tasks/:id", canTenants, docId, crmTaskController.get);
+router.patch("/tasks/:id", canTenants, docId, crmTaskController.update);
+router.patch("/tasks/:id/status", canTenants, docId, crmTaskController.changeStatus);
+router.patch("/tasks/:id/assign", canTenants, docId, crmTaskController.assign);
+router.post("/tasks/:id/comments", canTenants, docId, crmTaskController.addComment);
+router.post("/tasks/:id/checklist", canTenants, docId, crmTaskController.addChecklistItem);
+router.patch("/tasks/:id/checklist/:itemId", canTenants, docId, itemId, crmTaskController.updateChecklistItem);
+router.delete("/tasks/:id/checklist/:itemId", canTenants, docId, itemId, crmTaskController.removeChecklistItem);
+router.delete("/tasks/:id", canTenants, docId, crmTaskController.remove);
 
 module.exports = router;
