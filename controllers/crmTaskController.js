@@ -68,6 +68,18 @@ const tzOffsetOf = (query) => {
   return Number.isFinite(n) && Math.abs(n) <= 840 ? n : 0;
 };
 
+/**
+ * A query-string id as a real ObjectId.
+ *
+ * The list and board run their filter through `aggregate()`, and Mongoose only
+ * casts values against the schema for find-style queries — never inside a
+ * `$match`. A raw string id therefore matches NOTHING, silently: the tasks
+ * array comes back empty while `pagination.total` (from countDocuments, which
+ * does cast) still reports the true count. That mismatch was the symptom of
+ * "this lead has 1 task" next to an empty table.
+ */
+const oid = (v) => new mongoose.Types.ObjectId(String(v));
+
 /** Build the Mongo filter for a task list/board/count request. */
 function buildFilter(req) {
   const filter = {};
@@ -85,13 +97,13 @@ function buildFilter(req) {
   const assignee = input.filterValue(req.query.assignee);
   if (assignee === "unassigned") filter["assignee.userId"] = null;
   else if (assignee === "me") filter["assignee.userId"] = req.user._id;
-  else if (assignee && assignee !== "all" && input.isObjectId(assignee)) filter["assignee.userId"] = assignee;
+  else if (assignee && assignee !== "all" && input.isObjectId(assignee)) filter["assignee.userId"] = oid(assignee);
 
   const lead = input.filterValue(req.query.lead);
-  if (lead && input.isObjectId(lead)) filter.lead = lead;
+  if (lead && input.isObjectId(lead)) filter.lead = oid(lead);
 
   const org = input.filterValue(req.query.organisation);
-  if (org && input.isObjectId(org)) filter.organisation = org;
+  if (org && input.isObjectId(org)) filter.organisation = oid(org);
 
   const tag = input.filterValue(req.query.tag);
   if (tag) filter.tags = tag;

@@ -240,7 +240,9 @@ exports.options = async (req, res) => {
     if (rx) filter.$or = [{ orgName: rx }, { contactName: rx }, { contactEmail: rx }];
 
     const leads = await Lead.find(filter)
-      .select("orgName contactName contactEmail stage")
+      // `tags` rides along so the lead editor can offer the vocabulary already
+      // in use without a second request — one array of short strings per row.
+      .select("orgName contactName contactEmail stage tags")
       .sort({ lastMessageAt: -1 })
       .limit(200)
       .lean();
@@ -359,7 +361,10 @@ exports.update = async (req, res) => {
       challenges: () => input.stringList(b.challenges, "Challenges", { max: 30 }),
       currentToolsOther: () => input.text(b.currentToolsOther, "Other tools", { max: 500 }),
       challengesOther: () => input.text(b.challengesOther, "Other challenges", { max: 500 }),
-      verticalType: () => input.oneOf(b.verticalType, "Organisation type", VERTICALS),
+      // enumOrBlank, not oneOf — create() accepts "" for both of these, so an
+      // update that refused it would make a lead saved with the field blank
+      // impossible to edit at all. See enumOrBlank above.
+      verticalType: () => enumOrBlank(b.verticalType, "Organisation type", VERTICALS),
       staffSize: () => enumOrBlank(b.staffSize, "Staff size", STAFF_SIZES),
       annualBudgetRange: () => enumOrBlank(b.annualBudgetRange, "Annual budget", BUDGET_RANGES),
       donorDatabaseSize: () => enumOrBlank(b.donorDatabaseSize, "Donor database size", DONOR_DB_SIZES),
@@ -368,7 +373,7 @@ exports.update = async (req, res) => {
       interestedBillingCycle: () => enumOrBlank(b.interestedBillingCycle, "Billing cycle", BILLING_CYCLES),
       dealValue: () => dealValueField(b.dealValue),
       expectedCloseAt: () => input.date(b.expectedCloseAt, "Expected close date"),
-      priority: () => input.oneOf(b.priority, "Priority", LEAD_PRIORITIES),
+      priority: () => enumOrBlank(b.priority, "Priority", LEAD_PRIORITIES),
       tags: () => input.stringList(b.tags, "Tags", { max: 20, maxLength: 40 }),
       contacts: () => parseContacts(b.contacts),
     };

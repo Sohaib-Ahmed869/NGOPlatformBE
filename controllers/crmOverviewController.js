@@ -44,6 +44,22 @@ const tzOffsetOf = (query) => {
 /** Fields every lead card on this screen renders. */
 const LEAD_CARD = "orgName contactName contactEmail stage dealValue currency priority tags assignee lastMessageAt expectedCloseAt createdAt";
 
+const leadCardProjection = (extra = {}) => ({
+  ...LEAD_CARD.split(" ").reduce((p, f) => ({ ...p, [f]: 1 }), {}),
+  ...extra,
+});
+
+/**
+ * The same card, plus the two counts that explain why the lead is on the list.
+ *
+ * The `attention` facets used to emit whole lead documents: an unprojected
+ * `$facet` branch inherits every field, so eight rows carried `stageHistory`,
+ * the whole message `thread`, the anti-spam fields and the submitter's IP —
+ * none of which the screen renders, and the last of which has no business
+ * being on an overview at all.
+ */
+const ATTENTION_CARD = leadCardProjection({ openCount: 1, overdueCount: 1 });
+
 /** GET /api/superadmin/crm/overview */
 exports.overview = async (req, res) => {
   try {
@@ -192,16 +208,19 @@ exports.overview = async (req, res) => {
             { $match: { overdueCount: { $gt: 0 } } },
             { $sort: { overdueCount: -1, lastMessageAt: 1 } },
             { $limit: 8 },
+            { $project: ATTENTION_CARD },
           ],
           noFollowUp: [
             { $match: { openCount: 0 } },
             { $sort: { lastMessageAt: -1 } },
             { $limit: 8 },
+            { $project: ATTENTION_CARD },
           ],
           stale: [
             { $match: { openCount: 0, lastMessageAt: { $lt: staleBefore } } },
             { $sort: { lastMessageAt: 1 } },
             { $limit: 8 },
+            { $project: ATTENTION_CARD },
           ],
           counts: [
             {
