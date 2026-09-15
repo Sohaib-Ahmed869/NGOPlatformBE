@@ -9,6 +9,7 @@ const { OAuth2Client } = require("google-auth-library");
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const { sendTemplateEmail } = require("../services/emailUtil");
 const { mfaRequiredFor } = require("../config/platformRoles");
+const { organisationLoginBlock } = require("../utils/tenantAccess");
 
 const INSTAGRAM_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
 
@@ -89,6 +90,9 @@ exports.login = async (req, res) => {
     if (!isMatch) {
       throw new Error("Invalid login credentials");
     }
+
+    const orgBlock = await organisationLoginBlock(user);
+    if (orgBlock) return res.status(403).json({ error: orgBlock });
 
     // Update last login time
     user.lastLogin = new Date();
@@ -196,6 +200,9 @@ exports.loginAdmin = async (req, res) => {
     if (user.platformStatus === "suspended") {
       return res.status(403).json({ error: "This account has been suspended" });
     }
+
+    const orgBlock = await organisationLoginBlock(user);
+    if (orgBlock) return res.status(403).json({ error: orgBlock });
 
     // Two-factor challenge (if enabled for this account).
     if (user.twoFactorEnabled) {
@@ -480,6 +487,9 @@ exports.googleAuth = async (req, res) => {
         await user.save();
       }
     }
+
+    const orgBlock = await organisationLoginBlock(user);
+    if (orgBlock) return res.status(403).json({ status: "Error", message: orgBlock, error: orgBlock });
 
     const jwtToken = generateToken(user._id);
     res.status(200).json({

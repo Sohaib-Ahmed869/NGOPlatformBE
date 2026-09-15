@@ -80,3 +80,26 @@ test("getEffectiveLimits keeps the legacy flat shape (volunteerEnabled folded in
   assert.equal(flat.campaigns, 5);
   assert.equal(flat.volunteerEnabled, true);
 });
+
+test("override of the volunteers QUOTA sets the limit, not the same-named flag", async () => {
+  // "volunteers" is both a flag and a meter key in the catalogue. The override
+  // loop used to test flags first, so this raised nothing and flipped the flag.
+  nextPlanDoc = { limits: { volunteers: 50 }, featureFlags: { volunteers: false } };
+  const org = { plan: "pro", override: { limits: { volunteers: 500 } } };
+  const { features, limits } = await getEffectiveEntitlements(org);
+  assert.equal(limits.volunteers, 500, "quota raised");
+  assert.equal(features.volunteers, false, "capability flag untouched");
+});
+
+test("override.featureFlags switches plan flags on/off but never a core flag", async () => {
+  nextPlanDoc = { limits: {}, featureFlags: { events: false, newsletter: true, volunteers: false } };
+  const org = {
+    plan: "pro",
+    override: { featureFlags: { events: true, newsletter: false, volunteers: true, donations: false } },
+  };
+  const { features } = await getEffectiveEntitlements(org);
+  assert.equal(features.events, true);
+  assert.equal(features.newsletter, false);
+  assert.equal(features.volunteers, true, "the flag namespace is separate from the meter");
+  assert.equal(features.donations, true, "core flag stays on");
+});

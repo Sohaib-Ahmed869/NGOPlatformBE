@@ -144,6 +144,12 @@ app.use("/api/saas", saasRoutes);
 app.use("/api/superadmin", superAdminRoutes);
 // Platform settings + branding (public read for the marketing site; superadmin writes)
 app.use("/api/platform", require("./routes/platformRoutes"));
+// Server-to-server API for the Calcite Hyper master portal (x-api-key auth).
+// Answers 503 until INTEGRATION_API_KEYS is set; nothing else depends on it.
+// The error handler is app-level on purpose: a malformed JSON body is rejected
+// by express.json() above, before the router runs, and must still get the envelope.
+const { integrationErrorHandler } = require("./utils/integrationResponse");
+app.use("/api/integration", require("./routes/integration"), integrationErrorHandler);
 
 // Public SaaS contact form (no auth) — separate path to avoid collision with tenant /api/contact
 const superAdminController = require("./controllers/superAdminController");

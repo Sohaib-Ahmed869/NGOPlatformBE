@@ -94,7 +94,10 @@ async function activateOrgWithAdmin(organisation, { subscriptionId, customerId }
   const setActive = () => {
     organisation.isActive = true;
     organisation.subscriptionStatus = "active";
-    if (subscriptionId) organisation.stripeSubscriptionId = subscriptionId;
+    if (subscriptionId) {
+      organisation.stripeSubscriptionId = subscriptionId;
+      organisation.stripeSubscriptionEndedAt = null; // a live subscription is attached again
+    }
     if (customerId) organisation.stripeCustomerId = customerId;
   };
 
@@ -166,7 +169,7 @@ async function activateOrgWithAdmin(organisation, { subscriptionId, customerId }
         adminUserId: adminUser._id,
         isActive: true,
         subscriptionStatus: "active",
-        ...(subscriptionId ? { stripeSubscriptionId: subscriptionId } : {}),
+        ...(subscriptionId ? { stripeSubscriptionId: subscriptionId, stripeSubscriptionEndedAt: null } : {}),
         ...(customerId ? { stripeCustomerId: customerId } : {}),
       },
       $unset: usingPassword ? { pendingAdmin: "" } : { pendingAdminNoPassword: "" },

@@ -6,6 +6,10 @@ const commentSchema = new mongoose.Schema(
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     authorName: { type: String, default: "" },
     isInternal: { type: Boolean, default: false }, // internal notes hidden from the reporter
+    // Platform-staff-only note: hidden from the reporter AND from the tenant's
+    // own admins. Always set together with isInternal, so every reporter-facing
+    // filter that already drops internal notes keeps dropping these.
+    platformOnly: { type: Boolean, default: false },
     emailStatus: { type: String, enum: ["sent", "failed", ""], default: "" }, // for a non-internal reply emailed to the reporter
   },
   { timestamps: true }

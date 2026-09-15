@@ -67,8 +67,20 @@ async function getEffectiveEntitlements(org) {
       const v = override[k];
       if (v === undefined) continue;
       if (k === "volunteerEnabled") features.volunteers = !!v; // legacy key
-      else if (FLAG_KEYS.includes(k)) features[k] = !!v;
-      else limits[k] = v; // numeric (null = unlimited)
+      // Meter keys win over flag keys. The catalog has keys in BOTH namespaces
+      // ("volunteers"), and this used to test flags first — so an override of
+      // the volunteers quota flipped the capability flag instead and the quota
+      // itself was never applied.
+      else if (METER_KEYS.includes(k)) limits[k] = v; // numeric (null = unlimited)
+      else if (FLAG_KEYS.includes(k)) features[k] = !!v; // legacy: flags stored in limits
+      else limits[k] = v;
+    }
+  }
+  const flagOverride = org.override && org.override.featureFlags ? toPlain(org.override.featureFlags) : null;
+  if (flagOverride) {
+    for (const f of FLAGS) {
+      if (f.core || flagOverride[f.key] === undefined) continue; // core flags cannot be switched off
+      features[f.key] = !!flagOverride[f.key];
     }
   }
 

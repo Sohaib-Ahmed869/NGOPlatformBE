@@ -235,14 +235,29 @@ const organisationSchema = new mongoose.Schema(
     // null = unlimited. Empty/absent override = the plan's own limits apply.
     override: {
       limits: { type: mongoose.Schema.Types.Mixed, default: null },
+      // Per-tenant capability flags keyed by config/featureCatalog.js flag keys
+      // ({ events: true }). Kept apart from `limits` because the two catalog
+      // namespaces overlap — "volunteers" is both a flag and a meter.
+      featureFlags: { type: mongoose.Schema.Types.Mixed, default: null },
+      // Negotiated price, in whole AUD. Recorded for MRR reporting only — it
+      // does NOT change what Stripe charges (see services/subscriptionMetrics.js).
       pricing: {
         monthly: { type: Number, default: null },
         annual: { type: Number, default: null },
       },
       reason: { type: String, default: "" },
       setBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+      // Who set it, as text: an operator's email, or "integration:hyper (a@b)"
+      // when it came through the integration API and there is no User to ref.
+      setByLabel: { type: String, default: "" },
       setAt: { type: Date, default: null },
     },
+    // When the Stripe subscription in `stripeSubscriptionId` stopped billing
+    // (cancelled by a suspend/delete, or Stripe told us it was deleted). The id
+    // is kept for history, so without this a suspended-then-reactivated tenant
+    // looked exactly like one Stripe is still charging. Cleared whenever a new
+    // subscription is attached (services/orgActivation.js).
+    stripeSubscriptionEndedAt: { type: Date, default: null },
     // Soft delete — set from the SuperAdmin console's Danger Zone. A deleted org
     // is deactivated (isActive false, subscriptionStatus cancelled, same as
     // suspend) AND hidden from every SuperAdmin list/stat, but the row and all

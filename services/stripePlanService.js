@@ -170,6 +170,18 @@ async function archivePlanStripe(plan) {
   }
 }
 
+/** Undo archivePlanStripe: switch the plan's Stripe product and current prices back on. */
+async function unarchivePlanStripe(plan) {
+  if (!isStripeEnabled()) return;
+  if (plan.stripeProductId) {
+    await stripe.products.update(plan.stripeProductId, { active: true });
+  }
+  for (const cycle of ["monthly", "annual"]) {
+    const id = plan.stripePriceIds?.[cycle];
+    if (id) await stripe.prices.update(id, { active: true });
+  }
+}
+
 /**
  * Move every organisation currently on `plan.code` (with a live Stripe sub) onto
  * the plan's CURRENT price for their billing cycle. proration "none" (default)
@@ -219,5 +231,6 @@ module.exports = {
   resyncPlan,
   repriceChangedCycles,
   archivePlanStripe,
+  unarchivePlanStripe,
   migrateSubscribers,
 };

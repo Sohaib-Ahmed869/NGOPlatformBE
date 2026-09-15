@@ -1,0 +1,1685 @@
+{
+  "info": {
+    "_postman_id": "169b4eb1-4e5d-46a7-a795-c2ae66d7b363",
+    "name": "Donexus",
+    "description": "Server-to-server API the **Calcite Hyper** system uses to manage **Donexus** (charity fundraising platform): Tenants CRUD, Plans CRUD, plan changes (subscriptions/overrides), Support tickets.\n\nImport `Donexus-Local.postman_environment.json` (or a copy pointed at production) and select it — or drop the **Donexus** folder into the Hyper ecosystem collection and add `donexus_base_url` / `donexus_api_key` to that environment. Auth is `x-api-key`, configured on the **Donexus** folder.\n\nCreate requests save ids into collection variables (`donexusTenantId`, `donexusPlanCode`, `donexusForkPlanCode`, `donexusTicketId`, `donexusAssigneeId`), so the folder runs top-to-bottom. They are prefixed so they don't collide with the Hyyve/Stewardex variables in a shared collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Donexus",
+      "description": "Donexus (charity fundraising platform) — integration API.\n\n**Base:** `{{donexus_base_url}}/integration` · **Auth:** `x-api-key: {{donexus_api_key}}` (set on this folder). Optional `x-actor-email` (added from the `actor_email` environment variable by this folder's pre-request script) records the person behind a call in the audit log as `integration:<key name> (<email>)`.\nResponses: `{ success: true, data, meta?, warnings? }` / `{ success: false, error: { code, message, details? } }`. Unknown body fields are refused (`UNKNOWN_FIELD`). Field names are snake_case; dates ISO 8601 UTC; money in whole units with a `currency`.",
+      "auth": {
+        "type": "apikey",
+        "apikey": [
+          {
+            "key": "key",
+            "value": "x-api-key",
+            "type": "string"
+          },
+          {
+            "key": "value",
+            "value": "{{donexus_api_key}}",
+            "type": "string"
+          },
+          {
+            "key": "in",
+            "value": "header",
+            "type": "string"
+          }
+        ]
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Attribute the call to a person in the Donexus audit log (optional).",
+              "const actor = pm.environment.get(\"actor_email\");",
+              "if (actor) { pm.request.headers.upsert({ key: \"x-actor-email\", value: actor }); }"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "Ping",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                  "const res = pm.response.json();",
+                  "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                  "pm.test(\"key name echoed\", () => pm.expect(res.data.key).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{donexus_base_url}}/integration/ping",
+              "host": [
+                "{{donexus_base_url}}"
+              ],
+              "path": [
+                "integration",
+                "ping"
+              ]
+            },
+            "description": "Checks the API key. Returns `{ service: \"donexus\", key, actor, time }` — `key` is the **name** half of the matched `INTEGRATION_API_KEYS` pair (e.g. `hyper`), never the secret; `actor` echoes `x-actor-email` when sent. Runs the real auth middleware, so it is the smoke test after a deploy or key rotation.\n\n| situation | response |\n|---|---|\n| valid key | 200 |\n| no `x-api-key` | 401 `API_KEY_MISSING` |\n| unknown key | 401 `API_KEY_INVALID` |\n| malformed `x-actor-email` | 400 `INVALID_ACTOR_EMAIL` |\n| `INTEGRATION_API_KEYS` unset on the server | 503 `INTEGRATION_DISABLED` |"
+          },
+          "response": []
+        },
+        {
+          "name": "Tenants",
+          "description": "Tenant (Donexus **organisation** — a charity with its own subdomain) CRUD. **Delete = soft delete** (status `deleted`, Stripe subscription cancelled, data kept). Suspended and deleted tenants can't sign in or use tenant-scoped calls until reactivated. `:id` accepts the tenant id or its slug.",
+          "item": [
+            {
+              "name": "List tenants",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active",
+                      "disabled": true,
+                      "description": "Optional: active | suspended | pending | deleted | all. Default: everything except deleted."
+                    },
+                    {
+                      "key": "plan_code",
+                      "value": "essentials",
+                      "disabled": true,
+                      "description": "Optional: only tenants on this plan"
+                    },
+                    {
+                      "key": "search",
+                      "value": "harbour",
+                      "disabled": true,
+                      "description": "Optional: case-insensitive match on name or slug"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "100",
+                      "disabled": true,
+                      "description": "Default 100, max 500"
+                    }
+                  ]
+                },
+                "description": "Every tenant, newest first, **with its subscription inline** — one call renders the whole table (plans, invoice periods and owners are resolved in a fixed number of queries, not per row).\n\n**Paginated**: `meta: { page, limit, total, pages }`.\n\n**Tenant object**\n| field | notes |\n|---|---|\n| `id` | Mongo ObjectId. Every `/tenants/:id` route also accepts the `slug`. |\n| `name`, `slug` | `slug` is the subdomain (`<slug>.<domain>`); it never changes. |\n| `status` | `active` \\| `suspended` \\| `deleted` \\| `pending`. `pending` = a self-serve signup that never completed its first card payment (no owner account yet). `suspended` also covers tenants whose Stripe subscription was cancelled by Stripe. |\n| `portal_url`, `contact_email`, `is_muslim_charity` | |\n| `owner` | `{ id, name, email }` of the tenant's primary admin, or null. |\n| `has_override` | true when a per-tenant override is set. |\n| `subscription.plan_code` / `plan_name` / `plan_status` | `plan_status` is `active` or `archived` (a tenant can stay on an archived plan). |\n| `subscription.billing_cycle` | `monthly` \\| `yearly` |\n| `subscription.status` | Donexus billing state: `pending` \\| `active` \\| `past_due` \\| `cancelled` |\n| `subscription.billing` | who pays: `stripe` (live platform Stripe subscription) \\| `comp` (free) \\| `none` (nothing bills it) |\n| `subscription.is_comp`, `comp_reason`, `trial_ends_at` | `trial_ends_at` is informational — nothing locks the tenant when it passes. |\n| `subscription.current_period` | `{ start, end }` of the latest paid platform invoice if it covers today, else null. `last_paid_period` is the same without the \"covers today\" rule. |\n| `subscription.price` | `{ currency, amount, source }` for the current cycle; `source` = `override` \\| `plan` \\| `none`. |\n| `created_at`, `updated_at`, `deleted_at` | ISO 8601 UTC |\n\nSingle-tenant responses add `override` (see *Set tenant override*), `entitlements: { feature_flags, limits }` (the effective result of plan + override; a `null` limit = unlimited), and — on *Get tenant* only — `recent_events` (last 20 audit events) and `recent_invoices` (last 10)."
+              },
+              "response": []
+            },
+            {
+              "name": "Create tenant",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.collectionVariables.set(\"donexusRunId\", Date.now().toString(36));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data && res.data.id !== undefined && res.data.id !== null) { pm.collectionVariables.set(\"donexusTenantId\", res.data.id); console.log(\"donexusTenantId =\", res.data.id); }",
+                      "if (res.data && res.data.owner && res.data.owner.id !== undefined && res.data.owner && res.data.owner.id !== null) { pm.collectionVariables.set(\"donexusAssigneeId\", res.data.owner && res.data.owner.id); console.log(\"donexusAssigneeId =\", res.data.owner && res.data.owner.id); }",
+                      "pm.test(\"generated password returned once\", () => pm.expect(res.data.credentials.generated_password).to.be.a(\"string\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"organization_name\": \"Harbour Food Rescue {{donexusRunId}}\",\n  \"email\": \"dana.reyes+{{donexusRunId}}@example.org\",\n  \"first_name\": \"Dana\",\n  \"last_name\": \"Reyes\",\n  \"plan_code\": \"essentials\",\n  \"billing_cycle\": \"monthly\",\n  \"trial_days\": 30,\n  \"is_comp\": true,\n  \"comp_reason\": \"Pilot partner — first year free\",\n  \"is_muslim_charity\": false,\n  \"send_welcome_email\": false,\n  \"reason\": \"Signed at the Sydney roadshow\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants"
+                  ]
+                },
+                "description": "Provisions an organisation and its owner (admin) user — the same provisioning as the Donexus console's Leads → Convert. 201 with the tenant (as *Get tenant*) plus `welcome_email` and `credentials`. Saves `{{donexusTenantId}}` and `{{donexusAssigneeId}}` (the owner).\n\n| field | required | notes |\n|---|---|---|\n| `organization_name` | yes | ≤200 chars (`organisation_name` also accepted) |\n| `email` | yes | owner's login. **Unique across the whole platform**, not per tenant → 409 `EMAIL_IN_USE` |\n| `first_name` (+ `last_name`) | yes | or a single `name` |\n| `password` | no | 8–128 chars. **If omitted, one is generated and returned once** as `credentials.generated_password` (never emailed, never retrievable later) |\n| `slug` | no | subdomain; derived from the name when omitted. 3–63 chars, lowercase letters/digits/single hyphens → 400 `INVALID_SLUG`, 409 `SLUG_TAKEN` |\n| `plan_code` | no | default `essentials`. 404 `PLAN_NOT_FOUND`, 409 `PLAN_ARCHIVED` |\n| `billing_cycle` | no | `monthly` (default) \\| `yearly` |\n| `trial_days` | no | 1–365 → `subscription.trial_ends_at` (informational) |\n| `is_comp` | no | default **true** |\n| `comp_reason`, `is_muslim_charity` | no | `is_muslim_charity` enables the Islamic giving pages + donation types |\n| `send_welcome_email` | no | default **true** |\n| `reason` | no | audit note |\n\n**Side effects:** tenant is active immediately; default website pages and donation types are seeded; `org.provisioned` audit event. With `send_welcome_email` the owner is emailed the portal URL and login link, plus a 7-day *set your password* link when the password was generated (`credentials.set_password_url` is that same link, returned once).\n\n**Billing:** Donexus self-serve signup takes a card in the browser, which a server-to-server call can't do — a tenant created here has **no Stripe subscription** and is never charged automatically. With `is_comp: false` you get a `NOT_BILLED` warning."
+              },
+              "response": []
+            },
+            {
+              "name": "Get tenant",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}"
+                  ]
+                },
+                "description": "Tenant detail incl. subscription, override, effective entitlements, the last 20 audit events (`recent_events`, from the console or this API) and the last 10 platform invoices. Deleted tenants are returned (status `deleted`).\n\n**Tenant object**\n| field | notes |\n|---|---|\n| `id` | Mongo ObjectId. Every `/tenants/:id` route also accepts the `slug`. |\n| `name`, `slug` | `slug` is the subdomain (`<slug>.<domain>`); it never changes. |\n| `status` | `active` \\| `suspended` \\| `deleted` \\| `pending`. `pending` = a self-serve signup that never completed its first card payment (no owner account yet). `suspended` also covers tenants whose Stripe subscription was cancelled by Stripe. |\n| `portal_url`, `contact_email`, `is_muslim_charity` | |\n| `owner` | `{ id, name, email }` of the tenant's primary admin, or null. |\n| `has_override` | true when a per-tenant override is set. |\n| `subscription.plan_code` / `plan_name` / `plan_status` | `plan_status` is `active` or `archived` (a tenant can stay on an archived plan). |\n| `subscription.billing_cycle` | `monthly` \\| `yearly` |\n| `subscription.status` | Donexus billing state: `pending` \\| `active` \\| `past_due` \\| `cancelled` |\n| `subscription.billing` | who pays: `stripe` (live platform Stripe subscription) \\| `comp` (free) \\| `none` (nothing bills it) |\n| `subscription.is_comp`, `comp_reason`, `trial_ends_at` | `trial_ends_at` is informational — nothing locks the tenant when it passes. |\n| `subscription.current_period` | `{ start, end }` of the latest paid platform invoice if it covers today, else null. `last_paid_period` is the same without the \"covers today\" rule. |\n| `subscription.price` | `{ currency, amount, source }` for the current cycle; `source` = `override` \\| `plan` \\| `none`. |\n| `created_at`, `updated_at`, `deleted_at` | ISO 8601 UTC |\n\nSingle-tenant responses add `override` (see *Set tenant override*), `entitlements: { feature_flags, limits }` (the effective result of plan + override; a `null` limit = unlimited), and — on *Get tenant* only — `recent_events` (last 20 audit events) and `recent_invoices` (last 10).\n\n**Errors:** 404 `TENANT_NOT_FOUND`."
+              },
+              "response": []
+            },
+            {
+              "name": "Update tenant (rename)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Harbour Food Rescue Ltd\",\n  \"reason\": \"Legal name change\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}"
+                  ]
+                },
+                "description": "Body: `name` and/or `status` (`active` \\| `suspended` \\| `deleted`), optional `reason` for the audit log. Returns tenant detail plus `changed` (false when nothing actually changed — same-value writes are no-ops, not errors). The slug never changes."
+              },
+              "response": []
+            },
+            {
+              "name": "Suspend tenant",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"suspended\",\n  \"reason\": \"Invoice 4 months overdue\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}"
+                  ]
+                },
+                "description": "Takes effect immediately and completely:\n1. Every tenant-scoped API request answers 402.\n2. Sign-in is refused for the tenant's admins **and donors** (403).\n3. Existing staff sessions are revoked, so a later reactivation doesn't revive them.\n4. The platform Stripe subscription is cancelled, if live. If Stripe fails, access is still locked and a `STRIPE_CANCEL_FAILED` warning says billing may continue.\n\nThe Donexus backend keeps no tenant cache, so there is nothing to clear. Idempotent (`changed: false` when already suspended).\n\n**Errors:** 409 `TENANT_PENDING_PAYMENT` (a signup that never paid)."
+              },
+              "response": []
+            },
+            {
+              "name": "Reactivate tenant",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"active\",\n  \"reason\": \"Paid in full\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}"
+                  ]
+                },
+                "description": "Restores a suspended **or deleted** tenant. Logins and API access work again; staff sign in afresh.\n\n**Billing is not restarted.** A Stripe subscription cancelled by suspend/delete stays cancelled (Stripe cancellations are final): the tenant comes back with `subscription.billing: \"none\"` unless comped, and the response carries a `BILLING_NOT_RESTARTED` warning. Re-assigning a plan doesn't restart card billing either.\n\n**Errors:** 409 `TENANT_PENDING_PAYMENT` / `TENANT_HAS_NO_OWNER`."
+              },
+              "response": []
+            },
+            {
+              "name": "Delete tenant",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Charity wound up\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}"
+                  ]
+                },
+                "description": "**Soft delete — an offboarding, never a purge.** Status `deleted`, same effects as *Suspend tenant* (API + logins blocked, sessions revoked, Stripe subscription cancelled), hidden from the default list. **All data is kept** (donors, orders, invoices, pages, audit trail). `reason` in the body or as `?reason=`.\n\nRestore with `PATCH { \"status\": \"active\" }` — or `\"suspended\"` to undelete without reopening. See *Reactivate tenant* for billing.\n\n**Errors:** 409 `TENANT_ALREADY_DELETED`."
+              },
+              "response": []
+            },
+            {
+              "name": "Restore deleted tenant",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"active\",\n  \"reason\": \"Offboarded by mistake\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}"
+                  ]
+                },
+                "description": "Same call as *Reactivate tenant*, on a deleted tenant: `deleted_at` is cleared and the audit event is `org.restored`. Leaves the tenant active so the folders below can run."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Plans",
+          "description": "Subscription plan catalogue, synced to the platform Stripe account. The default tiers (`essentials`, `professional`, `enterprise`) are real plan documents created by `npm run seed:plans` — Donexus has no unsaved in-code templates, so there is no \"materialise\" step. Every save is audited with a field-level diff (`revisions[].diff` on *Get plan*). **Delete = archive** (plans are referenced by tenants). Plan codes: 3–40 chars, lowercase letters, digits and hyphens (no underscores).",
+          "item": [
+            {
+              "name": "List plans",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active",
+                      "disabled": true,
+                      "description": "Optional: active | archived | all (default all)"
+                    }
+                  ]
+                },
+                "description": "Every plan, ordered by `sort_order`. Unpaginated (the catalogue is small); `meta.total` is the count.\n\n**Plan object**: `code`, `name`, `description`, `status` (`active` \\| `archived`), `archived_at`, `is_public` (shown on the public pricing page), `is_popular`, `sort_order`, `color`, `pricing: { currency, monthly, yearly, onboarding_fee }` (whole currency units; currency is platform-wide, `AUD`), `limits` (limit code → number, `null` = unlimited), `feature_flags` (flag code → boolean), `marketing_features` (pricing-card bullets, display only), `stripe_synced`, `subscribers: { total, active }`, `created_at`, `updated_at`.\n\nKeys inside `limits` and `feature_flags` are the `code`s from *Feature flags*, passed verbatim (camelCase, e.g. `eventsQuota`, `adminSeats`). Unknown codes are refused (`UNKNOWN_LIMIT_KEY` / `UNKNOWN_FEATURE_FLAG`)."
+              },
+              "response": []
+            },
+            {
+              "name": "Create plan",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.collectionVariables.set(\"donexusPlanCode\", \"hyper-growth-\" + Date.now().toString(36));"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data && res.data.code !== undefined && res.data.code !== null) { pm.collectionVariables.set(\"donexusPlanCode\", res.data.code); console.log(\"donexusPlanCode =\", res.data.code); }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"{{donexusPlanCode}}\",\n  \"name\": \"Growth\",\n  \"description\": \"For charities running several campaigns a year.\",\n  \"pricing\": {\n    \"currency\": \"AUD\",\n    \"monthly\": 149,\n    \"yearly\": 1490,\n    \"onboarding_fee\": 500\n  },\n  \"limits\": {\n    \"campaigns\": 10,\n    \"eventsQuota\": 25,\n    \"adminSeats\": 5,\n    \"volunteers\": 500,\n    \"p2pQuota\": null,\n    \"productsQuota\": 50\n  },\n  \"feature_flags\": {\n    \"recurringGiving\": true,\n    \"programs\": true,\n    \"events\": true,\n    \"volunteers\": true,\n    \"newsletter\": true,\n    \"supportTickets\": true,\n    \"paypal\": false\n  },\n  \"marketing_features\": [\n    \"10 active campaigns\",\n    \"Events & paid registration\",\n    \"Newsletter campaigns\"\n  ],\n  \"is_public\": true,\n  \"sort_order\": 2,\n  \"reason\": \"New mid-tier\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans"
+                  ]
+                },
+                "description": "Create a plan. 201 with the plan detail (as *Get plan*). Saves `{{donexusPlanCode}}`.\n\n| field | required | notes |\n|---|---|---|\n| `code` | yes | 3–40 chars, lowercase letters/digits/hyphens; stable forever — it is what `assign-plan` takes |\n| `name` | yes | ≤120 chars |\n| `fork_from` | no | copy another plan — see *Fork plan* |\n| `description` | no | ≤500 chars |\n| `pricing` | no | `{ monthly, yearly, onboarding_fee }`, ≥0, max 2 dp. `currency` may be sent but must be the platform currency (`CURRENCY_MISMATCH`). A cycle priced 0 has no Stripe price. |\n| `limits`, `feature_flags` | no | codes from *Feature flags* |\n| `marketing_features` | no | ≤30 strings |\n| `is_public` (default true), `is_popular`, `sort_order`, `color` (`#rrggbb`) | no | |\n| `reason` | no | audit |\n\nNot in Donexus plans (refused as `UNKNOWN_FIELD`): trial days and support terms — trials are set per tenant (`trial_days` on *Create tenant*).\n\n**Side effects:** creates a Stripe Product + Prices. If Stripe is down the plan still saves, `stripe_synced` is false and a `STRIPE_NOT_SYNCED` warning is returned.\n\n**Errors:** 400 `VALIDATION_ERROR` / `INVALID_PLAN_CODE` / `UNKNOWN_FIELD` / `UNKNOWN_LIMIT_KEY` / `UNKNOWN_FEATURE_FLAG`, 409 `PLAN_CODE_TAKEN`."
+              },
+              "response": []
+            },
+            {
+              "name": "Fork plan",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.collectionVariables.set(\"donexusForkPlanCode\", pm.collectionVariables.get(\"donexusPlanCode\") + \"-acme\");"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data && res.data.code !== undefined && res.data.code !== null) { pm.collectionVariables.set(\"donexusForkPlanCode\", res.data.code); console.log(\"donexusForkPlanCode =\", res.data.code); }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"{{donexusForkPlanCode}}\",\n  \"name\": \"Growth — Acme Foundation\",\n  \"fork_from\": \"{{donexusPlanCode}}\",\n  \"pricing\": {\n    \"monthly\": 119\n  },\n  \"limits\": {\n    \"adminSeats\": 25\n  },\n  \"reason\": \"Bespoke plan for Acme's 3-year agreement\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans"
+                  ]
+                },
+                "description": "Bespoke plan copied from another. `fork_from` copies **description, pricing (both cycles + onboarding fee), limits, feature_flags, marketing_features and color**; anything in the body wins — `pricing` merged per cycle, `limits` / `feature_flags` merged per key over the copy. A fork defaults to `is_public: false` so a customer-specific plan never shows on the public pricing page. Saves `{{donexusForkPlanCode}}`.\n\n**Errors:** 404 `FORK_SOURCE_NOT_FOUND`, plus everything *Create plan* returns."
+              },
+              "response": []
+            },
+            {
+              "name": "Get plan",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusPlanCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusPlanCode}}"
+                  ]
+                },
+                "description": "Plan + history.\n\n**Plan object**: `code`, `name`, `description`, `status` (`active` \\| `archived`), `archived_at`, `is_public` (shown on the public pricing page), `is_popular`, `sort_order`, `color`, `pricing: { currency, monthly, yearly, onboarding_fee }` (whole currency units; currency is platform-wide, `AUD`), `limits` (limit code → number, `null` = unlimited), `feature_flags` (flag code → boolean), `marketing_features` (pricing-card bullets, display only), `stripe_synced`, `subscribers: { total, active }`, `created_at`, `updated_at`.\n\nKeys inside `limits` and `feature_flags` are the `code`s from *Feature flags*, passed verbatim (camelCase, e.g. `eventsQuota`, `adminSeats`). Unknown codes are refused (`UNKNOWN_LIMIT_KEY` / `UNKNOWN_FEATURE_FLAG`).\n\n- `price_history[]`: `{ monthly, yearly, replaced_at }`, newest first. Stripe prices are immutable, so a price change mints a new Stripe Price.\n- `revisions[]`: last 50 — `{ id, action, actor, at, diff, reason }`. `diff` is field-level, e.g. `{ \"price.monthly\": { \"from\": 149, \"to\": 119 }, \"limits.adminSeats\": { \"from\": 5, \"to\": 25 } }`. `actor` is `integration:<key> (<x-actor-email>)` for calls through this API.\n\n**Errors:** 404 `PLAN_NOT_FOUND`."
+              },
+              "response": []
+            },
+            {
+              "name": "Update plan (pricing / limits / flags)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"pricing\": {\n    \"yearly\": 1390\n  },\n  \"limits\": {\n    \"campaigns\": 12,\n    \"p2pQuota\": 10\n  },\n  \"feature_flags\": {\n    \"paypal\": true\n  },\n  \"reason\": \"Q3 packaging update\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusPlanCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusPlanCode}}"
+                  ]
+                },
+                "description": "Partial update of any of: `name`, `description`, `pricing`, `limits`, `feature_flags`, `marketing_features`, `is_public`, `is_popular`, `sort_order`, `color`, `status` (`active` \\| `archived`), plus `reason`.\n\n### ⚠ Nested objects MERGE — they are not replaced\n(Donexus differs from Stewardex here, and uses the same semantics as its own console.)\n- `limits`, `feature_flags`: **per key**. Keys you don't send keep their stored value. `null` makes a limit unlimited; there is no \"remove this key\".\n- `pricing`: **per cycle**. `{ \"yearly\": 1390 }` leaves `monthly` and `onboarding_fee` untouched.\n- `marketing_features`: **replaced** wholesale (it is a list).\n\n`status: \"archived\"` archives exactly like *Delete (archive) plan* (send it alone, with `confirm: true` when tenants are still active on the plan); `status: \"active\"` restores an archived plan.\n\n**Price changes:** a new Stripe Price is minted per changed cycle. **Existing paying tenants are NOT moved** — they keep the old price until migrated in the Donexus console (Plans → Migrate subscribers). Response: `price_changed`, `subscribers_on_previous_price`, and a `SUBSCRIBERS_GRANDFATHERED` warning when that is > 0. Limits and flags apply to every tenant on the plan immediately.\n\n**Errors:** 400 `VALIDATION_ERROR` / `UNKNOWN_FIELD` / `UNKNOWN_LIMIT_KEY` / `UNKNOWN_FEATURE_FLAG`, 404 `PLAN_NOT_FOUND`."
+              },
+              "response": []
+            },
+            {
+              "name": "Delete (archive) plan",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusForkPlanCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusForkPlanCode}}"
+                  ],
+                  "query": [
+                    {
+                      "key": "confirm",
+                      "value": "true",
+                      "disabled": true,
+                      "description": "Required when tenants are still active on the plan"
+                    }
+                  ]
+                },
+                "description": "Sets status `archived` (and `is_public: false`); archived plans can't be newly assigned (`assign-plan` → 409 `PLAN_ARCHIVED`). **Existing tenants keep working** on it, and Stripe subscriptions on it keep renewing. Response includes `active_subscriptions`.\n\nWith tenants still active on the plan: 409 `PLAN_HAS_ACTIVE_TENANTS` (`details.subscribersAffected`) — repeat with `?confirm=true`.\n\n**Errors:** 404 `PLAN_NOT_FOUND`, 409 `PLAN_HAS_ACTIVE_TENANTS` / `PLAN_ALREADY_ARCHIVED`."
+              },
+              "response": []
+            },
+            {
+              "name": "Restore archived plan",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"active\",\n  \"reason\": \"Re-offering the bespoke plan\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusForkPlanCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusForkPlanCode}}"
+                  ]
+                },
+                "description": "Un-archives the plan: assignable again, Stripe Product/Prices re-enabled. `is_public` stays false until you set it. Leaves the plan active for *Subscriptions*."
+              },
+              "response": []
+            },
+            {
+              "name": "Feature flags",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/feature-flags",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "feature-flags"
+                  ]
+                },
+                "description": "Catalogue of the codes used in plan and override `feature_flags` / `limits` maps.\n- `flags[]`: `{ code, category, name, description, core, vertical }`. `core: true` = always on, can't be switched off. `vertical: \"muslim\"` = only takes effect for tenants with `is_muslim_charity`.\n- `limits[]`: `{ code, category, name, description, unit }` — numeric quotas, `null` = unlimited.\n- `categories[]`: `{ code, name, description }`.\n\n`volunteers` exists in **both** lists: the flag turns the feature on, the limit caps applications — independent."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Subscriptions (change plan)",
+          "description": "Assign or change a tenant's plan and manage per-tenant overrides. Every call writes an audit event (see `recent_events` on *Get tenant*). In Donexus the subscription is part of the tenant (`subscription` on the tenant object), optionally backed by a platform Stripe subscription.",
+          "item": [
+            {
+              "name": "Assign / change plan",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"plan_code\": \"{{donexusForkPlanCode}}\",\n  \"billing_cycle\": \"monthly\",\n  \"reason\": \"Moved onto negotiated Acme plan\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/assign-plan",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "assign-plan"
+                  ]
+                },
+                "description": "Sets or changes the plan. `plan_code` required (must exist, not archived); `billing_cycle`: `monthly` \\| `yearly` (default: the tenant's current cycle); `reason` optional.\n\n### What it does to billing — warn staff before they click\n- **Tenant has a live Stripe subscription** (`subscription.billing: \"stripe\"`): switched to the plan's Stripe Price **with prorations**, settled on the **next** invoice (nothing charged now). Same cycle keeps the renewal date; **a cycle change resets the billing period to today**. If Stripe rejects it, **nothing changes** (502 `STRIPE_UPDATE_FAILED`).\n- **No live subscription** (comped, API-provisioned, or billing ended): only the stored plan/cycle change; the billing period is untouched.\n- **Status is never changed** — unlike Stewardex, assigning a plan does not set the tenant active; a suspended tenant stays suspended.\n\nResponse: tenant + `changed` + `billing_sync: { status: \"updated\" | \"skipped\", reason?, proration?, billing_anchor_reset? }`.\n\n**Errors:** 404 `PLAN_NOT_FOUND`, 409 `PLAN_ARCHIVED` / `TENANT_DELETED` / `PLAN_NOT_BILLABLE` (paying tenant → plan with no Stripe price for that cycle), 502 `STRIPE_UPDATE_FAILED`, 503 `STRIPE_UNAVAILABLE`."
+              },
+              "response": []
+            },
+            {
+              "name": "Switch to yearly billing",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"plan_code\": \"{{donexusForkPlanCode}}\",\n  \"billing_cycle\": \"yearly\",\n  \"reason\": \"Moved to annual billing\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/assign-plan",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "assign-plan"
+                  ]
+                },
+                "description": "Same endpoint — keep the plan, change the cycle. For a Stripe-billed tenant this **resets the billing period to today** and prorates. Sending the current plan and cycle is a no-op (`changed: false`)."
+              },
+              "response": []
+            },
+            {
+              "name": "Set tenant override",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"limits\": {\n    \"adminSeats\": 25,\n    \"campaigns\": null\n  },\n  \"feature_flags\": {\n    \"paypal\": true,\n    \"customEmail\": true\n  },\n  \"pricing\": {\n    \"currency\": \"AUD\",\n    \"monthly\": 99,\n    \"yearly\": null\n  },\n  \"reason\": \"Acme agreement: 25 seats, unlimited campaigns, monthly price pinned at $99\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/override",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "override"
+                  ]
+                },
+                "description": "Create/replace this tenant's override of plan limits, flags or pricing. **PUT replaces the whole override** — keys you leave out fall back to the plan.\n\n| field | notes |\n|---|---|\n| `reason` | **required** → 400 `REASON_REQUIRED` |\n| `limits` | limit code → integer ≥0, or `null` = unlimited |\n| `feature_flags` | flag code → boolean. Core flags can't be switched off → 400 `CORE_FLAG_LOCKED` |\n| `pricing` | `{ monthly, yearly }` in platform currency; `null` = plan price |\n| `effective_from` / `effective_until` | **not supported in Donexus** → 400 `OVERRIDE_WINDOW_UNSUPPORTED`. An override applies from when it is set until cleared. |\n\n**Effect:** limits and flags change the tenant's entitlements immediately. **`pricing` is a recorded negotiated price for MRR reporting and `subscription.price` — it does NOT change what Stripe charges.** To change a Stripe-billed tenant's actual price, fork a plan and assign it.\n\nResponse: tenant with `override: { limits, feature_flags, pricing, reason, set_by, set_at }` and resolved `entitlements`."
+              },
+              "response": []
+            },
+            {
+              "name": "Clear tenant override",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Agreement ended\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/override",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "override"
+                  ]
+                },
+                "description": "Removes the override; the tenant falls back to plan defaults. Returns tenant detail plus `cleared` (false when there was no override). `reason` optional (body or `?reason=`)."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Tickets",
+          "description": "Support tickets (Donexus's tenant → platform helpdesk: raised by a charity's staff, its donors, or its public support form). All tenants' tickets live in one database, so every tenant's tickets are readable — including suspended and deleted tenants' under `/tenants/:id/tickets` — and the cross-tenant queue can't partially fail.\n\n- status: new | in_progress | on_hold | solved | declined\n- priority: low | medium | high | critical\n- category: technical_error | bug_report | feature_request | access_issue | data_issue | general | other | billing | account | feedback\n\n**Comment visibility is enforced server-side.** `is_internal: true` (the default) = Calcite staff only, hidden from the reporter **and** from the tenant's own admins. `is_internal: false` = visible to everyone and **emailed to the reporter**. Optional `visibility: \"tenant\"` = the tenant's admins + Calcite, hidden from the reporter.",
+          "item": [
+            {
+              "name": "List tickets (all tenants)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tickets",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tickets"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "new",
+                      "disabled": true,
+                      "description": "Optional filter"
+                    },
+                    {
+                      "key": "priority",
+                      "value": "high",
+                      "disabled": true,
+                      "description": "Optional filter"
+                    },
+                    {
+                      "key": "category",
+                      "value": "billing",
+                      "disabled": true,
+                      "description": "Optional filter"
+                    },
+                    {
+                      "key": "assignee",
+                      "value": "{{donexusAssigneeId}}",
+                      "disabled": true,
+                      "description": "Optional: assignee user id"
+                    },
+                    {
+                      "key": "tenant_id",
+                      "value": "{{donexusTenantId}}",
+                      "disabled": true,
+                      "description": "Optional: one tenant (id, not slug)"
+                    },
+                    {
+                      "key": "search",
+                      "value": "receipt",
+                      "disabled": true,
+                      "description": "Optional: summary, reporter name or email"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "disabled": true,
+                      "description": "Default 50, max 200"
+                    }
+                  ]
+                },
+                "description": "Support-desk view across every tenant, newest first; each ticket carries `tenant_id` and `tenant: { id, name, slug }`. Tickets of soft-deleted tenants are left out; comments are omitted (see `comment_count`).\n\n**Paginated:** `meta: { page, limit, total, pages, failed_tenants }` — `failed_tenants` is always `[]` in Donexus (single database), kept for contract parity.\n\n**Ticket object**: `id`, `number` (per-tenant sequence), `tenant_id`, `tenant: { id, name, slug }`, `summary`, `description`, `status`, `priority`, `category`, `reporter: { user_id, name, email, kind }` (`kind`: `admin` = tenant staff, `customer` = a donor, `public` = no account), `assignee: { id, name, email, assigned_at } | null`, `resolution: { notes, resolved_at } | null`, `first_response_at`, `satisfaction: { rating 1–5, feedback, rated_at } | null`, `triage: { category, board_status, notes }` (Donexus's internal bug/feature board), `attachments[]`, `comment_count`, `created_at`, `updated_at`. Detail responses add `comments[]`: `{ id, message, author_name, author_id, visibility, is_internal, email_status, created_at }`."
+              },
+              "response": []
+            },
+            {
+              "name": "Create ticket",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data && res.data.id !== undefined && res.data.id !== null) { pm.collectionVariables.set(\"donexusTicketId\", res.data.id); console.log(\"donexusTicketId =\", res.data.id); }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"summary\": \"Donation receipts not being emailed\",\n  \"description\": \"Since Monday 9am donors are not receiving receipts after checkout. Card payments are succeeding.\",\n  \"priority\": \"high\",\n  \"category\": \"technical_error\",\n  \"reporter_name\": \"Dana Reyes\",\n  \"reporter_email\": \"dana.reyes+{{donexusRunId}}@example.org\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets"
+                  ]
+                },
+                "description": "Opens a ticket on the tenant's behalf. 201 with the ticket (detail shape). Saves `{{donexusTicketId}}`.\n\n| field | required | notes |\n|---|---|---|\n| `summary` | yes | ≤300 |\n| `description` | no | ≤20 000 |\n| `priority` | no | default `medium` |\n| `category` | no | default `general` |\n| `reporter_email` / `reporter_name` | no | Linked to the user when the email belongs to this tenant (kind `admin`/`customer`), else recorded as an external report (kind `public`). **Default: the tenant's owner** (409 `TENANT_HAS_NO_OWNER` if none). Public replies are emailed to this address. |\n| `reason` | no | audit |\n\nDonexus tickets have no `module` field. Shows up live in the tenant's helpdesk and the Donexus console; **no email** is sent on creation."
+              },
+              "response": []
+            },
+            {
+              "name": "List tenant tickets",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "in_progress",
+                      "disabled": true,
+                      "description": "Optional filter"
+                    },
+                    {
+                      "key": "priority",
+                      "value": "critical",
+                      "disabled": true,
+                      "description": "Optional filter"
+                    },
+                    {
+                      "key": "category",
+                      "value": "billing",
+                      "disabled": true,
+                      "description": "Optional filter"
+                    },
+                    {
+                      "key": "assignee",
+                      "value": "{{donexusAssigneeId}}",
+                      "disabled": true,
+                      "description": "Optional: assignee user id"
+                    },
+                    {
+                      "key": "search",
+                      "value": "receipt",
+                      "disabled": true,
+                      "description": "Optional search"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "disabled": true,
+                      "description": "Default 50, max 200"
+                    }
+                  ]
+                },
+                "description": "Same as *List tickets (all tenants)*, scoped to one tenant. Paginated."
+              },
+              "response": []
+            },
+            {
+              "name": "Ticket stats",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/stats",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "stats"
+                  ]
+                },
+                "description": "Counts for a dashboard: `{ tenant_id, total, open, unassigned_open, by_status: { new, in_progress, on_hold, solved, declined }, by_priority: { low, medium, high, critical } }`. `open` = new + in_progress + on_hold. Every enum key is always present."
+              },
+              "response": []
+            },
+            {
+              "name": "Get ticket",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}"
+                  ]
+                },
+                "description": "Full ticket incl. comments (every visibility), attachments, reporter, assignee, resolution and satisfaction rating.\n\n**Ticket object**: `id`, `number` (per-tenant sequence), `tenant_id`, `tenant: { id, name, slug }`, `summary`, `description`, `status`, `priority`, `category`, `reporter: { user_id, name, email, kind }` (`kind`: `admin` = tenant staff, `customer` = a donor, `public` = no account), `assignee: { id, name, email, assigned_at } | null`, `resolution: { notes, resolved_at } | null`, `first_response_at`, `satisfaction: { rating 1–5, feedback, rated_at } | null`, `triage: { category, board_status, notes }` (Donexus's internal bug/feature board), `attachments[]`, `comment_count`, `created_at`, `updated_at`. Detail responses add `comments[]`: `{ id, message, author_name, author_id, visibility, is_internal, email_status, created_at }`.\n\n**Errors:** 404 `TICKET_NOT_FOUND` (also when the ticket belongs to another tenant)."
+              },
+              "response": []
+            },
+            {
+              "name": "Update ticket",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"priority\": \"critical\",\n  \"category\": \"bug_report\",\n  \"summary\": \"Donation receipts not being emailed (all donors)\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}"
+                  ]
+                },
+                "description": "Edit any of `summary`, `description`, `priority`, `category` (at least one). Fields not sent are unchanged."
+              },
+              "response": []
+            },
+            {
+              "name": "Change ticket status",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"in_progress\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}/status",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}",
+                    "status"
+                  ]
+                },
+                "description": "`status`: `new` \\| `in_progress` \\| `on_hold` \\| `solved` \\| `declined`. See *Resolve ticket* for what `solved`/`declined` add. Optional `reason` for the audit log."
+              },
+              "response": []
+            },
+            {
+              "name": "Assign ticket",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"assignee_id\": \"{{donexusAssigneeId}}\",\n  \"reason\": \"Owner is handling the SMTP settings\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}/assign",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}",
+                    "assign"
+                  ]
+                },
+                "description": "`assignee_id` (required): an **admin user of that tenant** (404 `ASSIGNEE_NOT_IN_TENANT` otherwise — donors and other tenants' users are refused); `null` unassigns. `{{donexusAssigneeId}}` is set to the owner by *Create tenant*.\n\nThe assignment appears live in the tenant helpdesk; Donexus sends **no assignment email** and does **not** change the ticket's status (matching its own helpdesk)."
+              },
+              "response": []
+            },
+            {
+              "name": "Add comment (visible to customer)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"message\": \"Thanks Dana — we've rotated the SMTP password and sent a test receipt. Could you confirm it arrived?\",\n  \"is_internal\": false,\n  \"author_name\": \"Calcite Support\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}/comments",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}",
+                    "comments"
+                  ]
+                },
+                "description": "`message` (required, ≤10 000), `is_internal: false`, `author_name` (default \"Calcite Support\"). 201 with the ticket plus the new `comment`.\n\n**Side effects:** the reply is **emailed to the reporter** (from the tenant's email identity; `comment.email_status` = `sent` \\| `failed`), sets `first_response_at` if unset, and moves a `new` ticket to `in_progress`. Only customer-visible replies count as a first response."
+              },
+              "response": []
+            },
+            {
+              "name": "Add internal note",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"message\": \"Root cause: the tenant's SMTP password expired on the 12th.\",\n  \"is_internal\": true,\n  \"author_name\": \"Hyper Ops\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}/comments",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}",
+                    "comments"
+                  ]
+                },
+                "description": "`is_internal: true` — **the default**, so a note is never emailed or shown to a customer by omission. Visible to Calcite staff only: hidden from the reporter **and from the tenant's own admins** (stripped from every tenant helpdesk response). No email, no status change.\n\nFor a note the tenant's admins may see but the reporter may not, send `visibility: \"tenant\"` instead (Donexus's console-style internal note)."
+              },
+              "response": []
+            },
+            {
+              "name": "Resolve ticket",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"solved\",\n  \"resolution_notes\": \"Expired SMTP credential rotated; test receipt delivered.\",\n  \"send_satisfaction_survey\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}/status",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}",
+                    "status"
+                  ]
+                },
+                "description": "`solved` / `declined` record `resolution.notes` and `resolution.resolved_at`.\n\n**Side effect:** the **first** time a ticket is resolved (and only if the reporter hasn't rated it), a one-time \"How did we do?\" satisfaction email goes to the reporter — unless `send_satisfaction_survey: false`. Response includes `satisfaction_survey_sent`."
+              },
+              "response": []
+            },
+            {
+              "name": "Delete ticket",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/tickets/{{donexusTicketId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "tickets",
+                    "{{donexusTicketId}}"
+                  ]
+                },
+                "description": "**Permanently** deletes the ticket and its thread — the only hard delete in this API. The audit log keeps a `ticket.deleted` event (number, summary, reporter email). Returns `{ id, deleted: true }`."
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "donexusTenantId",
+      "value": "",
+      "description": "Donexus tenant id (set by Create tenant)"
+    },
+    {
+      "key": "donexusPlanCode",
+      "value": "essentials",
+      "description": "Donexus plan code (set by Create plan)"
+    },
+    {
+      "key": "donexusForkPlanCode",
+      "value": "",
+      "description": "Donexus bespoke plan code (set by Fork plan)"
+    },
+    {
+      "key": "donexusTicketId",
+      "value": "",
+      "description": "Donexus ticket id (set by Create ticket)"
+    },
+    {
+      "key": "donexusAssigneeId",
+      "value": "",
+      "description": "An admin user id in {{donexusTenantId}} to assign tickets to (set to the owner by Create tenant)"
+    },
+    {
+      "key": "donexusRunId",
+      "value": "",
+      "description": "Per-run suffix for unique names/emails (set by Create tenant)"
+    }
+  ]
+}

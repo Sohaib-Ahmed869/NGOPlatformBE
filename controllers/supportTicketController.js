@@ -16,6 +16,16 @@ function orgId(req) {
   return req.organisation?._id;
 }
 
+// Tenant-admin view: the whole thread EXCEPT platform-staff-only notes, which
+// are written by the platform operator (integration API) and must never reach
+// the tenant. Every tenant-admin response that carries comments goes through here.
+function tenantAdminView(ticket) {
+  if (!ticket) return ticket;
+  const t = ticket.toObject ? ticket.toObject() : { ...ticket };
+  t.comments = (t.comments || []).filter((c) => !c.platformOnly);
+  return t;
+}
+
 // Best-available display name for a signed-in user: `name`, then firstName +
 // lastName, then the email local-part — so a ticket never shows "Unknown".
 function userDisplayName(u) {
@@ -91,7 +101,7 @@ exports.listTickets = async (req, res) => {
       .populate("assignee.userId", "name email")
       .sort({ createdAt: -1 })
       .limit(500);
-    res.json({ tickets });
+    res.json({ tickets: tickets.map(tenantAdminView) });
   } catch (err) {
     console.error("List tickets error:", err);
     res.status(500).json({ error: "Failed to fetch tickets" });
@@ -123,7 +133,7 @@ exports.getTicket = async (req, res) => {
       .populate("assignee.userId", "name email")
       .populate("comments.createdBy", "name email");
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
-    res.json({ ticket });
+    res.json({ ticket: tenantAdminView(ticket) });
   } catch (err) {
     console.error("Get ticket error:", err);
     res.status(500).json({ error: "Failed to fetch ticket" });
@@ -170,7 +180,7 @@ exports.updateTicket = async (req, res) => {
     ).select(PUBLIC_FIELDS);
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
     emitToOrg(orgId(req), "ticket:update", { id: ticket._id });
-    res.json({ ticket });
+    res.json({ ticket: tenantAdminView(ticket) });
   } catch (err) {
     console.error("Update ticket error:", err);
     res.status(500).json({ error: "Failed to update ticket" });
@@ -187,7 +197,7 @@ exports.assignTicket = async (req, res) => {
     ).select(PUBLIC_FIELDS).populate("assignee.userId", "name email");
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
     emitToOrg(orgId(req), "ticket:update", { id: ticket._id });
-    res.json({ ticket });
+    res.json({ ticket: tenantAdminView(ticket) });
   } catch (err) {
     console.error("Assign ticket error:", err);
     res.status(500).json({ error: "Failed to assign ticket" });
@@ -226,7 +236,7 @@ exports.updateStatus = async (req, res) => {
     if (csatLink) {
       sendCsatEmail(ticket, csatLink).catch((e) => console.error("CSAT email error:", e?.message || e));
     }
-    res.json({ ticket });
+    res.json({ ticket: tenantAdminView(ticket) });
   } catch (err) {
     console.error("Update status error:", err);
     res.status(500).json({ error: "Failed to update status" });
@@ -271,7 +281,7 @@ exports.addComment = async (req, res) => {
     await ticket.save();
     emitToOrg(orgId(req), "ticket:update", { id: ticket._id });
     emitToSuperAdmins("ticket:update", { id: ticket._id, organisationId: orgId(req) });
-    res.json({ ticket: await ticket.populate("comments.createdBy", "name email"), emailStatus: entry.emailStatus || "" });
+    res.json({ ticket: tenantAdminView(await ticket.populate("comments.createdBy", "name email")), emailStatus: entry.emailStatus || "" });
   } catch (err) {
     console.error("Add comment error:", err);
     res.status(500).json({ error: "Failed to add comment" });
@@ -286,7 +296,7 @@ exports.addAttachment = async (req, res) => {
     ticket.attachments.push({ key: req.file.key, name: req.file.originalname, size: req.file.size, url: req.file.location });
     await ticket.save();
     emitToOrg(orgId(req), "ticket:update", { id: ticket._id });
-    res.json({ ticket });
+    res.json({ ticket: tenantAdminView(ticket) });
   } catch (err) {
     console.error("Add attachment error:", err);
     res.status(500).json({ error: "Failed to attach file" });

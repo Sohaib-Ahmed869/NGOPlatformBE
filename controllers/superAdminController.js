@@ -15,15 +15,14 @@ const writeAudit = require("../utils/writeAudit");
 const { sendTemplateEmail } = require("../services/emailUtil");
 const { adminPortalUrl } = require("../utils/tenantUrls");
 const { getEffectiveLimits } = require("../utils/effectiveLimits");
-const { METER_KEYS } = require("../config/featureCatalog");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { emitToSuperAdmins } = require("./../services/socket");
-const { stripe } = require("../services/platformStripe");
-const stripePrices = require("../config/stripePrices");
 const planPricing = require("../config/planPricing");
 const subscriptionMetrics = require("../services/subscriptionMetrics");
+const tenantLifecycle = require("../services/tenantLifecycle");
+const { isServiceError } = require("../utils/serviceError");
 
 // Escape user-supplied text for safe inclusion in notification HTML.
 const escapeHtml = (s) =>
@@ -210,78 +209,36 @@ exports.listOrganisations = async (req, res) => {
 };
 
 /**
+ * Console answer for a failure thrown by services/tenantLifecycle.js — same
+ * `{ error }` shape the console has always read, with the service's status.
+ */
+function sendLifecycleError(res, err, fallback) {
+  if (isServiceError(err)) return res.status(err.status).json({ error: err.message, code: err.code });
+  console.error(`${fallback}:`, err);
+  return res.status(500).json({ error: fallback });
+}
+
+/**
  * PATCH /api/superadmin/organisations/:id/plan
- * Change an organisation's plan.
+ * Change an organisation's plan (billing cycle unchanged). The Stripe swap and
+ * its failure rules live in tenantLifecycle.assignPlan.
  */
 exports.changePlan = async (req, res) => {
   try {
     // `plan` must be a scalar before it becomes a Mongo query. An object like
-    // { $ne: null } used to match the FIRST plan in the collection, clear the
-    // "is this a real plan?" guard, and then fail the cast on save as a 500.
+    // { $ne: null } used to match the FIRST plan in the collection.
     const parsed = input.text(req.body?.plan, "Plan", { max: 60, required: true, allowEmpty: false });
     if (parsed.error) return res.status(400).json({ error: "Invalid plan" });
-    const plan = parsed.value;
-
-    // Prefer a dynamic Plan; fall back to the legacy static tiers so this keeps
-    // working before the Plan collection has been seeded.
-    const planDoc = await Plan.findOne({ code: plan });
-    const legacyPlans = ["essentials", "professional", "enterprise"];
-    if (!planDoc && !legacyPlans.includes(plan)) {
-      return res.status(400).json({ error: "Invalid plan" });
-    }
-    // An archived plan is off-sale. Moving a tenant onto one leaves them on a
-    // tier with no live Stripe price, so the next renewal has nothing to charge.
-    if (planDoc && planDoc.isActive === false) {
-      return res.status(400).json({ error: `"${plan}" is archived — reactivate the plan before assigning it` });
-    }
 
     const org = await Organisation.findById(req.params.id);
     if (!org) {
       return res.status(404).json({ error: "Organisation not found" });
     }
 
-    const fromPlan = org.plan;
-
-    // Update Stripe subscription if one exists
-    if (org.stripeSubscriptionId) {
-      try {
-        const subscription = await stripe.subscriptions.retrieve(org.stripeSubscriptionId);
-        const cycle = org.billingCycle || "monthly";
-        // Dynamic plan price IDs take precedence over the legacy .env config.
-        const newPriceId = planDoc?.stripePriceIds?.[cycle] || stripePrices[plan]?.[cycle];
-
-        if (newPriceId && subscription.items?.data?.length > 0) {
-          await stripe.subscriptions.update(org.stripeSubscriptionId, {
-            items: [{
-              id: subscription.items.data[0].id,
-              price: newPriceId,
-            }],
-            proration_behavior: "create_prorations",
-          });
-        }
-      } catch (stripeErr) {
-        console.error("Stripe plan update failed (DB will still update):", stripeErr.message);
-      }
-    }
-
-    org.plan = plan;
-    await org.save();
-
-    await writeAudit(req, "subscription.plan_changed", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-      meta: { from: fromPlan, to: plan },
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
-    // The kill-switch screen shows who is inside a tenant right now, so a new
-    // session has to land there without waiting for a refresh.
-    emitToSuperAdmins("supportSession:updated", { reason: "started", sessionId, organisationId: String(org._id) });
-
+    await tenantLifecycle.assignPlan(org, { planCode: parsed.value }, req);
     res.json({ message: "Plan updated", organisation: org });
   } catch (error) {
-    console.error("Change plan error:", error);
-    res.status(500).json({ error: "Failed to change plan" });
+    sendLifecycleError(res, error, "Failed to change plan");
   }
 };
 
@@ -295,32 +252,10 @@ exports.suspendOrg = async (req, res) => {
     if (!org) {
       return res.status(404).json({ error: "Organisation not found" });
     }
-
-    // Cancel Stripe subscription if one exists
-    if (org.stripeSubscriptionId) {
-      try {
-        await stripe.subscriptions.cancel(org.stripeSubscriptionId);
-      } catch (stripeErr) {
-        console.error("Stripe cancellation failed (DB will still update):", stripeErr.message);
-      }
-    }
-
-    org.isActive = false;
-    org.subscriptionStatus = "cancelled";
-    await org.save();
-
-    await writeAudit(req, "org.suspended", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-      meta: { name: org.name, slug: org.slug },
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
-
-    res.json({ message: "Organisation suspended", organisation: org });
+    const result = await tenantLifecycle.suspendTenant(org, req);
+    res.json({ message: "Organisation suspended", organisation: org, warnings: result.warnings });
   } catch (error) {
-    console.error("Suspend org error:", error);
-    res.status(500).json({ error: "Failed to suspend organisation" });
+    sendLifecycleError(res, error, "Failed to suspend organisation");
   }
 };
 
@@ -345,32 +280,10 @@ exports.deleteOrganisation = async (req, res) => {
       return res.status(400).json({ error: "Typed name doesn't match the organisation's name" });
     }
 
-    if (org.stripeSubscriptionId) {
-      try {
-        await stripe.subscriptions.cancel(org.stripeSubscriptionId);
-      } catch (stripeErr) {
-        console.error("Stripe cancellation failed (DB will still update):", stripeErr.message);
-      }
-    }
-
-    org.isActive = false;
-    org.subscriptionStatus = "cancelled";
-    org.deletedAt = new Date();
-    org.deletedBy = req.user?._id || null;
-    await org.save();
-
-    await writeAudit(req, "org.deleted", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-      meta: { name: org.name, slug: org.slug },
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
-
-    res.json({ message: "Organisation deleted", organisation: org });
+    const result = await tenantLifecycle.softDeleteTenant(org, req);
+    res.json({ message: "Organisation deleted", organisation: org, warnings: result.warnings });
   } catch (error) {
-    console.error("Delete org error:", error);
-    res.status(500).json({ error: "Failed to delete organisation" });
+    sendLifecycleError(res, error, "Failed to delete organisation");
   }
 };
 
@@ -454,40 +367,21 @@ exports.getOrganisationDetail = async (req, res) => {
 exports.updateStatus = async (req, res) => {
   try {
     const { action } = req.body;
+    if (!["suspend", "reactivate"].includes(action)) return res.status(400).json({ error: "Invalid action" });
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
 
-    if (action === "suspend") {
-      if (org.stripeSubscriptionId) {
-        try {
-          await stripe.subscriptions.cancel(org.stripeSubscriptionId);
-        } catch (e) {
-          console.error("Stripe cancel failed (DB still updates):", e.message);
-        }
-      }
-      org.isActive = false;
-      org.subscriptionStatus = "cancelled";
-    } else if (action === "reactivate") {
-      org.isActive = true;
-      org.subscriptionStatus = "active";
-    } else {
-      return res.status(400).json({ error: "Invalid action" });
-    }
-
-    await org.save();
-    await writeAudit(req, action === "suspend" ? "org.suspended" : "org.reactivated", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+    const result =
+      action === "suspend"
+        ? await tenantLifecycle.suspendTenant(org, req)
+        : await tenantLifecycle.reactivateTenant(org, req);
     res.json({
       message: `Organisation ${action === "suspend" ? "suspended" : "reactivated"}`,
       organisation: org,
+      warnings: result.warnings,
     });
   } catch (err) {
-    console.error("Update status error:", err);
-    res.status(500).json({ error: "Failed to update status" });
+    sendLifecycleError(res, err, "Failed to update status");
   }
 };
 
@@ -528,63 +422,12 @@ exports.compOrg = async (req, res) => {
  */
 exports.setOverride = async (req, res) => {
   try {
-    const { limits, pricing } = req.body || {};
-    const parsedReason = input.text(req.body?.reason, "Reason", { max: 500, required: true, allowEmpty: false });
-    if (parsedReason.error) return res.status(400).json({ error: "A reason is required" });
-
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
-
-    // Limits are validated against the catalog's meter keys and the numbers are
-    // checked rather than coerced. `Number(v)` alone wrote NaN into the document
-    // for a typo, and NaN compares false against every quota — the tenant ended
-    // up with an override that silently blocked everything.
-    const cleanLimits = {};
-    if (limits && typeof limits === "object" && !Array.isArray(limits)) {
-      for (const k of Object.keys(limits)) {
-        if (!METER_KEYS.includes(k)) continue; // ignore keys the catalog doesn't know
-        const v = limits[k];
-        if (typeof v === "boolean") {
-          cleanLimits[k] = v;
-          continue;
-        }
-        const n = input.number(v, `Limit "${k}"`, { min: 0, max: 1e9, allowNull: true, integer: true });
-        if (n.error) return res.status(400).json({ error: n.error });
-        cleanLimits[k] = n.value;
-      }
-    }
-
-    const cleanPricing = {};
-    for (const cycle of ["monthly", "annual"]) {
-      const n = input.number(pricing?.[cycle], `${cycle[0].toUpperCase()}${cycle.slice(1)} price`, {
-        min: 0,
-        max: 1e7,
-        allowNull: true,
-        decimals: 2,
-      });
-      if (n.error) return res.status(400).json({ error: n.error });
-      cleanPricing[cycle] = n.value;
-    }
-
-    org.override = {
-      limits: Object.keys(cleanLimits).length ? cleanLimits : null,
-      pricing: cleanPricing,
-      reason: parsedReason.value,
-      setBy: req.user._id,
-      setAt: new Date(),
-    };
-    await org.save();
-    await writeAudit(req, "org.override_set", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-      meta: { limits: cleanLimits, pricing: cleanPricing, reason: parsedReason.value },
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+    await tenantLifecycle.setOverride(org, req.body || {}, req);
     res.json({ message: "Override saved", organisation: org });
   } catch (err) {
-    console.error("Set override error:", err);
-    res.status(500).json({ error: "Failed to set override" });
+    sendLifecycleError(res, err, "Failed to set override");
   }
 };
 
@@ -595,18 +438,10 @@ exports.clearOverride = async (req, res) => {
   try {
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
-    org.override = undefined;
-    await org.save();
-    await writeAudit(req, "org.override_cleared", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+    await tenantLifecycle.clearOverride(org, req);
     res.json({ message: "Override cleared", organisation: org });
   } catch (err) {
-    console.error("Clear override error:", err);
-    res.status(500).json({ error: "Failed to clear override" });
+    sendLifecycleError(res, err, "Failed to clear override");
   }
 };
 

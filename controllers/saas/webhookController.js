@@ -228,6 +228,12 @@ async function handleSubscriptionUpdated(subscription) {
 
   const newStatus = statusMap[subscription.status] || "pending";
 
+  // A subscription the platform already ended itself (an operator or the
+  // integration API suspended/deleted the tenant) can only report "canceled"
+  // from here on. Applying that would undo a reactivation that happened after
+  // the cancel — the tenant's status is the operator's call now, not Stripe's.
+  if (subscription.status === "canceled" && organisation.stripeSubscriptionEndedAt) return;
+
   // First time the subscription becomes active → create admin + activate (the
   // in-house checkout's PaymentIntent succeeding fires this and/or invoice.paid).
   if (newStatus === "active" && !organisation.adminUserId) {
@@ -258,8 +264,14 @@ async function handleSubscriptionDeleted(subscription) {
     return;
   }
 
+  // Already ended by the platform itself (suspend/delete cancels it and stamps
+  // this). The event is just Stripe confirming that; re-applying it would lock
+  // a tenant an operator has since reactivated, and re-send the email.
+  if (organisation.stripeSubscriptionEndedAt) return;
+
   organisation.subscriptionStatus = "cancelled";
   organisation.isActive = false;
+  organisation.stripeSubscriptionEndedAt = new Date();
   await organisation.save();
   emitToSuperAdmins("organisation:updated", { organisationId: String(organisation._id) });
 

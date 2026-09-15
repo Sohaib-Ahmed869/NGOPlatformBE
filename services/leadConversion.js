@@ -29,23 +29,15 @@
 const crypto = require("crypto");
 const Organisation = require("../models/organisation");
 const User = require("../models/user");
-const DonationType = require("../models/donationtypes");
 const Plan = require("../models/plan");
 const Coupon = require("../models/coupon");
 const stripePrices = require("../config/stripePrices");
 const { refreshRedemptions, hasRedemptionsLeft } = require("../utils/couponRedemptions");
 const { stripe } = require("./platformStripe");
 const { sendTemplateEmail } = require("./emailUtil");
-const { seedPagesForOrg } = require("./pageService");
 const { getThemeColors } = require("../config/themePresets");
-
-// Same slug rules as controllers/saas/registrationController.js — duplicated
-// rather than shared because the self-serve flow validates a client-typed
-// slug, while this one generates and dedupes one server-side; keeping them
-// as two small, obviously-equivalent lists is simpler than forcing one shape
-// to serve both call sites.
-const SLUG_REGEX = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const RESERVED_SLUGS = ["admin", "www", "api", "app", "mail", "ftp", "localhost"];
+const { provisionOrganisation, resolveSlug, seedOrgDefaults } = require("./tenantProvisioning");
+const { isServiceError } = require("../utils/serviceError");
 
 function clientBaseUrl(req) {
   return process.env.CLIENT_URL || `${req.protocol}://${req.get("host")}`;
@@ -56,34 +48,6 @@ function fail(status, message) {
   err.statusCode = status;
   err.publicMessage = message;
   return err;
-}
-
-async function uniqueSlugFromName(orgName) {
-  let base = String(orgName || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!base || !SLUG_REGEX.test(base)) base = "org";
-
-  let candidate = base;
-  let n = 2;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    if (!RESERVED_SLUGS.includes(candidate) && !(await Organisation.exists({ slug: candidate }))) {
-      return candidate;
-    }
-    candidate = `${base}-${n++}`;
-  }
-}
-
-/** A client-supplied slug, validated + confirmed unique; falls back to auto-derived. */
-async function resolveSlug(requestedSlug, orgName) {
-  const s = String(requestedSlug || "").toLowerCase().trim();
-  if (s && SLUG_REGEX.test(s) && !RESERVED_SLUGS.includes(s) && !(await Organisation.exists({ slug: s }))) {
-    return s;
-  }
-  return uniqueSlugFromName(orgName);
 }
 
 /** Map the lead's richer budget bands onto Organisation.revenueRange's 3-tier enum. */
@@ -205,62 +169,40 @@ async function manualProvision(lead, body, req) {
   if (!fields.adminName) throw fail(400, "Admin name is required");
   if (!/\S+@\S+\.\S+/.test(fields.adminEmail)) throw fail(400, "A valid admin email is required");
 
-  const existingUser = await User.findOne({ email: fields.adminEmail });
-  if (existingUser) throw fail(400, "An account with this email already exists");
-
-  const slug = await resolveSlug(fields.requestedSlug, fields.orgName);
   const isMuslimCharity = fields.isMuslimCharity;
-  const isComp = body?.isComp !== false; // manual provisioning is comped by default
-  const compReason = String(body?.compReason || "").trim() || "Converted from lead (manual provisioning)";
-  const trialEndsAt = body?.trialEndsAt ? new Date(body.trialEndsAt) : null;
-  const theme = getThemeColors(fields.theme);
-
-  const organisation = await Organisation.create({
-    name: fields.orgName,
-    slug,
-    plan: fields.plan,
-    billingCycle: fields.billingCycle,
-    revenueRange: fields.revenueRange,
-    subscriptionStatus: "active",
-    isActive: true,
-    isMuslimCharity,
-    isComp,
-    compReason: isComp ? compReason : "",
-    trialEndsAt,
-    contactEmail: fields.adminEmail,
-    contactPhone: lead.contactPhone || "",
-    addressDetails: { country: lead.country || "" },
-    website: lead.orgWebsite || "",
-    sourceLeadId: lead._id,
-    branding: {
-      theme: fields.theme,
-      primaryColor: theme.primaryColor,
-      accentColor: theme.accentColor,
-      backgroundColor: theme.backgroundColor,
-      logo: fields.logoUrl,
-    },
-  });
-
-  // Reset-password token, same mechanism as userController.forgotPassword —
-  // this admin never had a password to begin with, so "reset" is really
-  // "set for the first time".
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  const resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-  const resetPasswordExpires = Date.now() + 7 * 24 * 3600 * 1000;
-
-  const adminUser = await User.create({
-    name: fields.adminName,
-    email: fields.adminEmail,
-    role: "admin",
-    organisationId: organisation._id,
-    resetPasswordToken,
-    resetPasswordExpires,
-  });
-
-  organisation.adminUserId = adminUser._id;
-  await organisation.save();
-
-  await seedOrgDefaults(organisation._id, isMuslimCharity);
+  let provisioned;
+  try {
+    provisioned = await provisionOrganisation(
+      {
+        orgName: fields.orgName,
+        adminName: fields.adminName,
+        adminEmail: fields.adminEmail,
+        slug: fields.requestedSlug,
+        plan: fields.plan,
+        billingCycle: fields.billingCycle,
+        revenueRange: fields.revenueRange,
+        isMuslimCharity,
+        theme: fields.theme,
+        logoUrl: fields.logoUrl,
+        extra: {
+          contactPhone: lead.contactPhone || "",
+          addressDetails: { country: lead.country || "" },
+          website: lead.orgWebsite || "",
+          sourceLeadId: lead._id,
+        },
+      },
+      {
+        isComp: body?.isComp !== false, // manual provisioning is comped by default
+        compReason: String(body?.compReason || "").trim() || "Converted from lead (manual provisioning)",
+        trialEndsAt: body?.trialEndsAt ? new Date(body.trialEndsAt) : null,
+        credentials: "reset_token",
+      },
+    );
+  } catch (err) {
+    if (isServiceError(err)) throw fail(err.code === "EMAIL_IN_USE" ? 400 : err.status, err.message);
+    throw err;
+  }
+  const { organisation, adminUser, resetToken } = provisioned;
 
   const base = clientBaseUrl(req);
   const setPasswordUrl = `${base}/reset-password/${resetToken}`;
@@ -306,25 +248,6 @@ async function manualProvision(lead, body, req) {
   await lead.save();
 
   return { organisation, adminUser, emailStatus };
-}
-
-async function seedOrgDefaults(organisationId, isMuslimCharity) {
-  try {
-    await seedPagesForOrg(organisationId);
-  } catch (e) {
-    console.error("Failed to seed pages for converted lead org:", e.message);
-  }
-  try {
-    const defaultTypes = isMuslimCharity
-      ? ["Zakat ul Maal", "Zakat ul Fitr", "Sadaqah", "Sadaqah Jariyah", "Lillah", "Fidya & Kaffarah", "General Donation"]
-      : ["General Donation", "Education Fund", "Water Fund", "Food Fund", "Emergency Fund", "Healthcare Fund"];
-    await DonationType.insertMany(
-      defaultTypes.map((donationType, order) => ({ organisationId, donationType, order })),
-      { ordered: false }
-    );
-  } catch (e) {
-    console.error("Failed to seed donation types for converted lead org:", e.message);
-  }
 }
 
 /** Resolve a Stripe Price id the same way registrationController.register does. */
