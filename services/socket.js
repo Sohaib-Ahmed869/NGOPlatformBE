@@ -5,20 +5,10 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const User = require("../models/user");
+// Same origin policy as the HTTP API — see utils/corsOrigins.js.
+const { isAllowedOrigin } = require("../utils/corsOrigins");
 
 let io = null;
-
-// Mirror the HTTP CORS policy so the websocket accepts the same origins.
-function isAllowedOrigin(origin) {
-  if (!origin) return true; // non-browser clients
-  if (/^https?:\/\/(localhost|[a-z0-9-]+\.localhost)(:\d+)?$/.test(origin)) return true;
-  if (process.env.CORS_DOMAIN) {
-    const escaped = process.env.CORS_DOMAIN.replace(/\./g, "\\.");
-    if (new RegExp(`^https://([a-z0-9-]+\\.)?${escaped}$`).test(origin)) return true;
-  }
-  if (origin === process.env.CLIENT_URL) return true;
-  return false;
-}
 
 function initSocket(server) {
   io = new Server(server, {

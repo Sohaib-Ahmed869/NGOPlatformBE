@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const { isAllowedOrigin } = require("./utils/corsOrigins");
 const connectDB = require("./config/db");
 const errorHandler = require("./middleware/errorHandler");
 const tenantMiddleware = require("./middleware/tenant");
@@ -68,27 +69,7 @@ setupTaskDigestJob();
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow requests with no origin (server-to-server, Postman, etc.)
-      if (!origin) return callback(null, true);
-
-      // Dev: allow localhost origins
-      if (/^https?:\/\/(localhost|[a-z0-9-]+\.localhost)(:\d+)?$/.test(origin)) {
-        return callback(null, true);
-      }
-
-      // Production: match any subdomain of CORS_DOMAIN
-      if (process.env.CORS_DOMAIN) {
-        const escaped = process.env.CORS_DOMAIN.replace(/\./g, '\\.');
-        if (new RegExp(`^https://([a-z0-9-]+\\.)?${escaped}$`).test(origin)) {
-          return callback(null, true);
-        }
-      }
-
-      // Also allow explicit CLIENT_URL
-      if (origin === process.env.CLIENT_URL) {
-        return callback(null, true);
-      }
-
+      if (isAllowedOrigin(origin)) return callback(null, true);
       callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
