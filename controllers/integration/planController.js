@@ -168,12 +168,102 @@ exports.update = async (req, res) => {
   ok(res, data, { warnings });
 };
 
-/** DELETE /plans/:code?confirm=true — archive. */
+/** DELETE /plans/:code?confirm=true — archive. Also POST /plans/:code/archive { confirm?, reason? }. */
 exports.archive = async (req, res) => {
+  if (req.method === "POST") assertKnownFields(req.body || {}, ["confirm", "reason"]);
   const confirm = req.query.confirm === "true" || req.body?.confirm === true;
   const code = String(req.params.code).toLowerCase();
   const { subscribersAffected } = await planService.archivePlan(code, { confirm }, req);
   const data = await planDetail(code);
   data.active_subscriptions = subscribersAffected;
   ok(res, data);
+};
+
+/** POST /plans/:code/restore { reason? } — put an archived plan back on sale (same as PATCH status "active"). */
+exports.restore = async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["reason"]);
+  reasonFrom(b);
+  const code = String(req.params.code).toLowerCase();
+  const plan = await Plan.findOne({ code }).select("isActive").lean();
+  if (!plan) throw new ServiceError(404, "PLAN_NOT_FOUND", "Plan not found", { code });
+  if (plan.isActive !== false) throw new ServiceError(409, "PLAN_NOT_ARCHIVED", `"${code}" is not archived`, { code });
+  await planService.updatePlan(code, { isActive: true }, req, { strict: true });
+  ok(res, await planDetail(code));
+};
+
+/** POST /plans/:code/sync-stripe — (re)provision or repair the plan's Stripe product and prices. */
+exports.syncStripe = async (req, res) => {
+  assertKnownFields(req.body || {}, ["reason"]);
+  const code = String(req.params.code).toLowerCase();
+  await planService.resyncPlan(code, req);
+  ok(res, await planDetail(code));
+};
+
+/**
+ * POST /plans/:code/migrate-subscribers  { proration?, reason? }
+ * Moves Stripe-billed tenants on the plan onto its CURRENT price. Moves money
+ * when proration is not "none".
+ */
+exports.migrateSubscribers = async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["proration", "reason"]);
+  reasonFrom(b);
+  const code = String(req.params.code).toLowerCase();
+  const { migrated, failed, skipped, stripeEnabled } = await planService.migrateSubscribers(code, { proration: b.proration }, req);
+  const warnings = [];
+  if (!stripeEnabled) warnings.push({ code: "STRIPE_UNAVAILABLE", message: "Stripe is not configured, so no subscription was moved" });
+  if (failed) warnings.push({ code: "MIGRATION_PARTIAL", message: `${failed} subscription(s) could not be moved — see the server log, then retry` });
+  ok(res, { plan_code: code, proration: b.proration || "none", migrated, failed, skipped }, { warnings });
+};
+
+const matrixPlan = (p) => ({
+  code: p.code,
+  name: p.name,
+  status: p.isActive === false ? "archived" : "active",
+  is_public: p.isPublic !== false,
+  sort_order: p.sortOrder || 0,
+  feature_flags: S.serializePlan(p).feature_flags,
+  limits: S.serializePlan(p).limits,
+});
+
+/**
+ * GET /feature-matrix?status=active|archived|all — every plan's flags and
+ * limits side by side (the console's Features screen), plus the catalogue.
+ */
+exports.featureMatrix = async (req, res) => {
+  const status = input.oneOf(req.query.status, "status", ["active", "archived", "all"], { required: false });
+  if (status.error) throw new ServiceError(400, "VALIDATION_ERROR", status.error, { field: "status" });
+  const filter = status.value === "archived" ? { isActive: false } : status.value === "all" ? {} : { isActive: { $ne: false } };
+  const plans = await Plan.find(filter).sort({ sortOrder: 1, createdAt: 1 }).lean();
+  ok(res, {
+    categories: GROUPS.map((g) => ({ code: g.key, name: g.label, description: g.blurb || "" })),
+    flags: FLAGS.map((f) => ({ code: f.key, category: f.group, name: f.label, core: !!f.core, vertical: f.vertical || null })),
+    limits: METERS.map((m) => ({ code: m.key, category: m.group, name: m.label, unit: m.unit || null })),
+    plans: plans.map(matrixPlan),
+  });
+};
+
+/**
+ * PUT /feature-matrix  { plans: { <code>: { feature_flags?, limits? } }, reason? }
+ * Merges PER KEY into each named plan; plans you don't name are untouched. The
+ * whole body is validated before any plan is saved.
+ */
+exports.updateFeatureMatrix = async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["plans", "reason"]);
+  const reason = reasonFrom(b);
+  if (!b.plans || typeof b.plans !== "object" || Array.isArray(b.plans)) {
+    throw new ServiceError(400, "VALIDATION_ERROR", "plans must be an object keyed by plan code", { field: "plans" });
+  }
+  const incoming = {};
+  for (const [code, patch] of Object.entries(b.plans)) {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+      throw new ServiceError(400, "VALIDATION_ERROR", `plans.${code} must be an object`, { field: `plans.${code}` });
+    }
+    assertKnownFields(patch, ["feature_flags", "limits"]);
+    incoming[String(code).toLowerCase()] = { features: patch.feature_flags, limits: patch.limits };
+  }
+  const { updated, plans } = await planService.updateEntitlements(incoming, req, { strict: true, reason });
+  ok(res, { updated, plans: plans.map((p) => matrixPlan(p.toObject ? p.toObject() : p)) });
 };

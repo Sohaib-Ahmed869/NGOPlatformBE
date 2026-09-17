@@ -405,8 +405,116 @@ async function archivePlan(code, { confirm = false } = {}, req) {
   return { plan, subscribersAffected: stillOn };
 }
 
+
+const PRORATIONS = ["none", "create_prorations", "always_invoice"];
+
+/**
+ * Move every Stripe-billed tenant on the plan onto the plan's CURRENT Stripe
+ * price for their cycle. A price edit never does this by itself — existing
+ * subscribers are grandfathered until someone runs this.
+ * @returns {Promise<{plan:object, migrated:number, failed:number, skipped:number, stripeEnabled:boolean}>}
+ */
+async function migrateSubscribers(code, { proration = "none" } = {}, req) {
+  const plan = await Plan.findOne({ code });
+  if (!plan) throw new ServiceError(404, "PLAN_NOT_FOUND", "Plan not found", { code });
+  // Stripe accepts exactly these three; anything else came back as a 500
+  // after the call had already been attempted.
+  const p = input.oneOf(proration ?? "none", "Proration", PRORATIONS);
+  if (p.error) throw invalid(p.error, "proration");
+
+  const result = await stripePlanService.migrateSubscribers(plan, { proration: p.value });
+  await writeAudit(req, "plan.subscribers_migrated", { targetType: "plan", targetId: plan.code, meta: { ...result, proration: p.value } });
+  // Tenants moved between prices — org lists/billing totals shift too.
+  announcePlans(plan.code);
+  emitToSuperAdmins("organisation:updated", {});
+  return { plan, ...result, stripeEnabled: stripePlanService.isStripeEnabled() };
+}
+
+/** (Re)provision or repair the plan's Stripe product and prices. */
+async function resyncPlan(code, req) {
+  const plan = await Plan.findOne({ code });
+  if (!plan) throw new ServiceError(404, "PLAN_NOT_FOUND", "Plan not found", { code });
+  if (!stripePlanService.isStripeEnabled()) throw new ServiceError(503, "STRIPE_UNAVAILABLE", "Stripe is not configured");
+  let synced;
+  try {
+    synced = await stripePlanService.resyncPlan(plan);
+  } catch (err) {
+    throw new ServiceError(502, "STRIPE_UPDATE_FAILED", err.message || "Failed to resync plan with Stripe");
+  }
+  plan.stripeProductId = synced.stripeProductId;
+  plan.stripePriceIds = synced.stripePriceIds;
+  await plan.save();
+  await writeAudit(req, "plan.resynced", { targetType: "plan", targetId: plan.code, meta: { stripeProductId: plan.stripeProductId } });
+  announcePlans(plan.code);
+  return { plan };
+}
+
+/**
+ * Save the feature matrix: per-plan flag and limit changes, MERGED per key.
+ * The whole matrix is validated before any plan is written, so a bad quota in
+ * the last column can't leave the first three already saved.
+ *
+ * @param {Object<string,{features?:object, limits?:object}>} incoming  keyed by plan code
+ * @param {object} opts
+ * @param {boolean} [opts.strict=false]  refuse unknown plan codes / catalogue keys instead of skipping them
+ * @returns {Promise<{updated:string[], skipped:string[], plans:object[]}>}
+ */
+async function updateEntitlements(incoming, req, { strict = false, reason = "" } = {}) {
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) throw invalid("plans must be an object keyed by plan code", "plans");
+  const codes = Object.keys(incoming);
+  if (!codes.length) throw invalid("No plans provided", "plans");
+
+  const plans = await Plan.find({ code: { $in: codes } });
+  const byCode = Object.fromEntries(plans.map((p) => [p.code, p]));
+
+  const staged = [];
+  const skipped = [];
+  for (const code of codes) {
+    const plan = byCode[code];
+    if (!plan) {
+      if (strict) throw new ServiceError(404, "PLAN_NOT_FOUND", `No plan with code "${code}"`, { code });
+      skipped.push(code);
+      continue;
+    }
+    const patch = incoming[code] || {};
+    const entry = { plan };
+    try {
+      if (patch.features !== undefined) entry.flags = sanitizeFlags(patch.features, { strict });
+      if (patch.limits !== undefined) entry.limits = sanitizeLimits(patch.limits, { strict });
+    } catch (err) {
+      // Name the column: "growth: Limit ... " is findable in a 6-plan matrix.
+      if (err instanceof ServiceError) throw new ServiceError(err.status, err.code, `${code}: ${err.message}`, { ...(err.details || {}), plan_code: code });
+      throw err;
+    }
+    staged.push(entry);
+  }
+
+  const updated = [];
+  for (const { plan, flags, limits } of staged) {
+    if (flags) {
+      plan.featureFlags = { ...toPlain(plan.featureFlags), ...flags };
+      plan.markModified("featureFlags");
+    }
+    if (limits) {
+      plan.limits = { ...toPlain(plan.limits), ...limits };
+      plan.markModified("limits");
+    }
+    await plan.save();
+    updated.push(plan.code);
+  }
+
+  await writeAudit(req, "plan.entitlements_updated", {
+    targetType: "plan",
+    targetId: updated.join(","),
+    meta: { plans: updated, skipped, ...(reason ? { reason } : {}) },
+  });
+  announcePlans(null); // several plans at once
+  return { updated, skipped, plans };
+}
+
 module.exports = {
   PLATFORM_CURRENCY,
+  PRORATIONS,
   RE_PLAN_CODE,
   announcePlans,
   planSyncWarning,
@@ -416,4 +524,7 @@ module.exports = {
   createPlan,
   updatePlan,
   archivePlan,
+  migrateSubscribers,
+  resyncPlan,
+  updateEntitlements,
 };

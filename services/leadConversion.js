@@ -38,6 +38,7 @@ const { sendTemplateEmail } = require("./emailUtil");
 const { getThemeColors } = require("../config/themePresets");
 const { provisionOrganisation, resolveSlug, seedOrgDefaults } = require("./tenantProvisioning");
 const { isServiceError } = require("../utils/serviceError");
+const { actorOf } = require("../utils/actor");
 
 function clientBaseUrl(req) {
   return process.env.CLIENT_URL || `${req.protocol}://${req.get("host")}`;
@@ -115,7 +116,7 @@ async function createActivationLink(lead, body, req) {
     tokenHash,
     tokenExpiresAt,
     sentAt: new Date(),
-    sentBy: req.user?._id || null,
+    sentBy: actorOf(req).id,
     openedAt: null,
   };
   const prevStage = lead.stage;
@@ -124,8 +125,8 @@ async function createActivationLink(lead, body, req) {
     lead.stageHistory.push({
       from: prevStage,
       to: lead.stage,
-      changedBy: req.user?._id || null,
-      changedByName: req.user?.name || req.user?.email || "",
+      changedBy: actorOf(req).id,
+      changedByName: actorOf(req).name,
       note: "Activation link sent",
       at: new Date(),
     });
@@ -240,8 +241,8 @@ async function manualProvision(lead, body, req) {
   lead.stageHistory.push({
     from: prevStage,
     to: "won",
-    changedBy: req.user?._id || null,
-    changedByName: req.user?.name || req.user?.email || "",
+    changedBy: actorOf(req).id,
+    changedByName: actorOf(req).name,
     note: "Manually provisioned (comped)",
     at: new Date(),
   });
@@ -372,8 +373,8 @@ async function beginChargeNow(lead, body, req) {
     lead.stageHistory.push({
       from: prevStage,
       to: lead.stage,
-      changedBy: req.user?._id || null,
-      changedByName: req.user?.name || req.user?.email || "",
+      changedBy: actorOf(req).id,
+      changedByName: actorOf(req).name,
       note: "Charging card for manual provisioning",
       at: new Date(),
     });
@@ -397,15 +398,15 @@ async function sendPaymentLink(lead, body, req) {
   lead.interestedPlan = organisation.plan;
   lead.interestedBillingCycle = organisation.billingCycle;
   lead.verticalType = organisation.isMuslimCharity ? "muslim" : "general";
-  lead.activation = { tokenHash, tokenExpiresAt, sentAt: new Date(), sentBy: req.user?._id || null, openedAt: null };
+  lead.activation = { tokenHash, tokenExpiresAt, sentAt: new Date(), sentBy: actorOf(req).id, openedAt: null };
   const prevStage = lead.stage;
   if (lead.stage === "new") lead.stage = "contacted";
   if (lead.stage !== prevStage) {
     lead.stageHistory.push({
       from: prevStage,
       to: lead.stage,
-      changedBy: req.user?._id || null,
-      changedByName: req.user?.name || req.user?.email || "",
+      changedBy: actorOf(req).id,
+      changedByName: actorOf(req).name,
       note: "Payment link sent",
       at: new Date(),
     });

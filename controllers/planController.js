@@ -1,17 +1,15 @@
 const Plan = require("../models/plan");
 const Organisation = require("../models/organisation");
-const writeAudit = require("../utils/writeAudit");
 const stripePlanService = require("../services/stripePlanService");
 const planService = require("../services/planService");
 const { GROUPS, FEATURES } = require("../config/featureCatalog");
 const PlatformSettings = require("../models/platformSettings");
 const { emitToSuperAdmins } = require("../services/socket");
-const input = require("../utils/operatorInput");
 const { isServiceError } = require("../utils/serviceError");
 
-// Create/update/archive live in services/planService.js so the integration API
-// edits plans through exactly the same validation, Stripe sync and audit.
-const { announcePlans, sanitizeLimits, sanitizeFlags, toPlain } = planService;
+// Create/update/archive, subscriber migration, Stripe resync and the feature
+// matrix live in services/planService.js so the integration API edits plans
+// through exactly the same validation, Stripe sync and audit.
 
 /**
  * Answer a planService failure in the console's `{ error }` shape. `details`
@@ -116,56 +114,20 @@ exports.archivePlan = async (req, res) => {
 /** POST /api/superadmin/plans/:code/migrate-subscribers */
 exports.migrateSubscribers = async (req, res) => {
   try {
-    const plan = await Plan.findOne({ code: req.params.code });
-    if (!plan) return res.status(404).json({ error: "Plan not found" });
-
-    // Stripe accepts exactly these three; anything else came back as a 500
-    // after the call had already been attempted.
-    const proration = input.oneOf(req.body?.proration ?? "none", "Proration", [
-      "none",
-      "create_prorations",
-      "always_invoice",
-    ]);
-    if (proration.error) return res.status(400).json({ error: proration.error });
-
-    const result = await stripePlanService.migrateSubscribers(plan, { proration: proration.value });
-    await writeAudit(req, "plan.subscribers_migrated", {
-      targetType: "plan",
-      targetId: plan.code,
-      meta: result,
-    });
-    // Tenants moved between prices — org lists/billing totals shift too.
-    announcePlans(plan.code);
-    emitToSuperAdmins("organisation:updated", {});
+    const { plan, stripeEnabled, ...result } = await planService.migrateSubscribers(req.params.code, { proration: req.body?.proration }, req);
     res.json(result);
   } catch (err) {
-    console.error("Migrate subscribers error:", err);
-    res.status(500).json({ error: "Failed to migrate subscribers" });
+    sendPlanError(res, err, "Failed to migrate subscribers");
   }
 };
 
 /** POST /api/superadmin/plans/:code/resync — (re)provision/repair Stripe. */
 exports.resyncPlan = async (req, res) => {
   try {
-    const plan = await Plan.findOne({ code: req.params.code });
-    if (!plan) return res.status(404).json({ error: "Plan not found" });
-    if (!stripePlanService.isStripeEnabled()) {
-      return res.status(400).json({ error: "Stripe is not configured" });
-    }
-    const synced = await stripePlanService.resyncPlan(plan);
-    plan.stripeProductId = synced.stripeProductId;
-    plan.stripePriceIds = synced.stripePriceIds;
-    await plan.save();
-    await writeAudit(req, "plan.resynced", {
-      targetType: "plan",
-      targetId: plan.code,
-      meta: { stripeProductId: plan.stripeProductId },
-    });
-    announcePlans(plan.code);
+    const { plan } = await planService.resyncPlan(req.params.code, req);
     res.json({ plan });
   } catch (err) {
-    console.error("Resync plan error:", err);
-    res.status(500).json({ error: err.message || "Failed to resync plan with Stripe" });
+    sendPlanError(res, err, "Failed to resync plan with Stripe");
   }
 };
 
@@ -219,64 +181,15 @@ exports.updatePlanBullets = async (req, res) => {
 /**
  * PUT /api/superadmin/entitlements — bulk-save the feature matrix.
  * Body: { plans: { [code]: { features?: {flag:bool}, limits?: {meter:num|null} } } }
+ * Validation, merge and audit live in planService.updateEntitlements.
  */
 exports.bulkUpdateEntitlements = async (req, res) => {
   try {
-    const incoming = req.body?.plans || {};
-    const codes = Object.keys(incoming);
-    if (!codes.length) return res.status(400).json({ error: "No plans provided" });
-
-    const plans = await Plan.find({ code: { $in: codes } });
-    const byCode = Object.fromEntries(plans.map((p) => [p.code, p]));
-
-    // Validate the WHOLE matrix before saving any of it — a bad quota in the
-    // last column must not leave the first three already written. A NaN here
-    // used to persist and then fail every quota comparison for that plan.
-    const staged = [];
-    const skipped = [];
-    for (const code of codes) {
-      const plan = byCode[code];
-      if (!plan) {
-        skipped.push(code);
-        continue;
-      }
-      const patch = incoming[code] || {};
-      const entry = { plan };
-      try {
-        if (patch.features !== undefined) entry.flags = sanitizeFlags(patch.features);
-        if (patch.limits !== undefined) entry.limits = sanitizeLimits(patch.limits);
-      } catch (err) {
-        if (isServiceError(err)) return res.status(400).json({ error: `${code}: ${err.message}` });
-        throw err;
-      }
-      staged.push(entry);
-    }
-
-    const updated = [];
-    for (const { plan, flags, limits } of staged) {
-      if (flags) {
-        plan.featureFlags = { ...toPlain(plan.featureFlags), ...flags };
-        plan.markModified("featureFlags");
-      }
-      if (limits) {
-        plan.limits = { ...toPlain(plan.limits), ...limits };
-        plan.markModified("limits");
-      }
-      await plan.save();
-      updated.push(plan.code);
-    }
-
-    await writeAudit(req, "plan.entitlements_updated", {
-      targetType: "plan",
-      targetId: updated.join(","),
-      meta: { plans: updated, skipped },
-    });
-    announcePlans(null); // several plans at once
     // `skipped` names the codes that matched no plan, so the console can tell a
     // real save from a silent no-op.
+    const { updated, skipped, plans } = await planService.updateEntitlements(req.body?.plans || {}, req);
     res.json({ updated, skipped, plans });
   } catch (err) {
-    console.error("Bulk entitlements error:", err);
-    res.status(500).json({ error: "Failed to update entitlements" });
+    sendPlanError(res, err, "Failed to update entitlements");
   }
 };

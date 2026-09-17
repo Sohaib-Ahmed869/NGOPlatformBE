@@ -6,11 +6,6 @@ const Plan = require("../models/plan");
 const PlatformAuditLog = require("../models/platformAuditLog");
 const PlatformInvoice = require("../models/platformInvoice");
 const SupportSession = require("../models/supportSession");
-const Program = require("../models/program");
-const Event = require("../models/event");
-const Join = require("../models/join");
-const Order = require("../models/order");
-const GoFundMe = require("../models/goFundMe");
 const writeAudit = require("../utils/writeAudit");
 const { sendTemplateEmail } = require("../services/emailUtil");
 const { adminPortalUrl } = require("../utils/tenantUrls");
@@ -19,8 +14,7 @@ const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { emitToSuperAdmins } = require("./../services/socket");
-const planPricing = require("../config/planPricing");
-const subscriptionMetrics = require("../services/subscriptionMetrics");
+const platformStats = require("../services/platformStats");
 const tenantLifecycle = require("../services/tenantLifecycle");
 const { isServiceError } = require("../utils/serviceError");
 
@@ -298,61 +292,17 @@ exports.getOrganisationDetail = async (req, res) => {
     if (!org) return res.status(404).json({ error: "Organisation not found" });
 
     const orgId = org._id;
-    const [
-      effectiveLimits,
-      plan,
-      audit,
-      invoices,
-      brandingRequests,
-      supportSessions,
-      programAgg,
-      volunteersTotal,
-      usersTotal,
-      eventsTotal,
-      p2pTotal,
-      orderAgg,
-    ] = await Promise.all([
+    const [effectiveLimits, plan, audit, invoices, brandingRequests, supportSessions, footprint] = await Promise.all([
       getEffectiveLimits(org),
       Plan.findOne({ code: org.plan }).select("code name price color limits").lean(),
       PlatformAuditLog.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(20).lean(),
       PlatformInvoice.find({ organisationId: orgId }).sort({ createdAt: -1 }).limit(10).lean(),
       BrandingRequest.find({ organisationId: orgId }).populate("requestedBy", "name email").sort({ createdAt: -1 }).limit(5).lean(),
       SupportSession.find({ organisationId: orgId }).sort({ startedAt: -1 }).limit(5).lean(),
-      // One Programs scan yields both counts (was two countDocuments).
-      Program.aggregate([
-        { $match: { organisationId: orgId } },
-        { $group: { _id: null, total: { $sum: 1 }, active: { $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] } } } },
-      ]),
-      Join.countDocuments({ organisationId: orgId }),
-      User.countDocuments({ organisationId: orgId }),
-      Event.countDocuments({ organisationId: orgId }),
-      GoFundMe.countDocuments({ organisationId: orgId }),
-      // One Orders scan yields the count and the paid-donations sum (was two).
-      Order.aggregate([
-        { $match: { organisationId: orgId } },
-        {
-          $group: {
-            _id: null,
-            count: { $sum: 1 },
-            donationsRaised: { $sum: { $cond: [{ $in: ["$paymentStatus", ["completed", "active"]] }, "$totalAmount", 0] } },
-          },
-        },
-      ]),
+      // Usage of metered limits + tenant-by-the-numbers (shared with the integration API).
+      platformStats.tenantFootprint(orgId),
     ]);
-
-    // Current usage for the metered limits (mirrors planEnforcement counting:
-    // campaigns = active Programs, volunteers = Join applications).
-    const usage = { campaigns: programAgg[0]?.active || 0, volunteers: volunteersTotal };
-    // Tenant-by-the-numbers snapshot.
-    const stats = {
-      users: usersTotal,
-      programs: programAgg[0]?.total || 0,
-      events: eventsTotal,
-      campaigns: p2pTotal, // P2P fundraisers (GoFundMe)
-      volunteers: volunteersTotal,
-      orders: orderAgg[0]?.count || 0,
-      donationsRaised: orderAgg[0]?.donationsRaised || 0,
-    };
+    const { usage, stats } = footprint;
 
     res.json({ organisation: org, plan, effectiveLimits, audit, invoices, brandingRequests, supportSessions, usage, stats });
   } catch (err) {
@@ -387,33 +337,16 @@ exports.updateStatus = async (req, res) => {
 
 /**
  * POST /api/superadmin/organisations/:id/comp  { isComp, reason }
+ * Rules (reason required to comp, audit) live in tenantLifecycle.setComp.
  */
 exports.compOrg = async (req, res) => {
   try {
-    const isComp = !!req.body?.isComp;
-    // A whitespace-only reason satisfied the old `!reason` check, so a comped
-    // tenant could end up with no recorded justification at all.
-    const parsedReason = input.text(req.body?.reason, "Reason", { max: 500, required: isComp, allowEmpty: !isComp });
-    if (parsedReason.error) return res.status(400).json({ error: isComp ? "A reason is required" : parsedReason.error });
-    const reason = parsedReason.value;
-
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
-
-    org.isComp = isComp;
-    org.compReason = isComp ? reason : "";
-    await org.save();
-    await writeAudit(req, isComp ? "org.comped" : "org.uncomped", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-      meta: { reason },
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
-    res.json({ message: "Updated", organisation: org });
+    const result = await tenantLifecycle.setComp(org, { isComp: !!req.body?.isComp, reason: req.body?.reason }, req);
+    res.json({ message: "Updated", organisation: org, warnings: result.warnings });
   } catch (err) {
-    console.error("Comp org error:", err);
-    res.status(500).json({ error: "Failed to update comp status" });
+    sendLifecycleError(res, err, "Failed to update comp status");
   }
 };
 
@@ -447,30 +380,16 @@ exports.clearOverride = async (req, res) => {
 
 /**
  * POST /api/superadmin/organisations/:id/trial  { trialEndsAt }
+ * Validation (a past date is refused) lives in tenantLifecycle.setTrial.
  */
 exports.setTrial = async (req, res) => {
   try {
-    // `new Date("nonsense")` is an Invalid Date; it used to reach Mongoose and
-    // come back as a 500. A trial that already expired is also refused — it
-    // reads as "set" in the console while gating nothing.
-    const parsed = input.date(req.body?.trialEndsAt, "Trial end date", { allowNull: true, future: true });
-    if (parsed.error) return res.status(400).json({ error: parsed.error });
-
     const org = await Organisation.findById(req.params.id);
     if (!org) return res.status(404).json({ error: "Organisation not found" });
-    org.trialEndsAt = parsed.value;
-    await org.save();
-    await writeAudit(req, "org.trial_set", {
-      organisationId: org._id,
-      targetType: "organisation",
-      targetId: String(org._id),
-      meta: { trialEndsAt: org.trialEndsAt },
-    });
-    emitToSuperAdmins("organisation:updated", { organisationId: String(org._id) });
+    await tenantLifecycle.setTrial(org, { trialEndsAt: req.body?.trialEndsAt }, req);
     res.json({ message: "Trial updated", organisation: org });
   } catch (err) {
-    console.error("Set trial error:", err);
-    res.status(500).json({ error: "Failed to update trial" });
+    sendLifecycleError(res, err, "Failed to update trial");
   }
 };
 
@@ -719,43 +638,11 @@ exports.listInvoices = async (req, res) => {
 
 /**
  * GET /api/superadmin/billing
- * Aggregate billing stats for the platform.
+ * Aggregate billing stats for the platform — see services/platformStats.js.
  */
 exports.getBillingStats = async (req, res) => {
   try {
-    // MRR normalisation (annual cycles, comps, per-tenant overrides) lives in
-    // services/subscriptionMetrics.js so this screen and the Dashboard can never
-    // quote different numbers again.
-    const [orgFacetRes, recentSignups, planDocs, collectedAgg] = await Promise.all([
-      Organisation.aggregate([{ $match: { deletedAt: null } }, subscriptionMetrics.orgFacet()]),
-      Organisation.find({ deletedAt: null })
-        .populate("adminUserId", "name email")
-        .sort({ createdAt: -1 })
-        .limit(10)
-        .select("name slug plan subscriptionStatus createdAt branding")
-        .lean(),
-      Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color").lean(),
-      // Lifetime revenue actually collected (paid invoices in the Stripe mirror).
-      PlatformInvoice.aggregate([
-        { $match: { status: "paid" } },
-        { $group: { _id: null, total: { $sum: "$amountPaid" } } },
-      ]),
-    ]);
-
-    const m = subscriptionMetrics.summarise(orgFacetRes[0], planDocs);
-
-    res.json({
-      totalOrganisations: m.totalOrgs,
-      activeSubscriptions: m.activeOrgs,
-      failedPayments: m.failedPayments,
-      mrr: m.mrr,
-      collected: collectedAgg[0]?.total || 0, // lifetime revenue collected
-      compedSubscriptions: m.compedSubscriptions, // active but paying nothing
-      byCycle: m.byCycle, // revenue-bearing subscribers per billing cycle
-      plans: m.plans, // each carries `count`, `payingCount` and monthly-normalised `revenue`
-      byPlan: m.byPlan, // back-compat for any older consumer
-      recentSignups,
-    });
+    res.json(await platformStats.billingStats());
   } catch (error) {
     console.error("Billing stats error:", error);
     res.status(500).json({ error: "Failed to fetch billing stats" });
@@ -764,117 +651,12 @@ exports.getBillingStats = async (req, res) => {
 
 /**
  * GET /api/superadmin/dashboard
- * Rich platform overview — subscription health (MRR/ARR/plans), a REAL 12-month
- * tenant-signup trend with month-over-month growth, and cross-tenant footprint
- * totals (donations processed, accounts, programs, events, campaigns). Everything
- * is aggregated live — no placeholder numbers.
+ * Platform overview — subscription health, 12-month signup trend and
+ * cross-tenant footprint. Computed in services/platformStats.js.
  */
 exports.getDashboardStats = async (req, res) => {
   try {
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-
-    // One pass over Organisations for every roll-up this screen needs. It used
-    // to fire five countDocuments, two aggregates and a find against the same
-    // collection; the growth branches ride along on the shared facet.
-    const [orgFacetRes, recentSignups, planDocs, collectedAgg, donationsAgg, counts] =
-      await Promise.all([
-        Organisation.aggregate([
-          { $match: { deletedAt: null } },
-          subscriptionMetrics.orgFacet({
-            newThisMonth: [{ $match: { createdAt: { $gte: startOfMonth } } }, { $count: "n" }],
-            newLastMonth: [
-              { $match: { createdAt: { $gte: startOfLastMonth, $lt: startOfMonth } } },
-              { $count: "n" },
-            ],
-            signupBuckets: [
-              { $match: { createdAt: { $gte: twelveMonthsAgo } } },
-              {
-                $group: {
-                  _id: { y: { $year: "$createdAt" }, m: { $month: "$createdAt" } },
-                  count: { $sum: 1 },
-                },
-              },
-            ],
-          }),
-        ]),
-        Organisation.find({ deletedAt: null })
-          .populate("adminUserId", "name email")
-          .sort({ createdAt: -1 })
-          .limit(8)
-          .select("name slug plan subscriptionStatus createdAt branding")
-          .lean(),
-        Plan.find({ isActive: true }).sort({ sortOrder: 1 }).select("code name price color").lean(),
-        PlatformInvoice.aggregate([
-          { $match: { status: "paid" } },
-          { $group: { _id: null, total: { $sum: "$amountPaid" } } },
-        ]),
-        Order.aggregate([
-          { $match: { paymentStatus: "completed" } },
-          { $group: { _id: null, total: { $sum: "$totalAmount" }, count: { $sum: 1 } } },
-        ]),
-        // Footprint counts across four separate collections — genuinely parallel.
-        Promise.all([
-          User.estimatedDocumentCount(),
-          Program.estimatedDocumentCount(),
-          Event.estimatedDocumentCount(),
-          GoFundMe.estimatedDocumentCount(),
-        ]),
-      ]);
-
-    const f = orgFacetRes[0] || {};
-    // Same normalisation the Billing screen uses — annual cycles, comps and
-    // per-tenant overrides all folded in. These two screens quoted different
-    // MRR for the same month until this became one shared calculation.
-    const m = subscriptionMetrics.summarise(f, planDocs);
-    const [totalUsers, totalPrograms, totalEvents, totalCampaigns] = counts;
-
-    const newThisMonth = subscriptionMetrics.firstCount(f.newThisMonth);
-    const newLastMonth = subscriptionMetrics.firstCount(f.newLastMonth);
-
-    // Build a continuous 12-month signup series (zero-filled).
-    const bucketMap = {};
-    (f.signupBuckets || []).forEach((b) => {
-      bucketMap[`${b._id.y}-${b._id.m}`] = b.count;
-    });
-    const signupSeries = [];
-    for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      signupSeries.push({
-        month: d.toLocaleString("en-US", { month: "short" }),
-        count: bucketMap[`${d.getFullYear()}-${d.getMonth() + 1}`] || 0,
-      });
-    }
-    const growthPct = newLastMonth
-      ? Math.round(((newThisMonth - newLastMonth) / newLastMonth) * 100)
-      : newThisMonth > 0
-        ? 100
-        : 0;
-
-    res.json({
-      totalOrganisations: m.totalOrgs,
-      activeSubscriptions: m.activeOrgs,
-      failedPayments: m.failedPayments,
-      compedSubscriptions: m.compedSubscriptions,
-      mrr: m.mrr,
-      collected: collectedAgg[0]?.total || 0,
-      byCycle: m.byCycle,
-      plans: m.plans,
-      recentSignups,
-      // Cross-tenant footprint
-      donationsTotal: donationsAgg[0]?.total || 0,
-      donationsCount: donationsAgg[0]?.count || 0,
-      totalUsers,
-      totalPrograms,
-      totalEvents,
-      totalCampaigns,
-      // Growth
-      newThisMonth,
-      growthPct,
-      signupSeries,
-    });
+    res.json(await platformStats.dashboardStats());
   } catch (error) {
     console.error("Dashboard stats error:", error);
     res.status(500).json({ error: "Failed to fetch dashboard stats" });

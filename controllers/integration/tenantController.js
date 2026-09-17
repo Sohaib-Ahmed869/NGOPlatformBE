@@ -9,6 +9,8 @@ const PlatformInvoice = require("../../models/platformInvoice");
 const writeAudit = require("../../utils/writeAudit");
 const input = require("../../utils/operatorInput");
 const lifecycle = require("../../services/tenantLifecycle");
+const tenantAdmins = require("../../services/tenantAdminService");
+const { tenantFootprint } = require("../../services/platformStats");
 const { provisionOrganisation } = require("../../services/tenantProvisioning");
 const { portalHost, portalScheme } = require("../../services/orgActivation");
 const { sendTemplateEmail } = require("../../services/emailUtil");
@@ -18,6 +20,7 @@ const { ServiceError } = require("../../utils/serviceError");
 const { ok } = require("../../utils/integrationResponse");
 const S = require("../../utils/integrationSerializers");
 const { assertKnownFields, reasonFrom, requireBoolean } = require("./shared");
+const { listInvoices, listAudit } = require("./queries");
 
 // Credentials and draft/config blobs never leave the server.
 const LIST_PROJECTION = "-payment -paypal -email -bankDetails -pendingAdmin -pendingAdminNoPassword -draftDesign -design -volunteerQuestions -eventAudiences -branding";
@@ -44,12 +47,13 @@ async function latestPaidPeriods(orgIds) {
 /** Tenant row + override + effective entitlements (+ recent activity for GET). */
 async function tenantFull(org, { withActivity = false } = {}) {
   await org.populate("adminUserId", "name email");
-  const [plan, periods, entitlements, audit, invoices] = await Promise.all([
+  const [plan, periods, entitlements, audit, invoices, footprint] = await Promise.all([
     Plan.findOne({ code: org.plan }).select("code name price isActive").lean(),
     latestPaidPeriods([org._id]),
     getEffectiveEntitlements(org),
     withActivity ? PlatformAuditLog.find({ organisationId: org._id }).sort({ createdAt: -1 }).limit(20).lean() : null,
     withActivity ? PlatformInvoice.find({ organisationId: org._id }).sort({ createdAt: -1 }).limit(10).lean() : null,
+    withActivity ? tenantFootprint(org._id) : null,
   ]);
   const out = {
     ...S.serializeTenant(org, { plan, period: periods[String(org._id)] }),
@@ -59,6 +63,16 @@ async function tenantFull(org, { withActivity = false } = {}) {
   if (withActivity) {
     out.recent_events = audit.map(S.serializeAudit);
     out.recent_invoices = invoices.map(S.serializeInvoice);
+    out.usage = footprint.usage;
+    out.stats = {
+      users: footprint.stats.users,
+      programs: footprint.stats.programs,
+      events: footprint.stats.events,
+      p2p_campaigns: footprint.stats.campaigns,
+      volunteers: footprint.stats.volunteers,
+      orders: footprint.stats.orders,
+      donations_raised: footprint.stats.donationsRaised,
+    };
   }
   return out;
 }
@@ -334,6 +348,120 @@ exports.clearOverride = async (req, res) => {
   const data = await tenantFull(req.tenant);
   data.cleared = result.changed;
   ok(res, data);
+};
+
+/** POST /tenants/:id/comp  { is_comp, reason } — reason required when comping. */
+exports.comp = async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["is_comp", "reason"]);
+  if (b.is_comp === undefined) throw new ServiceError(400, "VALIDATION_ERROR", "is_comp is required", { field: "is_comp" });
+  const result = await lifecycle.setComp(req.tenant, { isComp: requireBoolean(b.is_comp, "is_comp"), reason: b.reason }, req);
+  const data = await tenantFull(req.tenant);
+  data.changed = result.changed;
+  ok(res, data, { warnings: result.warnings });
+};
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * POST /tenants/:id/trial  { trial_ends_at } | { extend_days }, reason?
+ * `extend_days` counts from the current trial end, or from now when there is
+ * no trial or it has already passed. `trial_ends_at: null` clears the trial.
+ */
+exports.trial = async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["trial_ends_at", "extend_days", "reason"]);
+  const hasDate = b.trial_ends_at !== undefined;
+  const hasDays = b.extend_days !== undefined;
+  if (hasDate === hasDays) throw new ServiceError(400, "VALIDATION_ERROR", "Send exactly one of trial_ends_at or extend_days");
+
+  let trialEndsAt = b.trial_ends_at;
+  if (hasDays) {
+    const days = input.number(b.extend_days, "extend_days", { min: 1, max: 365, integer: true });
+    if (days.error) throw new ServiceError(400, "VALIDATION_ERROR", days.error, { field: "extend_days" });
+    const current = req.tenant.trialEndsAt ? new Date(req.tenant.trialEndsAt).getTime() : 0;
+    trialEndsAt = new Date(Math.max(Date.now(), current) + days.value * DAY_MS).toISOString();
+  }
+  await lifecycle.setTrial(req.tenant, { trialEndsAt, reason: reasonFrom(b) }, req);
+  ok(res, await tenantFull(req.tenant));
+};
+
+/** GET /tenants/:id/invoices?status=&from=&to=&page=&limit= */
+exports.invoices = async (req, res) => {
+  const { data, meta } = await listInvoices(req.query, { organisationId: req.tenant._id });
+  ok(res, data, { meta });
+};
+
+/** GET /tenants/:id/audit?action=&from=&to=&search=&page=&limit= — the tenant's operator history. */
+exports.audit = async (req, res) => {
+  const { data, meta } = await listAudit(req.query, { organisationId: req.tenant._id });
+  ok(res, data, { meta });
+};
+
+/* ── tenant admins ─────────────────────────────────────────────────────── */
+
+const adminOut = (u, tenant) => S.serializeTenantAdmin(u, tenantAdmins.tenantAdminState(u), { tenant });
+
+/** GET /tenants/:id/admins — the tenant's admin accounts and their sign-in state. */
+exports.listAdmins = async (req, res) => {
+  const admins = await tenantAdmins.listTenantAdmins({ organisationId: req.tenant._id });
+  ok(res, admins.map((u) => adminOut(u)), { meta: { total: admins.length } });
+};
+
+/** Load `:userId` as an admin OF THIS TENANT (another tenant's admin is a 404). */
+async function loadAdmin(req) {
+  return tenantAdmins.findTenantAdmin(req.params.userId, { organisationId: req.tenant._id });
+}
+
+/** GET /tenants/:id/admins/:userId */
+exports.getAdmin = async (req, res) => {
+  ok(res, adminOut(await loadAdmin(req), req.tenant));
+};
+
+/** PATCH /tenants/:id/admins/:userId  { status?, mfa_policy?, reason? } */
+exports.updateAdmin = async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["status", "mfa_policy", "reason"]);
+  if (b.status === undefined && b.mfa_policy === undefined) throw new ServiceError(400, "VALIDATION_ERROR", "Send at least one of: status, mfa_policy");
+  const reason = reasonFrom(b);
+  const user = await loadAdmin(req);
+  // Validate both before writing either, so a bad mfa_policy can't land half a request.
+  if (b.status !== undefined && !["active", "suspended"].includes(b.status)) {
+    throw new ServiceError(400, "VALIDATION_ERROR", "status must be one of: active, suspended", { field: "status" });
+  }
+  if (b.mfa_policy !== undefined && !["default", "required"].includes(b.mfa_policy)) {
+    throw new ServiceError(400, "VALIDATION_ERROR", "mfa_policy must be one of: default, required", { field: "mfa_policy" });
+  }
+  const messages = [];
+  if (b.status !== undefined) messages.push((await tenantAdmins.setStatus(user, b.status, req, { reason })).message);
+  if (b.mfa_policy !== undefined) messages.push((await tenantAdmins.setMfaPolicy(user, b.mfa_policy, req, { reason })).message);
+  const data = adminOut(user, req.tenant);
+  data.message = messages.join(". ");
+  ok(res, data);
+};
+
+/** POST /tenants/:id/admins/:userId/<action>  { reason? } */
+const ADMIN_ACTIONS = {
+  "force-logout": (user, req, reason) => tenantAdmins.forceLogout(user, req, { reason }),
+  unlock: (user, req, reason) => tenantAdmins.unlock(user, req, { reason }),
+  "reset-2fa": (user, req, reason) => tenantAdmins.resetMfa(user, req, { reason }),
+  "password-reset": (user, req) => tenantAdmins.sendPasswordReset(user, req),
+};
+
+exports.adminAction = (action) => async (req, res) => {
+  const b = req.body || {};
+  assertKnownFields(b, ["reason"]);
+  const reason = reasonFrom(b);
+  const user = await loadAdmin(req);
+  const { message } = await ADMIN_ACTIONS[action](user, req, reason);
+  const data = adminOut(user, req.tenant);
+  data.message = message;
+  ok(res, data);
+};
+
+/** POST /tenants/:id/act-as — closed to API keys, like Stewardex. */
+exports.actAs = async () => {
+  throw new ServiceError(403, "IMPERSONATION_NOT_ALLOWED", "Signing in as a tenant needs a named person — use the Donexus console's Open as support");
 };
 
 exports.latestPaidPeriods = latestPaidPeriods;

@@ -6,7 +6,8 @@ const User = require("../models/user");
 const writeAudit = require("../utils/writeAudit");
 const { sendTemplateEmail } = require("../services/emailUtil");
 const input = require("../utils/operatorInput");
-const { getOrgIdentity } = require("../utils/orgIdentity");
+const tenantAdminService = require("../services/tenantAdminService");
+const { isServiceError } = require("../utils/serviceError");
 const {
   ALL_ROLES,
   ROLE_CAPABILITIES,
@@ -107,39 +108,15 @@ exports.list = async (req, res) => {
  */
 exports.listTenantAdmins = async (req, res) => {
   try {
-    const admins = await User.find({ role: "admin" })
-      .select(
-        "name email lastLogin createdAt organisationId platformStatus " +
-          "twoFactorEnabled mfaPolicy mfaExempt lockedUntil failedLoginAttempts",
-      )
-      .populate("organisationId", "name slug isActive")
-      .sort({ createdAt: 1 })
-      .lean();
-
-    const now = new Date();
-
+    const admins = await tenantAdminService.listTenantAdmins();
     res.json({
       users: admins.map((u) => {
         const org = u.organisationId;
         return {
-          _id: u._id,
+          ...tenantAdminService.tenantAdminState(u),
           name: u.name || "",
           email: u.email,
-          lastLogin: u.lastLogin || null,
           createdAt: u.createdAt,
-          // A tenant admin has no platformRole, but platformStatus is read by
-          // loginAdmin for every staff role, so it is the field that actually
-          // governs whether this person can sign in. Absent = never suspended.
-          status: u.platformStatus === "suspended" ? "suspended" : "active",
-          twoFactorEnabled: !!u.twoFactorEnabled,
-          // Whether they have it ON is theirs to decide; whether they MUST is
-          // the operator's. Both are shown, because "not enrolled" reads very
-          // differently once it is also "required".
-          mfaPolicy: mfaPolicyOf(u) === "required" ? "required" : "default",
-          mfaRequired: mfaRequiredFor(u),
-          // Only while it is still in force — an expired lockout is history,
-          // not a state, and showing it would send operators chasing nothing.
-          lockedUntil: u.lockedUntil && u.lockedUntil > now ? u.lockedUntil : null,
           // Null when the organisation has been deleted out from under the
           // admin row — the screen renders that as "no organisation" rather
           // than hiding the row, since an orphan is the thing worth seeing.
@@ -738,276 +715,43 @@ exports.resetPasswordWithCode = async (req, res) => {
  */
 
 /**
- * Load a tenant admin by id, or answer 404.
- *
- * The `role: "admin"` filter is the guard, not decoration: without it these
- * routes would be a second, unguarded way to suspend a platform OPERATOR —
- * bypassing ownerGuardError() and the last-active-owner check that protect the
- * operator table.
+ * Run one tenant-admin action from services/tenantAdminService.js and answer in
+ * the console's shape: `{ user: <row state>, message }`, or `{ error }`.
  */
-async function findTenantAdmin(req, res) {
-  const user = await User.findOne({ _id: req.params.id, role: "admin" });
-  if (!user) {
-    res.status(404).json({ error: "Tenant admin not found" });
-    return null;
-  }
-  return user;
+function tenantAdminAction(fallback, run) {
+  return async (req, res) => {
+    try {
+      const user = await tenantAdminService.findTenantAdmin(req.params.id);
+      const { message } = await run(user, req);
+      res.json({ user: tenantAdminService.tenantAdminState(user), message });
+    } catch (err) {
+      if (isServiceError(err)) return res.status(err.status).json({ error: err.message, code: err.code });
+      console.error(`${fallback}:`, err);
+      res.status(500).json({ error: fallback });
+    }
+  };
 }
 
-/** Everything the row needs after a mutation, so the screen can merge in place. */
-const tenantAdminState = (u) => ({
-  _id: u._id,
-  status: u.platformStatus === "suspended" ? "suspended" : "active",
-  twoFactorEnabled: !!u.twoFactorEnabled,
-  mfaPolicy: mfaPolicyOf(u) === "required" ? "required" : "default",
-  mfaRequired: mfaRequiredFor(u),
-  lockedUntil: u.lockedUntil && u.lockedUntil > new Date() ? u.lockedUntil : null,
-  lastLogin: u.lastLogin || null,
-});
+/** PATCH /api/superadmin/users/tenant-admins/:id/status  { status } — see tenantAdminService.setStatus */
+exports.setTenantAdminStatus = tenantAdminAction("Failed to change status", (user, req) =>
+  tenantAdminService.setStatus(user, req.body?.status, req),
+);
 
-/**
- * PATCH /api/superadmin/users/tenant-admins/:id/status  { status }
- *
- * Suspending bumps `tokenVersion`, which is what makes it immediate rather than
- * eventual: loginAdmin already refuses a suspended account, but the token
- * already in their browser is good for 30 days, and middleware/authMiddleware.js
- * only started checking for this alongside these endpoints.
- *
- * This does NOT touch the organisation. A suspended admin cannot sign in; the
- * charity's public site, donation pages and donors are unaffected. Stopping the
- * whole tenant is a different, louder action and lives on the organisation.
- */
-exports.setTenantAdminStatus = async (req, res) => {
-  try {
-    const v = input.oneOf(req.body?.status, "Status", ["active", "suspended"]);
-    if (v.error) return res.status(400).json({ error: v.error });
+/** POST /api/superadmin/users/tenant-admins/:id/force-logout */
+exports.forceLogoutTenantAdmin = tenantAdminAction("Failed to sign out this admin", (user, req) => tenantAdminService.forceLogout(user, req));
 
-    const user = await findTenantAdmin(req, res);
-    if (!user) return;
+/** POST /api/superadmin/users/tenant-admins/:id/unlock */
+exports.unlockTenantAdmin = tenantAdminAction("Failed to clear the lockout", (user, req) => tenantAdminService.unlock(user, req));
 
-    user.platformStatus = v.value;
-    // Both directions bump it. On suspend it kills live sessions; on
-    // reactivate it retires any token minted before the suspension, so a stale
-    // tab cannot come back to life holding pre-suspension state.
-    user.tokenVersion = (user.tokenVersion || 0) + 1;
-    if (v.value === "active") {
-      // Reactivating someone who is also locked out and still unable to sign in
-      // is a support call we would only take twice.
-      user.lockedUntil = null;
-      user.failedLoginAttempts = 0;
-    }
-    await user.save();
+/** POST /api/superadmin/users/tenant-admins/:id/reset-2fa — the console asks twice before calling this. */
+exports.resetTenantAdminMfa = tenantAdminAction("Failed to reset two-factor", (user, req) => tenantAdminService.resetMfa(user, req));
 
-    await writeAudit(req, v.value === "suspended" ? "tenant_admin.suspended" : "tenant_admin.reactivated", {
-      organisationId: user.organisationId || undefined,
-      targetType: "user",
-      targetId: String(user._id),
-      meta: { email: user.email },
-    });
+/** POST /api/superadmin/users/tenant-admins/:id/password-reset — emails a link; never sets a password. */
+exports.sendTenantAdminPasswordReset = tenantAdminAction("Failed to send the reset link", (user, req) =>
+  tenantAdminService.sendPasswordReset(user, req),
+);
 
-    res.json({
-      user: tenantAdminState(user),
-      message: v.value === "suspended" ? "Admin suspended and signed out" : "Admin reactivated",
-    });
-  } catch (err) {
-    console.error("Set tenant admin status error:", err);
-    res.status(500).json({ error: "Failed to change status" });
-  }
-};
-
-/**
- * POST /api/superadmin/users/tenant-admins/:id/force-logout
- * Ends every session without touching the account — for a lost laptop, or a
- * staff member who has left and whose replacement uses the same login.
- */
-exports.forceLogoutTenantAdmin = async (req, res) => {
-  try {
-    const user = await findTenantAdmin(req, res);
-    if (!user) return;
-
-    user.tokenVersion = (user.tokenVersion || 0) + 1;
-    await user.save();
-
-    await writeAudit(req, "tenant_admin.force_logout", {
-      organisationId: user.organisationId || undefined,
-      targetType: "user",
-      targetId: String(user._id),
-      meta: { email: user.email },
-    });
-    res.json({ user: tenantAdminState(user), message: "Signed out of all sessions" });
-  } catch (err) {
-    console.error("Force logout tenant admin error:", err);
-    res.status(500).json({ error: "Failed to sign out this admin" });
-  }
-};
-
-/**
- * POST /api/superadmin/users/tenant-admins/:id/unlock
- * Clears the five-failed-attempts lockout (see loginAdmin). The alternative for
- * the charity is waiting fifteen minutes, which is exactly when they phone.
- */
-exports.unlockTenantAdmin = async (req, res) => {
-  try {
-    const user = await findTenantAdmin(req, res);
-    if (!user) return;
-
-    user.lockedUntil = null;
-    user.failedLoginAttempts = 0;
-    await user.save();
-
-    await writeAudit(req, "tenant_admin.unlocked", {
-      organisationId: user.organisationId || undefined,
-      targetType: "user",
-      targetId: String(user._id),
-      meta: { email: user.email },
-    });
-    res.json({ user: tenantAdminState(user), message: "Lockout cleared" });
-  } catch (err) {
-    console.error("Unlock tenant admin error:", err);
-    res.status(500).json({ error: "Failed to clear the lockout" });
-  }
-};
-
-/**
- * POST /api/superadmin/users/tenant-admins/:id/reset-2fa
- *
- * Turns two-factor OFF so the admin can sign in with their password and enrol a
- * new authenticator. This is the "new phone, old codes gone" call, and it is
- * the single most dangerous thing on this screen — it removes a factor from
- * someone else's account — so it is audited by name and the console asks twice.
- */
-exports.resetTenantAdminMfa = async (req, res) => {
-  try {
-    const user = await findTenantAdmin(req, res);
-    if (!user) return;
-
-    if (!user.twoFactorEnabled) {
-      return res.status(400).json({ error: "Two-factor isn't switched on for this admin" });
-    }
-
-    user.twoFactorEnabled = false;
-    user.twoFactorSecret = undefined;
-    // The old secret is gone, so anything holding a session from before it was
-    // removed should be made to sign in again under the new arrangement.
-    user.tokenVersion = (user.tokenVersion || 0) + 1;
-    await user.save();
-
-    await writeAudit(req, "tenant_admin.mfa_reset", {
-      organisationId: user.organisationId || undefined,
-      targetType: "user",
-      targetId: String(user._id),
-      meta: { email: user.email },
-    });
-    res.json({ user: tenantAdminState(user), message: "Two-factor removed — they can enrol again on next sign-in" });
-  } catch (err) {
-    console.error("Reset tenant admin MFA error:", err);
-    res.status(500).json({ error: "Failed to reset two-factor" });
-  }
-};
-
-/**
- * POST /api/superadmin/users/tenant-admins/:id/password-reset
- *
- * Sends the ordinary reset email rather than setting a password here. An
- * operator who can type a charity admin's new password knows their credentials;
- * a link that only their inbox can open keeps the account theirs, and the reset
- * screen already exists on their own portal.
- *
- * The link points at the TENANT's portal, not the platform's — `/reset-password`
- * is a tenant route, and a link to the wrong host is a support ticket.
- */
-exports.sendTenantAdminPasswordReset = async (req, res) => {
-  try {
-    const user = await findTenantAdmin(req, res);
-    if (!user) return;
-
-    if (user.platformStatus === "suspended") {
-      return res.status(400).json({ error: "Reactivate this admin before sending a reset link" });
-    }
-
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    user.resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-    user.resetPasswordExpires = Date.now() + 3600000; // 1 hour, same as forgotPassword
-    await user.save();
-
-    const identity = await getOrgIdentity(user.organisationId);
-    const base = (identity.portalUrl || process.env.CLIENT_URL || "").replace(/\/+$/, "");
-    if (!base) {
-      return res.status(400).json({ error: "This organisation has no portal address to send them to" });
-    }
-
-    const result = await sendTemplateEmail("account.passwordReset", {
-      to: user.email,
-      organisationId: user.organisationId,
-      data: {
-        recipient: { name: user.name || "", email: user.email },
-        reset: { url: `${base}/reset-password/${resetToken}`, expiresIn: "1 hour" },
-      },
-      meta: { userId: String(user._id), sentBy: req.user?.email || "", tenantAdminReset: true },
-    });
-
-    if (!result.success) {
-      return res.status(502).json({ error: "The reset email couldn't be sent — check the SMTP settings." });
-    }
-
-    await writeAudit(req, "tenant_admin.password_reset_sent", {
-      organisationId: user.organisationId || undefined,
-      targetType: "user",
-      targetId: String(user._id),
-      meta: { email: user.email },
-    });
-    res.json({ message: `Reset link sent to ${user.email}` });
-  } catch (err) {
-    console.error("Tenant admin password reset error:", err);
-    res.status(500).json({ error: "Failed to send the reset link" });
-  }
-};
-
-/**
- * PATCH /api/superadmin/users/tenant-admins/:id/mfa-policy  { mfaPolicy }
- *
- * Whether this admin MUST use two-factor. Only two values here, unlike the
- * operator version: a tenant admin has no platformRole, so there is no role
- * table for "default" to follow — it simply means "not required", and a third
- * "exempt" option would be a second word for the same thing.
- *
- * Note what this does NOT do: it cannot switch two-factor ON for someone. That
- * needs their authenticator, which is the point of the factor. Requiring it
- * makes loginAdmin hand back `mfaSetupRequired`, and the tenant admin portal
- * holds them on the enrolment screen until they have scanned the QR code.
- */
-exports.setTenantAdminMfaPolicy = async (req, res) => {
-  try {
-    const v = input.oneOf(req.body?.mfaPolicy, "Two-factor policy", ["default", "required"]);
-    if (v.error) return res.status(400).json({ error: v.error });
-
-    const user = await findTenantAdmin(req, res);
-    if (!user) return;
-
-    user.mfaPolicy = v.value;
-    // The legacy boolean outranks mfaPolicy inside mfaPolicyOf(), so leaving a
-    // stale `true` here would silently defeat "required" on an old document.
-    if (v.value === "required") user.mfaExempt = false;
-    await user.save();
-
-    await writeAudit(req, "tenant_admin.mfa_policy", {
-      organisationId: user.organisationId || undefined,
-      targetType: "user",
-      targetId: String(user._id),
-      meta: { email: user.email, mfaPolicy: v.value },
-    });
-
-    res.json({
-      user: tenantAdminState(user),
-      message:
-        v.value === "required"
-          ? user.twoFactorEnabled
-            ? "Two-factor is now required"
-            : "Two-factor required — they'll be asked to set it up at their next sign-in"
-          : "Two-factor is no longer required",
-    });
-  } catch (err) {
-    console.error("Set tenant admin MFA policy error:", err);
-    res.status(500).json({ error: "Failed to change the two-factor policy" });
-  }
-};
+/** PATCH /api/superadmin/users/tenant-admins/:id/mfa-policy  { mfaPolicy: "default"|"required" } */
+exports.setTenantAdminMfaPolicy = tenantAdminAction("Failed to change the two-factor policy", (user, req) =>
+  tenantAdminService.setMfaPolicy(user, req.body?.mfaPolicy, req),
+);

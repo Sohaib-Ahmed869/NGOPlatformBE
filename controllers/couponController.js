@@ -1,490 +1,89 @@
 const Coupon = require("../models/coupon");
-const writeAudit = require("../utils/writeAudit");
-const stripeCouponService = require("../services/stripeCouponService");
-const { emitToSuperAdmins } = require("../services/socket");
-const { refreshRedemptions, reconcileRedemptions, hasRedemptionsLeft } = require("../utils/couponRedemptions");
-const Plan = require("../models/plan");
-const planPricing = require("../config/planPricing");
-const input = require("../utils/operatorInput");
+const couponService = require("../services/couponService");
+const { refreshRedemptions, hasRedemptionsLeft } = require("../utils/couponRedemptions");
+const { isServiceError } = require("../utils/serviceError");
 
-// Tell open operator consoles the coupon list moved (they cache it per session).
-const announceCoupons = (code) => emitToSuperAdmins("coupon:updated", { code: code || null });
+// Validation, Stripe sync and audit for every operator action live in
+// services/couponService.js, shared with the integration API. These handlers
+// only translate to the console's `{ error }` / `{ coupon, stripeSynced, warning }` shape.
 
-// Customers type this at checkout, so keep it to a plain token.
-const RE_COUPON_CODE = /^[A-Z0-9][A-Z0-9_-]{1,38}[A-Z0-9]$/;
-
-// One platform billing currency — an amount-off coupon in any other currency is
-// rejected by Stripe when it meets the subscription.
-const PLATFORM_CURRENCY = (planPricing.currency || "aud").toLowerCase();
+function sendCouponError(res, err, fallback) {
+  if (isServiceError(err)) {
+    // `hint` (restore) is read by the console at the top level.
+    const { field, ...details } = err.details || {};
+    return res.status(err.status).json({ error: err.message, code: err.code, ...details });
+  }
+  console.error(`${fallback}:`, err);
+  return res.status(500).json({ error: fallback });
+}
 
 /** GET /api/superadmin/coupons */
 exports.listCoupons = async (req, res) => {
   try {
-    const coupons = await Coupon.find().sort({ createdAt: -1 }).lean();
-    // One Stripe call brings every redemption count up to date, so the console
-    // (and the "never redeemed → deletable" rule) reflects reality.
-    await reconcileRedemptions(coupons);
-    res.json({ coupons, stripeEnabled: stripeCouponService.isStripeEnabled() });
+    res.json(await couponService.listCoupons());
   } catch (err) {
-    console.error("List coupons error:", err);
-    res.status(500).json({ error: "Failed to fetch coupons" });
+    sendCouponError(res, err, "Failed to fetch coupons");
   }
 };
-
-/**
- * Shared create/replace input check. Validates before anything touches Stripe —
- * Stripe rejects these outright, and a coupon that looks real in the console but
- * never synced is worse than a 400.
- * @returns {{error:string}|{values:object}}
- */
-function parseCouponInput(body = {}) {
-  const { code, description, type, value, currency, duration, durationInMonths, planCodes, maxRedemptions, redeemBy } = body;
-  // `value == null` rather than `!value`: 0 is falsy, so a zero discount was
-  // reported as "code and value are required" — an odd thing to read when you
-  // have just typed both. It is still rejected, two checks down, by the message
-  // that actually describes the problem.
-  if (!code || value == null || value === "") return { error: "code and value are required" };
-
-  // A promotion code is typed by customers at checkout and appears in URLs, so
-  // it has to be a plain token. Spaces and markup were both accepted before,
-  // producing Stripe promotion codes nobody could actually enter.
-  const normCode = String(code).toUpperCase().trim();
-  if (!RE_COUPON_CODE.test(normCode)) {
-    return { error: "Coupon code must be 3–40 characters, letters and numbers only (hyphens and underscores allowed)" };
-  }
-
-  const kind = type === "amount" ? "amount" : "percent";
-  const amount = Number(value);
-  if (!Number.isFinite(amount) || amount <= 0) return { error: "Discount value must be a positive number" };
-  if (kind === "percent" && amount > 100) return { error: "A percent discount cannot exceed 100" };
-  if (kind === "amount" && Math.round(amount * 100) !== amount * 100) {
-    return { error: "An amount discount cannot have fractions of a cent" };
-  }
-
-  // An amount-off coupon must be in the same currency as the subscription it's
-  // applied to, or Stripe refuses it at checkout. Defaulting to "usd" while the
-  // platform bills in AUD produced coupons that looked live and never worked.
-  const ccy = String(currency || PLATFORM_CURRENCY).toLowerCase().trim();
-  if (!/^[a-z]{3}$/.test(ccy)) return { error: "Currency must be a 3-letter code like aud" };
-  if (kind === "amount" && ccy !== PLATFORM_CURRENCY) {
-    return { error: `An amount discount must be in ${PLATFORM_CURRENCY.toUpperCase()} — the currency the plans are billed in` };
-  }
-
-  // "0" is a truthy string, so a plain `maxRedemptions ? …` would store 0 —
-  // a coupon nobody can ever redeem.
-  const maxUses = maxRedemptions === "" || maxRedemptions == null ? null : Number(maxRedemptions);
-  if (maxUses !== null && (!Number.isFinite(maxUses) || maxUses < 1)) {
-    return { error: "Max redemptions must be at least 1, or left blank for unlimited" };
-  }
-
-  const repeating = duration === "repeating";
-  let months = null;
-  if (repeating) {
-    months = Number(durationInMonths);
-    if (!Number.isInteger(months) || months < 1 || months > 36) {
-      return { error: "A repeating discount must run for 1–36 whole months" };
-    }
-  }
-
-  let expiry = null;
-  if (redeemBy) {
-    expiry = new Date(redeemBy);
-    if (Number.isNaN(expiry.getTime())) return { error: "Invalid expiry date" };
-    // Compare against yesterday so "today" is still a usable expiry.
-    if (expiry.getTime() < Date.now() - 24 * 60 * 60 * 1000) return { error: "Expiry date is in the past" };
-  }
-
-  const desc = input.text(description, "Description", { max: 300 });
-  if (desc.error) return { error: desc.error };
-
-  const plans = input.stringList(planCodes, "Plan whitelist", { max: 20, maxLength: 40 });
-  if (plans.error) return { error: plans.error };
-
-  return {
-    values: {
-      code: normCode,
-      description: desc.value,
-      type: kind,
-      value: amount,
-      currency: ccy,
-      duration: ["once", "forever", "repeating"].includes(duration) ? duration : "once",
-      durationInMonths: repeating ? months : null,
-      planCodes: plans.value,
-      maxRedemptions: maxUses,
-      redeemBy: expiry,
-    },
-  };
-}
-
-/**
- * A whitelist naming a plan that doesn't exist produces a coupon that can never
- * apply to anything — it reads as configured in the console and silently fails
- * at checkout.
- * @returns {Promise<string|null>} an error message, or null
- */
-async function checkPlanCodes(codes = []) {
-  if (!codes.length) return null;
-  const found = await Plan.find({ code: { $in: codes } }).select("code").lean();
-  const known = new Set(found.map((p) => p.code));
-  const missing = codes.filter((c) => !known.has(c));
-  if (missing.length) return `No such plan: ${missing.join(", ")}`;
-  return null;
-}
-
-/**
- * Flags a coupon whose Stripe half didn't land, so the console can say so.
- * Returns {} when everything synced (or when Stripe isn't configured at all —
- * that's a deliberate setup, not a failure to warn about on every save).
- */
-function syncWarning(coupon) {
-  if (!stripeCouponService.isStripeEnabled()) return {};
-  if (!coupon.stripeCouponId) {
-    return {
-      stripeSynced: false,
-      warning: `Saved, but it could not be created in Stripe — "${coupon.code}" will not apply at checkout. Run "npm run fix:stripe-catalog" once Stripe is reachable.`,
-    };
-  }
-  if (!coupon.stripePromotionCodeId) {
-    return {
-      stripeSynced: false,
-      warning: `Saved and created in Stripe, but the promotion code "${coupon.code}" could not be issued, so customers can't enter it. Run "npm run fix:stripe-catalog".`,
-    };
-  }
-  return { stripeSynced: true };
-}
-
-/** Persist a coupon and best-effort sync it to Stripe (saves either way). */
-async function createAndSync(values) {
-  const coupon = new Coupon(values);
-  try {
-    const synced = await stripeCouponService.createStripeCoupon(coupon);
-    coupon.stripeCouponId = synced.stripeCouponId;
-    coupon.stripePromotionCodeId = synced.stripePromotionCodeId;
-  } catch (e) {
-    console.error("Stripe coupon sync failed (coupon saved unsynced):", e.message);
-  }
-  try {
-    await coupon.save();
-  } catch (e) {
-    // The Stripe coupon exists by now, so a failed save (e.g. two operators
-    // racing the same code past the duplicate check) would strand it there
-    // forever. Take it back out before surfacing the error.
-    if (coupon.stripeCouponId) {
-      await stripeCouponService.archiveStripeCoupon(coupon).catch(() => {});
-    }
-    throw e;
-  }
-  return coupon;
-}
 
 /** POST /api/superadmin/coupons */
 exports.createCoupon = async (req, res) => {
   try {
-    const { error, values } = parseCouponInput(req.body);
-    if (error) return res.status(400).json({ error });
-    const planError = await checkPlanCodes(values.planCodes);
-    if (planError) return res.status(400).json({ error: planError });
-    if (await Coupon.findOne({ code: values.code })) {
-      return res.status(409).json({ error: "Coupon code already exists" });
-    }
-
-    const coupon = await createAndSync(values);
-    await writeAudit(req, "coupon.created", { targetType: "coupon", targetId: coupon.code, meta: { type: coupon.type, value: coupon.value } });
-    announceCoupons(coupon.code);
-    // Sync is best-effort, so a coupon can save while its Stripe half failed —
-    // and a coupon with no Stripe promotion code silently does nothing at
-    // checkout. Report that rather than a clean success.
-    res.status(201).json({ coupon, ...syncWarning(coupon) });
+    const { coupon, sync } = await couponService.createCoupon(req.body, req);
+    // Sync is best-effort: a coupon with no Stripe promotion code silently does
+    // nothing at checkout, so that is reported rather than a clean success.
+    res.status(201).json({ coupon, ...sync });
   } catch (err) {
-    // createAndSync already unwinds the Stripe half on a failed save; the unique
-    // index losing a race is a conflict, not a server fault.
-    if (input.isDuplicateKey(err)) {
-      return res.status(409).json({ error: "Coupon code already exists" });
-    }
-    console.error("Create coupon error:", err);
-    res.status(500).json({ error: "Failed to create coupon" });
+    sendCouponError(res, err, "Failed to create coupon");
   }
 };
 
-/**
- * PATCH /api/superadmin/coupons/:code   { description?, planCodes? }
- *
- * Only the fields that DON'T exist in Stripe's economics. A Stripe Coupon is
- * immutable apart from name/metadata — percent_off, amount_off, duration,
- * max_redemptions and redeem_by can never be changed after creation. To change
- * any of those, use /replace (archive + recreate).
- */
+/** PATCH /api/superadmin/coupons/:code   { description?, planCodes? } — terms go through /replace. */
 exports.updateCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.findOne({ code: String(req.params.code).toUpperCase() });
-    if (!coupon) return res.status(404).json({ error: "Coupon not found" });
-
-    const { description, planCodes } = req.body || {};
-    if (description === undefined && planCodes === undefined) {
-      return res.status(400).json({ error: "Nothing to update" });
-    }
-    const before = { description: coupon.description, planCodes: [...(coupon.planCodes || [])] };
-    if (description !== undefined) {
-      const d = input.text(description, "Description", { max: 300 });
-      if (d.error) return res.status(400).json({ error: d.error });
-      coupon.description = d.value;
-    }
-    if (planCodes !== undefined) {
-      const list = input.stringList(planCodes, "Plan whitelist", { max: 20, maxLength: 40 });
-      if (list.error) return res.status(400).json({ error: list.error });
-      const planError = await checkPlanCodes(list.value);
-      if (planError) return res.status(400).json({ error: planError });
-      coupon.planCodes = list.value;
-    }
-    await coupon.save();
-
-    await writeAudit(req, "coupon.updated", {
-      targetType: "coupon",
-      targetId: coupon.code,
-      meta: { before, after: { description: coupon.description, planCodes: coupon.planCodes } },
-    });
-    announceCoupons(coupon.code);
+    const { coupon } = await couponService.updateCoupon(req.params.code, req.body || {}, req);
     res.json({ coupon });
   } catch (err) {
-    console.error("Update coupon error:", err);
-    res.status(500).json({ error: "Failed to update coupon" });
+    sendCouponError(res, err, "Failed to update coupon");
   }
 };
 
-/**
- * POST /api/superadmin/coupons/:code/replace   { ...new coupon fields }
- *
- * The honest version of "edit the discount": archive the original and create a
- * replacement. Tenants already carrying the old discount keep it — Stripe does
- * not strip a redeemed coupon from an existing subscription.
- */
+/** POST /api/superadmin/coupons/:code/replace   { ...new coupon fields } */
 exports.replaceCoupon = async (req, res) => {
   try {
-    const original = await Coupon.findOne({ code: String(req.params.code).toUpperCase() });
-    if (!original) return res.status(404).json({ error: "Coupon not found" });
-    if (original.archivedAt) return res.status(400).json({ error: "That coupon is already archived" });
-
-    const { error, values } = parseCouponInput(req.body);
-    if (error) return res.status(400).json({ error });
-    const planError = await checkPlanCodes(values.planCodes);
-    if (planError) return res.status(400).json({ error: planError });
-
-    const sameCode = values.code === original.code;
-    if (!sameCode && (await Coupon.findOne({ code: values.code }))) {
-      return res.status(409).json({ error: "Coupon code already exists" });
-    }
-
-    // Snapshot the old terms for the audit trail before anything changes.
-    const from = {
-      type: original.type,
-      value: original.value,
-      duration: original.duration,
-      durationInMonths: original.durationInMonths,
-      maxRedemptions: original.maxRedemptions,
-      redeemBy: original.redeemBy,
-      timesRedeemed: original.timesRedeemed || 0,
-    };
-
-    let created;
-    if (!sameCode) {
-      // Different code → create first, so a failure leaves the original live.
-      created = await createAndSync(values);
-      original.isActive = false;
-      original.archivedAt = new Date();
-      await original.save();
-      await stripeCouponService.archiveStripeCoupon(original);
-    } else {
-      // Same code → keep ONE row. `code` is uniquely indexed, so an archived
-      // copy can't sit alongside a live one; the terms are rewritten in place
-      // and the before/after is preserved in the audit log instead. Stripe gets
-      // a brand-new coupon either way because its coupons are immutable.
-      await stripeCouponService.archiveStripeCoupon(original); // drops the old Stripe coupon
-      Object.assign(original, values, {
-        isActive: true,
-        archivedAt: null,
-        // The new Stripe coupon starts at zero redemptions, and
-        // maxRedemptions is enforced against this counter.
-        timesRedeemed: 0,
-        stripeCouponId: "",
-        stripePromotionCodeId: "",
-      });
-      try {
-        const synced = await stripeCouponService.createStripeCoupon(original);
-        original.stripeCouponId = synced.stripeCouponId;
-        original.stripePromotionCodeId = synced.stripePromotionCodeId;
-      } catch (e) {
-        console.error("Stripe sync failed for the replacement (saved unsynced):", e.message);
-      }
-      await original.save();
-      created = original;
-    }
-
-    await writeAudit(req, "coupon.replaced", {
-      targetType: "coupon",
-      targetId: created.code,
-      meta: {
-        replaced: original.code,
-        inPlace: sameCode,
-        from,
-        to: { type: created.type, value: created.value, duration: created.duration },
-      },
-    });
-    announceCoupons(created.code);
-    res.status(201).json({ coupon: created, archived: sameCode ? null : original.code, inPlace: sameCode });
+    const { coupon, archived, inPlace } = await couponService.replaceCoupon(req.params.code, req.body, req);
+    res.status(201).json({ coupon, archived, inPlace });
   } catch (err) {
-    if (input.isDuplicateKey(err)) {
-      return res.status(409).json({ error: "Coupon code already exists" });
-    }
-    console.error("Replace coupon error:", err);
-    res.status(500).json({ error: "Failed to replace coupon" });
+    sendCouponError(res, err, "Failed to replace coupon");
   }
 };
 
-/**
- * DELETE /api/superadmin/coupons/:code
- *
- * Hard delete, allowed ONLY for a coupon nobody has redeemed — for cleaning up
- * typos. Once a coupon has been used it's a financial record explaining why a
- * tenant pays what they pay, so it can only be archived.
- */
+/** DELETE /api/superadmin/coupons/:code — only a never-redeemed coupon. */
 exports.deleteCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.findOne({ code: String(req.params.code).toUpperCase() });
-    if (!coupon) return res.status(404).json({ error: "Coupon not found" });
-
-    // Re-check against Stripe rather than the stored mirror — this is
-    // irreversible, so a stale zero must not be what authorises it.
-    const used = await refreshRedemptions(coupon);
-    if (used > 0) {
-      return res.status(409).json({
-        error: `${coupon.code} has been redeemed ${used} time${used === 1 ? "" : "s"} — archive it instead so the discount history is kept`,
-      });
-    }
-
-    // Removes the Stripe coupon and deactivates its promotion code.
-    await stripeCouponService.archiveStripeCoupon(coupon);
-    await Coupon.deleteOne({ _id: coupon._id });
-
-    await writeAudit(req, "coupon.deleted", {
-      targetType: "coupon",
-      targetId: coupon.code,
-      meta: { type: coupon.type, value: coupon.value, neverRedeemed: true },
-    });
-    announceCoupons(coupon.code);
-    res.json({ deleted: coupon.code });
+    res.json(await couponService.deleteCoupon(req.params.code, req));
   } catch (err) {
-    console.error("Delete coupon error:", err);
-    res.status(500).json({ error: "Failed to delete coupon" });
+    sendCouponError(res, err, "Failed to delete coupon");
   }
 };
 
 /** POST /api/superadmin/coupons/:code/archive */
 exports.archiveCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.findOne({ code: String(req.params.code).toUpperCase() });
-    if (!coupon) return res.status(404).json({ error: "Coupon not found" });
-    coupon.isActive = false;
-    coupon.archivedAt = new Date();
-    await coupon.save();
-    await stripeCouponService.archiveStripeCoupon(coupon);
-    await writeAudit(req, "coupon.archived", { targetType: "coupon", targetId: coupon.code });
-    announceCoupons(coupon.code);
+    const { coupon } = await couponService.archiveCoupon(req.params.code, req);
     res.json({ coupon });
   } catch (err) {
-    console.error("Archive coupon error:", err);
-    res.status(500).json({ error: "Failed to archive coupon" });
+    sendCouponError(res, err, "Failed to archive coupon");
   }
 };
 
-/**
- * POST /api/superadmin/coupons/:code/restore
- *
- * Puts an archived coupon back into circulation. This is NOT a mirror image of
- * archive, and the asymmetry is Stripe's: archiveStripeCoupon() calls
- * `stripe.coupons.del()`, and a deleted Stripe Coupon cannot be undeleted. So
- * restoring means CREATING a new Stripe Coupon (and a new Promotion Code) with
- * the same terms, then repointing our row at them. The old
- * stripeCouponId/stripePromotionCodeId are dead ids and are overwritten.
- *
- * Because those terms are re-submitted to Stripe, they have to be legal AGAIN
- * at restore time, and three of them can rot while a coupon sits archived:
- *   - redeemBy may now be in the past. Stripe rejects a past `redeem_by`.
- *   - maxRedemptions may already be exhausted by the redemptions it collected
- *     before archiving.
- *   - percent_off may exceed 100 — coupons created before that validation
- *     existed are still in the collection (there are some at 554%).
- * Each is reported by name with the fix, rather than surfacing a raw Stripe
- * error, because in every case the answer is the same: use Replace, which
- * archives and recreates with new terms.
- */
+/** POST /api/superadmin/coupons/:code/restore — recreates the Stripe coupon. */
 exports.restoreCoupon = async (req, res) => {
   try {
-    const coupon = await Coupon.findOne({ code: String(req.params.code).toUpperCase() });
-    if (!coupon) return res.status(404).json({ error: "Coupon not found" });
-    if (!coupon.archivedAt && coupon.isActive) {
-      return res.status(409).json({ error: `${coupon.code} is already active` });
-    }
-
-    const blockers = [];
-    if (coupon.type === "percent" && Number(coupon.value) > 100) {
-      // Each blocker has to be a self-contained clause with no internal
-      // ", and" — they get joined into one sentence.
-      blockers.push(`its ${coupon.value}% discount is above the 100% Stripe allows`);
-    }
-    if (coupon.redeemBy && new Date(coupon.redeemBy).getTime() <= Date.now()) {
-      blockers.push(`it expired on ${new Date(coupon.redeemBy).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" })}`);
-    }
-    // Trust Stripe's count over the local mirror where we still have the id —
-    // the mirror is only refreshed on list, so it can be stale by any amount.
-    const used = coupon.stripeCouponId
-      ? await refreshRedemptions(coupon).catch(() => coupon.timesRedeemed || 0)
-      : coupon.timesRedeemed || 0;
-    if (coupon.maxRedemptions && used >= coupon.maxRedemptions) {
-      blockers.push(`it has already been redeemed ${used} of ${coupon.maxRedemptions} times`);
-    }
-    if (blockers.length) {
-      // "a, b and c" — joining every clause with ", and " reads as a stutter
-      // once there is more than one, and two of these commonly co-occur.
-      const reasons =
-        blockers.length > 1
-          ? `${blockers.slice(0, -1).join(", ")} and ${blockers[blockers.length - 1]}`
-          : blockers[0];
-      return res.status(400).json({
-        error: `${coupon.code} can't be restored as it stands: ${reasons}.`,
-        hint: "Use Replace to reissue this code with new terms.",
-      });
-    }
-
-    // A brand-new Stripe Coupon + Promotion Code. createPromotionCode() already
-    // retires a leftover code of the same name and retries, which is exactly the
-    // collision this path creates: the promotion code from before the archive
-    // still exists (Stripe deactivates them, never deletes them).
-    let synced = { stripeCouponId: "", stripePromotionCodeId: "" };
-    try {
-      synced = await stripeCouponService.createStripeCoupon(coupon);
-    } catch (e) {
-      console.error("Stripe coupon restore failed:", e.message);
-      return res.status(502).json({
-        error: `Stripe would not recreate ${coupon.code}: ${e.message}`,
-      });
-    }
-
-    coupon.stripeCouponId = synced.stripeCouponId;
-    coupon.stripePromotionCodeId = synced.stripePromotionCodeId;
-    coupon.isActive = true;
-    coupon.archivedAt = null;
-    await coupon.save();
-
-    await writeAudit(req, "coupon.restored", {
-      targetType: "coupon",
-      targetId: coupon.code,
-      meta: { stripeCouponId: coupon.stripeCouponId, timesRedeemed: used },
-    });
-    announceCoupons(coupon.code);
-    res.json({ coupon, ...syncWarning(coupon) });
+    const { coupon, sync } = await couponService.restoreCoupon(req.params.code, req);
+    res.json({ coupon, ...sync });
   } catch (err) {
-    console.error("Restore coupon error:", err);
-    res.status(500).json({ error: "Failed to restore coupon" });
+    sendCouponError(res, err, "Failed to restore coupon");
   }
 };
 

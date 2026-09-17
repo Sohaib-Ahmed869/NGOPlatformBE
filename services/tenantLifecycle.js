@@ -427,6 +427,71 @@ async function clearOverride(org, req, { reason = "" } = {}) {
   return { organisation: org, changed: true, warnings: [] };
 }
 
+/**
+ * Comp (free of charge) or un-comp a tenant. A reason is required to comp —
+ * a whitespace-only reason used to satisfy the old check, leaving a free
+ * tenant with no recorded justification.
+ *
+ * Comping does not cancel a live Stripe subscription, and un-comping does not
+ * start one: this flag records who pays, it doesn't move money.
+ */
+async function setComp(org, { isComp, reason } = {}, req) {
+  if (typeof isComp !== "boolean") throw new ServiceError(400, "VALIDATION_ERROR", "is_comp must be true or false", { field: "is_comp" });
+  const parsed = input.text(reason, "Reason", { max: 500, required: isComp, allowEmpty: !isComp });
+  if (parsed.error) {
+    throw isComp
+      ? new ServiceError(400, "REASON_REQUIRED", "A reason is required", { field: "reason" })
+      : new ServiceError(400, "VALIDATION_ERROR", parsed.error, { field: "reason" });
+  }
+  if (org.deletedAt) throw new ServiceError(409, "TENANT_DELETED", "This tenant is deleted — restore it before changing its billing");
+
+  const value = parsed.value || "";
+  if (!!org.isComp === isComp && (!isComp || org.compReason === value)) return { organisation: org, changed: false, warnings: [] };
+
+  org.isComp = isComp;
+  org.compReason = isComp ? value : "";
+  await org.save();
+  await writeAudit(req, isComp ? "org.comped" : "org.uncomped", {
+    organisationId: org._id,
+    targetType: "organisation",
+    targetId: String(org._id),
+    meta: { reason: value },
+  });
+  announce(org);
+
+  const warnings = [];
+  if (isComp && hasLiveStripeSubscription(org)) {
+    warnings.push({ code: "STRIPE_STILL_BILLING", message: "The tenant is marked comped but its Stripe subscription is still live and will keep charging" });
+  }
+  if (!isComp && !hasLiveStripeSubscription(org) && tenantStatus(org) === "active") {
+    warnings.push({ code: "NOT_BILLED", message: "The tenant is no longer comped and has no Stripe subscription — nothing will bill it automatically" });
+  }
+  return { organisation: org, changed: true, warnings };
+}
+
+/**
+ * Set (or clear, with null) the trial end date. Informational — nothing locks
+ * the tenant when it passes. A date already in the past is refused: it reads
+ * as "set" while gating nothing.
+ */
+async function setTrial(org, { trialEndsAt, reason = "" } = {}, req) {
+  const parsed = input.date(trialEndsAt, "Trial end date", { allowNull: true, future: true });
+  if (parsed.error) throw new ServiceError(400, "VALIDATION_ERROR", parsed.error, { field: "trial_ends_at" });
+  if (org.deletedAt) throw new ServiceError(409, "TENANT_DELETED", "This tenant is deleted — restore it before changing its trial");
+
+  const from = org.trialEndsAt || null;
+  org.trialEndsAt = parsed.value;
+  await org.save();
+  await writeAudit(req, "org.trial_set", {
+    organisationId: org._id,
+    targetType: "organisation",
+    targetId: String(org._id),
+    meta: { trialEndsAt: org.trialEndsAt, from, ...(reason ? { reason } : {}) },
+  });
+  announce(org);
+  return { organisation: org, changed: true, warnings: [] };
+}
+
 module.exports = {
   LEGACY_PLAN_CODES,
   tenantStatus,
@@ -441,4 +506,6 @@ module.exports = {
   assignPlan,
   setOverride,
   clearOverride,
+  setComp,
+  setTrial,
 };

@@ -1,8 +1,8 @@
 {
   "info": {
-    "_postman_id": "169b4eb1-4e5d-46a7-a795-c2ae66d7b363",
+    "_postman_id": "fb3c1d61-da8a-4bfd-afe0-9774cae7f4a6",
     "name": "Donexus",
-    "description": "Server-to-server API the **Calcite Hyper** system uses to manage **Donexus** (charity fundraising platform): Tenants CRUD, Plans CRUD, plan changes (subscriptions/overrides), Support tickets.\n\nImport `Donexus-Local.postman_environment.json` (or a copy pointed at production) and select it — or drop the **Donexus** folder into the Hyper ecosystem collection and add `donexus_base_url` / `donexus_api_key` to that environment. Auth is `x-api-key`, configured on the **Donexus** folder.\n\nCreate requests save ids into collection variables (`donexusTenantId`, `donexusPlanCode`, `donexusForkPlanCode`, `donexusTicketId`, `donexusAssigneeId`), so the folder runs top-to-bottom. They are prefixed so they don't collide with the Hyyve/Stewardex variables in a shared collection.",
+    "description": "Server-to-server API the **Calcite Hyper** system uses to manage **Donexus** (charity fundraising platform): tenants (lifecycle, comp, trial, their admin accounts), plans and the feature matrix, plan changes and overrides, billing (revenue, invoices, coupons), support tickets, the leads CRM, and the platform dashboard and audit log.\n\nImport `Donexus-Local.postman_environment.json` (or a copy pointed at production) and select it — or drop the **Donexus** folder into the Hyper ecosystem collection and add `donexus_base_url` / `donexus_api_key` to that environment. Auth is `x-api-key`, configured on the **Donexus** folder.\n\nCreate requests save ids into collection variables (`donexusTenantId`, `donexusPlanCode`, `donexusForkPlanCode`, `donexusTicketId`, `donexusAssigneeId`, `donexusCouponCode`, `donexusLeadId`, …), so the folder runs top-to-bottom. They are prefixed so they don't collide with the Hyyve/Stewardex variables in a shared collection.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -469,6 +469,588 @@
                 "description": "Same call as *Reactivate tenant*, on a deleted tenant: `deleted_at` is cleared and the audit event is `org.restored`. Leaves the tenant active so the folders below can run."
               },
               "response": []
+            },
+            {
+              "name": "Tenant invoices",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/invoices",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "invoices"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "paid",
+                      "disabled": true,
+                      "description": "Optional: draft | open | paid | failed | void | uncollectible"
+                    },
+                    {
+                      "key": "from",
+                      "value": "2026-01-01",
+                      "disabled": true,
+                      "description": "Optional: created on/after (ISO date)"
+                    },
+                    {
+                      "key": "to",
+                      "value": "2026-12-31",
+                      "disabled": true,
+                      "description": "Optional: created on/before; a date-only value includes that whole day"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "disabled": true,
+                      "description": "Default 50, max 200"
+                    }
+                  ]
+                },
+                "description": "The platform invoices Donexus has billed this tenant, newest first. Same shape and totals as *Billing → List invoices*. A tenant created through this API has no Stripe subscription, so the list is usually empty for it."
+              },
+              "response": []
+            },
+            {
+              "name": "Tenant audit history",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"provisioning is in the history\", () => pm.expect(res.data.map((e) => e.action)).to.include(\"org.provisioned\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/audit",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "audit"
+                  ],
+                  "query": [
+                    {
+                      "key": "action",
+                      "value": "org.suspended",
+                      "disabled": true,
+                      "description": "Optional: exact action code"
+                    },
+                    {
+                      "key": "from",
+                      "value": "2026-01-01",
+                      "disabled": true,
+                      "description": "Optional"
+                    },
+                    {
+                      "key": "to",
+                      "value": "2026-12-31",
+                      "disabled": true,
+                      "description": "Optional"
+                    },
+                    {
+                      "key": "search",
+                      "value": "integration",
+                      "disabled": true,
+                      "description": "Optional: action, actor, target"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "100",
+                      "disabled": true,
+                      "description": "Default 100, max 500"
+                    }
+                  ]
+                },
+                "description": "Every operator action on this tenant, from the Donexus console **and** this API, newest first. Paginated (*Get tenant* only carries the last 20). Entry shape as *Platform → Audit log*."
+              },
+              "response": []
+            },
+            {
+              "name": "Open as support (blocked)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 403\", () => pm.expect(pm.response.code).to.be.oneOf([403]));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"IMPERSONATION_NOT_ALLOWED\", () => pm.expect(res.error.code).to.eql(\"IMPERSONATION_NOT_ALLOWED\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/act-as",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "act-as"
+                  ]
+                },
+                "description": "**Always 403 `IMPERSONATION_NOT_ALLOWED`.** Signing in as a tenant mints a session and must be tied to a named person, so it stays in the Donexus console (*Open as support*, with its kill switch and per-action audit). Listed so the refusal is explicit, as in Stewardex."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Tenant admins",
+          "description": "A charity's own **admin accounts** (the people who sign in to its Donexus admin portal) — what Calcite support is asked to do when someone can't get in, or shouldn't be able to. The same actions as the Donexus console's *Team → Tenant admins*.\n\n- `:userId` must be an admin **of that tenant** — an id from another tenant, a donor or a platform operator is 404 `TENANT_ADMIN_NOT_FOUND`.\n- These act on **one person**. To lock the whole charity, use *Tenants → Suspend tenant*.\n- Nothing here sets a password or creates an admin: *Send password reset* emails a link only their inbox can open.\n- `reason` (optional) is recorded in the audit log on every write.",
+          "item": [
+            {
+              "name": "List tenant admins",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"owner listed\", () => pm.expect(res.data.map((a) => a.id)).to.include(pm.collectionVariables.get(\"donexusAssigneeId\")));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins"
+                  ]
+                },
+                "description": "Every admin account of the tenant with its sign-in state. `meta.total` is the count.\n\n**Admin object**: `id`, `name`, `email`, `tenant_id`, `tenant: { id, name, slug }`, `status` (`active` \\| `suspended`), `two_factor_enabled`, `mfa_policy` (`default` \\| `required`), `mfa_required`, `locked_until` (set only while a failed-sign-in lockout is in force), `last_login_at`, `created_at`. Action responses add `message`."
+              },
+              "response": []
+            },
+            {
+              "name": "Get tenant admin",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}"
+                  ]
+                },
+                "description": "One admin. `{{donexusAssigneeId}}` is the tenant owner (set by *Create tenant*).\n\n**Admin object**: `id`, `name`, `email`, `tenant_id`, `tenant: { id, name, slug }`, `status` (`active` \\| `suspended`), `two_factor_enabled`, `mfa_policy` (`default` \\| `required`), `mfa_required`, `locked_until` (set only while a failed-sign-in lockout is in force), `last_login_at`, `created_at`. Action responses add `message`.\n\n**Errors:** 400 (malformed id), 404 `TENANT_ADMIN_NOT_FOUND`."
+              },
+              "response": []
+            },
+            {
+              "name": "Suspend tenant admin",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"suspended\", () => pm.expect(res.data.status).to.eql(\"suspended\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"suspended\",\n  \"reason\": \"Staff member left the charity\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}"
+                  ]
+                },
+                "description": "`{ status: \"suspended\" | \"active\", mfa_policy?: \"default\" | \"required\", reason? }` — send either or both; both are validated before either is written.\n\n**Suspend** takes effect immediately: sign-in is refused and every live session is signed out. The charity's website, donation pages and donors are **not** affected.\n**Reactivate** (`\"active\"`) also clears any failed-sign-in lockout and retires tokens issued before the suspension."
+              },
+              "response": []
+            },
+            {
+              "name": "Reactivate admin + require two-factor",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"active + 2FA required\", () => { pm.expect(res.data.status).to.eql(\"active\"); pm.expect(res.data.mfa_required).to.eql(true); });"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"active\",\n  \"mfa_policy\": \"required\",\n  \"reason\": \"Back on staff; policy requires 2FA\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}"
+                  ]
+                },
+                "description": "`mfa_policy: \"required\"` makes two-factor **mandatory** for this admin: if they haven't enrolled, their next sign-in holds them on the set-up screen. It can't switch two-factor on for them — that needs their authenticator. `\"default\"` = not required."
+              },
+              "response": []
+            },
+            {
+              "name": "Stop requiring two-factor",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"mfa_policy\": \"default\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}"
+                  ]
+                },
+                "description": "Back to the default (not required). Leaves the owner usable for the folders below."
+              },
+              "response": []
+            },
+            {
+              "name": "Unlock tenant admin",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Locked out after password attempts; identity confirmed by phone\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}/unlock",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}",
+                    "unlock"
+                  ]
+                },
+                "description": "Clears the lockout that five failed sign-ins apply (otherwise it lifts after 15 minutes). `locked_until` becomes null. Safe to call when not locked."
+              },
+              "response": []
+            },
+            {
+              "name": "Sign admin out everywhere",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Laptop reported stolen\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}/force-logout",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}",
+                    "force-logout"
+                  ]
+                },
+                "description": "Ends every session for this admin without changing the account — for a lost device or a shared login. They can sign straight back in with their password."
+              },
+              "response": []
+            },
+            {
+              "name": "Reset two-factor",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 200/409\", () => pm.expect(pm.response.code).to.be.oneOf([200,409]));",
+                      "const res = pm.response.json();"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"New phone; old authenticator lost\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}/reset-2fa",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}",
+                    "reset-2fa"
+                  ]
+                },
+                "description": "**Removes** two-factor from the account so the admin can sign in with their password and enrol a new authenticator (\"new phone, codes gone\"). Also signs out every session. The most sensitive action here — confirm identity first; it's audited by name.\n\n**Errors:** 409 `MFA_NOT_ENABLED` when two-factor isn't on (the case for a freshly provisioned owner, so this request accepts 409)."
+              },
+              "response": []
+            },
+            {
+              "name": "Send password reset",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 200/502\", () => pm.expect(pm.response.code).to.be.oneOf([200,502]));",
+                      "const res = pm.response.json();"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/admins/{{donexusAssigneeId}}/password-reset",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "admins",
+                    "{{donexusAssigneeId}}",
+                    "password-reset"
+                  ]
+                },
+                "description": "Emails the admin a one-hour *reset your password* link on **their charity's portal**. Calcite never sees or sets the password.\n\n**Errors:** 409 `TENANT_ADMIN_SUSPENDED` (reactivate first), 409 `NO_PORTAL_ADDRESS`, 502 `EMAIL_SEND_FAILED` (the SMTP send failed; nothing was changed that the admin would notice — this request accepts 502 for local runs without SMTP)."
+              },
+              "response": []
             }
           ]
         },
@@ -827,6 +1409,273 @@
                 "description": "Catalogue of the codes used in plan and override `feature_flags` / `limits` maps.\n- `flags[]`: `{ code, category, name, description, core, vertical }`. `core: true` = always on, can't be switched off. `vertical: \"muslim\"` = only takes effect for tenants with `is_muslim_charity`.\n- `limits[]`: `{ code, category, name, description, unit }` — numeric quotas, `null` = unlimited.\n- `categories[]`: `{ code, name, description }`.\n\n`volunteers` exists in **both** lists: the flag turns the feature on, the limit caps applications — independent."
               },
               "response": []
+            },
+            {
+              "name": "Feature matrix",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"plan columns present\", () => pm.expect(res.data.plans.map((p) => p.code)).to.include(pm.collectionVariables.get(\"donexusPlanCode\")));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/feature-matrix",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "feature-matrix"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "all",
+                      "disabled": true,
+                      "description": "Optional: active (default) | archived | all"
+                    }
+                  ]
+                },
+                "description": "Every plan's features and limits side by side — the Donexus console's *Features* screen, for a \"which plan gets what\" grid.\n\n`{ categories[], flags[], limits[], plans: [{ code, name, status, is_public, sort_order, feature_flags, limits }] }`. `flags` / `limits` are the catalogue (as *Feature flags*); each plan's maps are keyed by those codes."
+              },
+              "response": []
+            },
+            {
+              "name": "Update feature matrix",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"both plans updated\", () => pm.expect(res.data.updated.length).to.eql(2));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"plans\": {\n    \"{{donexusPlanCode}}\": {\n      \"feature_flags\": {\n        \"newsletter\": true,\n        \"paypal\": true\n      },\n      \"limits\": {\n        \"campaigns\": 15\n      }\n    },\n    \"{{donexusForkPlanCode}}\": {\n      \"limits\": {\n        \"adminSeats\": 30\n      }\n    }\n  },\n  \"reason\": \"Q3 entitlement review\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/feature-matrix",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "feature-matrix"
+                  ]
+                },
+                "description": "Turn features on/off and change limits for **several plans in one call**. `plans` is keyed by plan code; each entry takes `feature_flags` and/or `limits`.\n\n- **Merges per key** into each named plan (same as *Update plan*). Plans you don't name are untouched.\n- The **whole body is validated before any plan is saved**: an unknown plan (404 `PLAN_NOT_FOUND`), flag (`UNKNOWN_FEATURE_FLAG`) or limit (`UNKNOWN_LIMIT_KEY`) anywhere means nothing is written. Errors name the plan in `details.plan_code`.\n- Applies to every tenant on those plans immediately (overrides still win). One `plan.entitlements_updated` audit event.\n\nResponse: `{ updated: [codes], plans: [matrix rows] }`."
+              },
+              "response": []
+            },
+            {
+              "name": "Migrate subscribers to current price",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"proration\": \"none\",\n  \"reason\": \"Move everyone onto the Q3 price\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusPlanCode}}/migrate-subscribers",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusPlanCode}}",
+                    "migrate-subscribers"
+                  ]
+                },
+                "description": "After a price change, existing Stripe-billed tenants stay on the **old** price (`SUBSCRIBERS_GRANDFATHERED`). This moves every tenant on the plan onto its **current** Stripe price for their cycle.\n\n`proration`: `none` (default — new price from the next renewal, nothing charged now) \\| `create_prorations` (difference added to the next invoice) \\| `always_invoice` (**invoices the difference immediately — moves money**).\n\nResponse: `{ plan_code, proration, migrated, failed, skipped }`. `skipped` = already on the price, or no Stripe price for their cycle. Warnings: `MIGRATION_PARTIAL` (some failed — retry), `STRIPE_UNAVAILABLE` (Stripe not configured; nothing moved). Comped / API-provisioned tenants have no Stripe subscription and aren't counted."
+              },
+              "response": []
+            },
+            {
+              "name": "Sync plan to Stripe",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 200/502/503\", () => pm.expect(pm.response.code).to.be.oneOf([200,502,503]));",
+                      "const res = pm.response.json();"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusPlanCode}}/sync-stripe",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusPlanCode}}",
+                    "sync-stripe"
+                  ]
+                },
+                "description": "Creates or repairs the plan's Stripe Product and Prices — the fix for a plan with `stripe_synced: false` (e.g. saved while Stripe was down). Returns plan detail.\n\n**Errors:** 503 `STRIPE_UNAVAILABLE` (Stripe not configured), 502 `STRIPE_UPDATE_FAILED` (Stripe refused; message says why). Accepts both for local runs."
+              },
+              "response": []
+            },
+            {
+              "name": "Archive plan (POST)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"archived\", () => pm.expect(res.data.status).to.eql(\"archived\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"confirm\": true,\n  \"reason\": \"Agreement paused\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusForkPlanCode}}/archive",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusForkPlanCode}}",
+                    "archive"
+                  ]
+                },
+                "description": "Same as *Delete (archive) plan* — the admin-portal spelling. Body `{ confirm?, reason? }`."
+              },
+              "response": []
+            },
+            {
+              "name": "Restore plan (POST)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"active again\", () => pm.expect(res.data.status).to.eql(\"active\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Agreement resumed\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/plans/{{donexusForkPlanCode}}/restore",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "plans",
+                    "{{donexusForkPlanCode}}",
+                    "restore"
+                  ]
+                },
+                "description": "Same as `PATCH { status: \"active\" }`. **Errors:** 409 `PLAN_NOT_ARCHIVED`."
+              },
+              "response": []
             }
           ]
         },
@@ -1023,6 +1872,663 @@
                   ]
                 },
                 "description": "Removes the override; the tenant falls back to plan defaults. Returns tenant detail plus `cleared` (false when there was no override). `reason` optional (body or `?reason=`)."
+              },
+              "response": []
+            },
+            {
+              "name": "Remove comp (bill the tenant)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"no longer comped\", () => pm.expect(res.data.subscription.is_comp).to.eql(false));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"is_comp\": false,\n  \"reason\": \"Pilot ended\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/comp",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "comp"
+                  ]
+                },
+                "description": "`{ is_comp: boolean, reason }` — `reason` is **required** when comping (400 `REASON_REQUIRED`).\n\nThis flag records **who pays**; it doesn't move money:\n- Un-comping does **not** start a Stripe subscription. With none, you get a `NOT_BILLED` warning — nothing will charge the tenant automatically.\n- Comping does **not** cancel a live Stripe subscription (`STRIPE_STILL_BILLING` warning).\n\nComped tenants count as subscribers but add nothing to MRR. Response: tenant + `changed`.\n\n**Errors:** 409 `TENANT_DELETED`."
+              },
+              "response": []
+            },
+            {
+              "name": "Comp tenant",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"comped\", () => pm.expect(res.data.subscription.is_comp).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"is_comp\": true,\n  \"reason\": \"Community partner — free for FY27\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/comp",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "comp"
+                  ]
+                },
+                "description": "Marks the tenant free of charge. See *Remove comp* for what this does and doesn't do."
+              },
+              "response": []
+            },
+            {
+              "name": "Extend trial",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"trial end set\", () => pm.expect(res.data.subscription.trial_ends_at).to.be.a(\"string\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"extend_days\": 14,\n  \"reason\": \"Onboarding delayed by their board meeting\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/tenants/{{donexusTenantId}}/trial",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "tenants",
+                    "{{donexusTenantId}}",
+                    "trial"
+                  ]
+                },
+                "description": "Send **exactly one** of:\n- `extend_days` (1–365): added to the current `trial_ends_at`, or to **now** when there is no trial or it already passed.\n- `trial_ends_at`: an ISO date (not in the past), or `null` to clear the trial.\n\nPlus optional `reason`. Returns the tenant. **The trial is informational** — nothing locks the tenant when it ends."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Billing",
+          "description": "What Donexus bills its tenants: revenue summary, platform invoices (a mirror of the platform Stripe account, written by its webhook — read-only here), and discount coupons for the SaaS subscription checkout.\n\nDonexus has no credit-note / void / retry-payment endpoints: those are done in the Stripe dashboard, and the resulting invoice state flows back into *List invoices* through the webhook.",
+          "item": [
+            {
+              "name": "Billing summary",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"mrr is a number\", () => pm.expect(res.data.mrr).to.be.a(\"number\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/billing/summary",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "billing",
+                    "summary"
+                  ]
+                },
+                "description": "The console's *Billing* screen:\n\n`{ currency, mrr, arr, collected_lifetime, tenants_total, subscriptions_active, subscriptions_comped, subscriptions_past_due, paying_by_cycle: { monthly, yearly }, plans: [{ code, name, subscribers, paying_subscribers, mrr, list_price: { monthly, yearly } }], recent_signups: [{ id, name, slug, plan_code, subscription_status, owner, created_at }] }`\n\n**How MRR is calculated** (identical to the console, one shared implementation): active, non-comped tenants; yearly subscribers count as yearly price ÷ 12; a tenant with an override price counts at that price. Soft-deleted tenants are excluded. `collected_lifetime` = sum of paid platform invoices."
+              },
+              "response": []
+            },
+            {
+              "name": "List invoices",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data.length) { pm.collectionVariables.set(\"donexusInvoiceId\", res.data[0].id); }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/invoices",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "invoices"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "open",
+                      "disabled": true,
+                      "description": "Optional: draft | open | paid | failed | void | uncollectible"
+                    },
+                    {
+                      "key": "tenant_id",
+                      "value": "{{donexusTenantId}}",
+                      "disabled": true,
+                      "description": "Optional: one tenant (id)"
+                    },
+                    {
+                      "key": "search",
+                      "value": "harbour",
+                      "disabled": true,
+                      "description": "Optional: invoice number, Stripe invoice id, or tenant name/slug"
+                    },
+                    {
+                      "key": "from",
+                      "value": "2026-01-01",
+                      "disabled": true,
+                      "description": "Optional: created on/after"
+                    },
+                    {
+                      "key": "to",
+                      "value": "2026-12-31",
+                      "disabled": true,
+                      "description": "Optional: created on/before (date-only includes the whole day)"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "disabled": true,
+                      "description": "Default 50, max 200"
+                    }
+                  ]
+                },
+                "description": "Invoices across every tenant, newest first.\n\n**Paginated**: `meta: { page, limit, total, pages, totals }`, where `totals` covers the **whole filtered set**, not just the page: `{ currency, paid_amount, paid_count, outstanding_amount, outstanding_count }` (outstanding = open + failed + uncollectible).\n\n**Invoice object**: `id`, `number`, `status` (`draft` \\| `open` \\| `paid` \\| `failed` \\| `void` \\| `uncollectible`), `tenant_id`, `tenant: { id, name, slug }`, `currency`, `amount_due`, `amount_paid` (whole units), `period_start`, `period_end`, `paid_at`, `hosted_invoice_url` (Stripe's pay/view page), `invoice_pdf_url`, `stripe_invoice_id`, `stripe_subscription_id`, `created_at`."
+              },
+              "response": []
+            },
+            {
+              "name": "Get invoice",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (!pm.collectionVariables.get(\"donexusInvoiceId\")) { pm.collectionVariables.set(\"donexusInvoiceId\", \"000000000000000000000000\"); }"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 200/404\", () => pm.expect(pm.response.code).to.be.oneOf([200,404]));",
+                      "const res = pm.response.json();"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/invoices/{{donexusInvoiceId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "invoices",
+                    "{{donexusInvoiceId}}"
+                  ]
+                },
+                "description": "One invoice, by Donexus id **or** Stripe invoice id (`in_…`).\n\n**Invoice object**: `id`, `number`, `status` (`draft` \\| `open` \\| `paid` \\| `failed` \\| `void` \\| `uncollectible`), `tenant_id`, `tenant: { id, name, slug }`, `currency`, `amount_due`, `amount_paid` (whole units), `period_start`, `period_end`, `paid_at`, `hosted_invoice_url` (Stripe's pay/view page), `invoice_pdf_url`, `stripe_invoice_id`, `stripe_subscription_id`, `created_at`.\n\n**Errors:** 400 (neither form of id), 404 `INVOICE_NOT_FOUND` (accepted here: a fresh local database has no invoices)."
+              },
+              "response": []
+            },
+            {
+              "name": "List coupons",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "active",
+                      "disabled": true,
+                      "description": "Optional: active | archived | all (default all)"
+                    }
+                  ]
+                },
+                "description": "Every coupon, newest first. `times_redeemed` is refreshed from Stripe on each call. `meta: { total, stripe_enabled }`.\n\n**Coupon object**: `code`, `description`, `type` (`percent` \\| `amount`), `value` (1–100, or whole currency units), `currency`, `duration` (`once` \\| `forever` \\| `repeating`), `duration_in_months`, `plan_codes` (empty = every plan), `max_redemptions` (null = unlimited), `times_redeemed`, `redeem_by`, `status` (`active` \\| `archived`), `archived_at`, `stripe_synced`, `created_at`, `updated_at`."
+              },
+              "response": []
+            },
+            {
+              "name": "Create coupon",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.collectionVariables.set(\"donexusCouponCode\", \"HYPER\" + Date.now().toString(36).toUpperCase());"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"created\", () => pm.expect(res.data.code).to.eql(pm.collectionVariables.get(\"donexusCouponCode\")));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"{{donexusCouponCode}}\",\n  \"description\": \"Founding partner — 20% off for 6 months\",\n  \"type\": \"percent\",\n  \"value\": 20,\n  \"duration\": \"repeating\",\n  \"duration_in_months\": 6,\n  \"plan_codes\": [\n    \"{{donexusPlanCode}}\"\n  ],\n  \"max_redemptions\": 25,\n  \"redeem_by\": \"2027-06-30\",\n  \"reason\": \"Partner programme launch\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons"
+                  ]
+                },
+                "description": "201 with the coupon. Creates a Stripe Coupon + Promotion Code so customers can type `code` at checkout.\n\n| field | required | notes |\n|---|---|---|\n| `code` | yes | 3–40 chars, letters/digits/`-`/`_`; stored uppercase |\n| `type` | no | `percent` (default) \\| `amount` |\n| `value` | yes | percent 1–100; amount in whole units, max 2 dp |\n| `currency` | no | amount coupons must be in the platform currency (AUD) |\n| `duration` | no | `once` (default) \\| `forever` \\| `repeating` (+ `duration_in_months` 1–36) |\n| `plan_codes` | no | only these plans; every code must exist. Empty = all plans |\n| `max_redemptions` | no | ≥1, null = unlimited |\n| `redeem_by` | no | last day it can be used |\n| `description`, `reason` | no | |\n\nIf Stripe is down it still saves, with `stripe_synced: false` and a `STRIPE_NOT_SYNCED` warning (it won't work at checkout until synced).\n\n**Errors:** 400 `VALIDATION_ERROR` / `PLAN_NOT_FOUND` / `UNKNOWN_FIELD`, 409 `COUPON_CODE_TAKEN`."
+              },
+              "response": []
+            },
+            {
+              "name": "Get coupon",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons/{{donexusCouponCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons",
+                    "{{donexusCouponCode}}"
+                  ]
+                },
+                "description": "One coupon (code is case-insensitive).\n**Coupon object**: `code`, `description`, `type` (`percent` \\| `amount`), `value` (1–100, or whole currency units), `currency`, `duration` (`once` \\| `forever` \\| `repeating`), `duration_in_months`, `plan_codes` (empty = every plan), `max_redemptions` (null = unlimited), `times_redeemed`, `redeem_by`, `status` (`active` \\| `archived`), `archived_at`, `stripe_synced`, `created_at`, `updated_at`.\n\n**Errors:** 404 `COUPON_NOT_FOUND`."
+              },
+              "response": []
+            },
+            {
+              "name": "Update coupon (description / plans)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"description\": \"Founding partner — 20% off for 6 months (all plans)\",\n  \"plan_codes\": []\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons/{{donexusCouponCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons",
+                    "{{donexusCouponCode}}"
+                  ]
+                },
+                "description": "Only `description` and `plan_codes` can be edited: **Stripe coupons are immutable**, so the discount terms (`type`, `value`, `duration`, `max_redemptions`, `redeem_by`) are refused here as `UNKNOWN_FIELD` — use *Replace coupon*."
+              },
+              "response": []
+            },
+            {
+              "name": "Replace coupon (new terms)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 201/502\", () => pm.expect(pm.response.code).to.be.oneOf([201,502]));",
+                      "const res = pm.response.json();"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"{{donexusCouponCode}}\",\n  \"type\": \"percent\",\n  \"value\": 25,\n  \"duration\": \"once\",\n  \"reason\": \"Sweetened the offer\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons/{{donexusCouponCode}}/replace",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons",
+                    "{{donexusCouponCode}}",
+                    "replace"
+                  ]
+                },
+                "description": "Changes the discount terms by retiring the Stripe coupon and issuing a new one. Body = the full coupon (as *Create coupon*).\n- **Same `code`**: rewritten in place; `times_redeemed` restarts at 0.\n- **Different `code`**: the new coupon is created first, then the old one is archived.\n\nTenants who already redeemed the old coupon **keep their discount** (Stripe doesn't remove it from existing subscriptions). 201 with the new coupon + `replaced: { code, in_place, archived_code }`.\n\n**Errors:** 409 `COUPON_ARCHIVED` (restore it first), 409 `COUPON_CODE_TAKEN`."
+              },
+              "response": []
+            },
+            {
+              "name": "Archive coupon",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"archived\", () => pm.expect(res.data.status).to.eql(\"archived\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Offer closed\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons/{{donexusCouponCode}}/archive",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons",
+                    "{{donexusCouponCode}}",
+                    "archive"
+                  ]
+                },
+                "description": "Stops the code working at checkout (deletes the Stripe coupon). The record — and every discount already granted — is kept."
+              },
+              "response": []
+            },
+            {
+              "name": "Restore coupon",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is one of 200/400/502\", () => pm.expect(pm.response.code).to.be.oneOf([200,400,502]));",
+                      "const res = pm.response.json();"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Offer reopened\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons/{{donexusCouponCode}}/restore",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons",
+                    "{{donexusCouponCode}}",
+                    "restore"
+                  ]
+                },
+                "description": "Puts an archived coupon back into circulation by creating a fresh Stripe coupon with the same terms.\n\n**Errors:** 400 `COUPON_NOT_RESTORABLE` — the terms are no longer valid (expired, fully redeemed, or >100%); `details.hint` says to use *Replace coupon*. 409 `COUPON_ALREADY_ACTIVE`, 502 `STRIPE_UPDATE_FAILED`."
+              },
+              "response": []
+            },
+            {
+              "name": "Delete coupon",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/coupons/{{donexusCouponCode}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "coupons",
+                    "{{donexusCouponCode}}"
+                  ]
+                },
+                "description": "**Permanent**, and only for a coupon **nobody has redeemed** (checked live against Stripe) — for cleaning up typos. Once used, a coupon explains why a tenant pays what they pay, so it can only be archived: 409 `COUPON_REDEEMED`. Returns `{ code, deleted: true }`."
               },
               "response": []
             }
@@ -1646,6 +3152,801 @@
               "response": []
             }
           ]
+        },
+        {
+          "name": "Leads",
+          "description": "Donexus's **sales CRM**: charities that asked about the platform (the public *Get started* / *Talk to sales* forms) or that staff added by hand. The same pipeline as the Donexus console's *Leads* screen — every change is recorded in the lead's stage history and the audit log, attributed to `integration:<key> (<x-actor-email>)`.",
+          "item": [
+            {
+              "name": "List leads",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads"
+                  ],
+                  "query": [
+                    {
+                      "key": "stage",
+                      "value": "qualified",
+                      "disabled": true,
+                      "description": "Optional: new | contacted | qualified | demo_scheduled | proposal_sent | won | lost"
+                    },
+                    {
+                      "key": "assignee_id",
+                      "value": "unassigned",
+                      "disabled": true,
+                      "description": "Optional: an operator id (see Lead staff) or unassigned"
+                    },
+                    {
+                      "key": "priority",
+                      "value": "high",
+                      "disabled": true,
+                      "description": "Optional: low | normal | high"
+                    },
+                    {
+                      "key": "tag",
+                      "value": "conference",
+                      "disabled": true,
+                      "description": "Optional: exact tag"
+                    },
+                    {
+                      "key": "search",
+                      "value": "harbour",
+                      "disabled": true,
+                      "description": "Optional: org name, contact name/email, tags"
+                    },
+                    {
+                      "key": "sort",
+                      "value": "activity",
+                      "disabled": true,
+                      "description": "Optional: activity (default) | created | org | contact | stage | value | close"
+                    },
+                    {
+                      "key": "dir",
+                      "value": "desc",
+                      "disabled": true,
+                      "description": "Optional: asc | desc"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "disabled": true,
+                      "description": "Default 50, max 200"
+                    }
+                  ]
+                },
+                "description": "Pipeline table. **Paginated**: `meta: { page, limit, total, pages, sort: { key, dir }, new_count }` — `new_count` = unworked non-spam leads (badge).\n\n**Lead object** (list rows): `id`, `org_name`, `org_website`, `vertical` (`general` \\| `muslim`), `country`, `contact: { name, email, phone, role }`, `stage`, `priority` (`low` \\| `normal` \\| `high`), `tags[]`, `deal: { value, currency, expected_close_at }` (`value` = annual value), `interested_plan`, `interested_billing_cycle`, `source`, `assignee: { id, name, email, assigned_at } | null`, `lost: { reason, note, lost_at } | null`, `converted_tenant_id`, `flagged_spam`, `consent_to_contact`, `last_activity_at`, `created_at`, `updated_at`, and on lists `tasks: { open, overdue, next_due_at }` (CRM follow-ups).\n\n**Detail** adds: `message`, `cause_areas`, `staff_size`, `annual_budget_range`, `donor_database_size`, `current_tools`, `current_tools_other`, `challenges`, `challenges_other`, `timeline`, `decision_role`, `contacts[]` (other people at the org: `{ id, name, email, phone, role, note }`), `tracking: { utm, referrer_url, landing_page }`, `converted_tenant`, `conversion_mode`, `converted_at`, `activation: { sent_at, expires_at, opened_at } | null`, `stage_history[]: { from, to, by, note, at }`, `thread[]: { id, kind: note|reply, body, author, emailed_to, email_status, created_at }`.\n\n**Stages:** `new` → `contacted` → `qualified` → `demo_scheduled` → `proposal_sent` → `won` | `lost`. `won` is set **only** by *Convert lead*."
+              },
+              "response": []
+            },
+            {
+              "name": "Lead staff (assignable operators)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data.length) { pm.collectionVariables.set(\"donexusOperatorId\", res.data[0].id); }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/staff",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "staff"
+                  ]
+                },
+                "description": "Platform operators a lead can be assigned to: `[{ id, name, email }]`. Saves the first into `{{donexusOperatorId}}`. Leads are assigned to Calcite/Donexus staff — **not** to tenant admins."
+              },
+              "response": []
+            },
+            {
+              "name": "Create lead",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data && res.data.id !== undefined && res.data.id !== null) { pm.collectionVariables.set(\"donexusLeadId\", res.data.id); console.log(\"donexusLeadId =\", res.data.id); }",
+                      "pm.test(\"created\", () => pm.expect(res.data.org_name).to.eql(\"Riverbend Food Bank\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"org_name\": \"Riverbend Food Bank\",\n  \"org_website\": \"https://riverbend.example.org\",\n  \"country\": \"Australia\",\n  \"contact_name\": \"Priya Shah\",\n  \"contact_email\": \"priya.shah+{{donexusRunId}}@example.org\",\n  \"contact_role\": \"CEO\",\n  \"contacts\": [\n    {\n      \"name\": \"Tom Lee\",\n      \"role\": \"Treasurer\",\n      \"email\": \"tom.lee@example.org\"\n    }\n  ],\n  \"staff_size\": \"6-20\",\n  \"annual_budget_range\": \"250k_1m\",\n  \"interested_plan\": \"{{donexusPlanCode}}\",\n  \"interested_billing_cycle\": \"yearly\",\n  \"timeline\": \"this_quarter\",\n  \"priority\": \"high\",\n  \"tags\": [\n    \"conference-2026\",\n    \"food-relief\"\n  ],\n  \"deal_value\": 1788,\n  \"expected_close_at\": \"2026-12-15\",\n  \"stage\": \"qualified\",\n  \"assignee_id\": \"{{donexusOperatorId}}\",\n  \"message\": \"Met at the Sydney roadshow; wants recurring giving and events.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads"
+                  ]
+                },
+                "description": "Add a lead by hand. 201 with the lead detail. Saves `{{donexusLeadId}}`.\n\n| field | notes |\n|---|---|\n| `org_name`, `contact_name`, `contact_email` | required on create |\n| `org_website`, `country`, `contact_phone`, `contact_role`, `message` | text |\n| `vertical` | `general` \\| `muslim` |\n| `contacts` | list (≤20) of `{ name, email?, phone?, role?, note? }` — **replaces** the list |\n| `cause_areas`, `current_tools`, `challenges`, `tags` | string lists (tags ≤20, ≤40 chars) — replaced |\n| `current_tools_other`, `challenges_other` | text |\n| `staff_size` | `1-5` \\| `6-20` \\| `21-50` \\| `51-200` \\| `200+` |\n| `annual_budget_range` | `under_50k` \\| `50k_250k` \\| `250k_1m` \\| `1m_5m` \\| `5m_plus` |\n| `donor_database_size` | `under_500` \\| `500_2500` \\| `2500_10000` \\| `10000_plus` \\| `unsure` |\n| `timeline` | `immediately` \\| `this_month` \\| `this_quarter` \\| `this_year` \\| `just_researching` |\n| `decision_role` | `decision_maker` \\| `influencer` \\| `researching_for_others` |\n| `interested_plan`, `interested_billing_cycle` (`monthly` \\| `yearly`) | |\n| `priority` | `low` \\| `normal` \\| `high` |\n| `deal_value` | annual value, ≥0 |\n| `expected_close_at` | ISO date, or null |\n\nEnum fields accept `\"\"`/`null` to clear. Validation errors name the wire field in `error.details.field`.\n\nCreate-only: `stage` (any open stage, default `new`), `source` (`superadmin_manual` default \\| `referral` \\| `contact_page` \\| `other`), `assignee_id` (operator id; `\"\"`/null = unassigned), `consent_to_contact` (boolean — records that the person agreed to be emailed).\n\n**Errors:** 400 `VALIDATION_ERROR` / `UNKNOWN_FIELD` / `INVALID_ASSIGNEE`."
+              },
+              "response": []
+            },
+            {
+              "name": "Get lead",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}"
+                  ]
+                },
+                "description": "Full lead with thread, stage history, contacts and conversion.\n**Lead object** (list rows): `id`, `org_name`, `org_website`, `vertical` (`general` \\| `muslim`), `country`, `contact: { name, email, phone, role }`, `stage`, `priority` (`low` \\| `normal` \\| `high`), `tags[]`, `deal: { value, currency, expected_close_at }` (`value` = annual value), `interested_plan`, `interested_billing_cycle`, `source`, `assignee: { id, name, email, assigned_at } | null`, `lost: { reason, note, lost_at } | null`, `converted_tenant_id`, `flagged_spam`, `consent_to_contact`, `last_activity_at`, `created_at`, `updated_at`, and on lists `tasks: { open, overdue, next_due_at }` (CRM follow-ups).\n\n**Detail** adds: `message`, `cause_areas`, `staff_size`, `annual_budget_range`, `donor_database_size`, `current_tools`, `current_tools_other`, `challenges`, `challenges_other`, `timeline`, `decision_role`, `contacts[]` (other people at the org: `{ id, name, email, phone, role, note }`), `tracking: { utm, referrer_url, landing_page }`, `converted_tenant`, `conversion_mode`, `converted_at`, `activation: { sent_at, expires_at, opened_at } | null`, `stage_history[]: { from, to, by, note, at }`, `thread[]: { id, kind: note|reply, body, author, emailed_to, email_status, created_at }`.\n\n**Stages:** `new` → `contacted` → `qualified` → `demo_scheduled` → `proposal_sent` → `won` | `lost`. `won` is set **only** by *Convert lead*.\n\n**Errors:** 400 (malformed id), 404 `LEAD_NOT_FOUND`."
+              },
+              "response": []
+            },
+            {
+              "name": "Update lead",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"deal updated\", () => pm.expect(res.data.deal.value).to.eql(2400));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"deal_value\": 2400,\n  \"expected_close_at\": \"2027-01-31\",\n  \"priority\": \"normal\",\n  \"tags\": [\n    \"conference-2026\"\n  ],\n  \"timeline\": \"this_month\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}"
+                  ]
+                },
+                "description": "Edit intake and deal fields. **Only the fields you send change**; lists you send replace the stored list.\n\n| field | notes |\n|---|---|\n| `org_name`, `contact_name`, `contact_email` | required on create |\n| `org_website`, `country`, `contact_phone`, `contact_role`, `message` | text |\n| `vertical` | `general` \\| `muslim` |\n| `contacts` | list (≤20) of `{ name, email?, phone?, role?, note? }` — **replaces** the list |\n| `cause_areas`, `current_tools`, `challenges`, `tags` | string lists (tags ≤20, ≤40 chars) — replaced |\n| `current_tools_other`, `challenges_other` | text |\n| `staff_size` | `1-5` \\| `6-20` \\| `21-50` \\| `51-200` \\| `200+` |\n| `annual_budget_range` | `under_50k` \\| `50k_250k` \\| `250k_1m` \\| `1m_5m` \\| `5m_plus` |\n| `donor_database_size` | `under_500` \\| `500_2500` \\| `2500_10000` \\| `10000_plus` \\| `unsure` |\n| `timeline` | `immediately` \\| `this_month` \\| `this_quarter` \\| `this_year` \\| `just_researching` |\n| `decision_role` | `decision_maker` \\| `influencer` \\| `researching_for_others` |\n| `interested_plan`, `interested_billing_cycle` (`monthly` \\| `yearly`) | |\n| `priority` | `low` \\| `normal` \\| `high` |\n| `deal_value` | annual value, ≥0 |\n| `expected_close_at` | ISO date, or null |\n\nEnum fields accept `\"\"`/`null` to clear. Validation errors name the wire field in `error.details.field`.\n\n`stage` and `assignee_id` are refused here (`UNKNOWN_FIELD`) — use *Move lead stage* / *Assign lead*."
+              },
+              "response": []
+            },
+            {
+              "name": "Add internal note",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"kind\": \"note\",\n  \"body\": \"Board approves budget on the 20th — follow up the next day.\",\n  \"author_name\": \"Hyper Sales\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}/messages",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}",
+                    "messages"
+                  ]
+                },
+                "description": "`{ kind: \"note\" | \"reply\", body, author_name? }`. A **note** is internal (never emailed). Returns the lead detail + `email_status` (null for a note). Moves a `new` lead to `contacted`."
+              },
+              "response": []
+            },
+            {
+              "name": "Reply to contact (emails them)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"kind\": \"reply\",\n  \"body\": \"Hi Priya — lovely to meet you in Sydney. I've attached the pricing we discussed.\",\n  \"author_name\": \"Alex from Calcite\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}/messages",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}",
+                    "messages"
+                  ]
+                },
+                "description": "A **reply is emailed** to the lead's `contact.email`, signed with `author_name` (**required** for a reply — it's what the customer sees). `email_status`: `sent` \\| `failed` (with an `EMAIL_SEND_FAILED` warning; the reply is still saved on the thread)."
+              },
+              "response": []
+            },
+            {
+              "name": "Move lead stage",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"moved\", () => pm.expect(res.data.stage).to.eql(\"proposal_sent\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"stage\": \"proposal_sent\",\n  \"note\": \"Sent 3-year proposal\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}/stage",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}",
+                    "stage"
+                  ]
+                },
+                "description": "`{ stage, note? }` for any open stage; `{ stage: \"lost\", lost_reason, lost_reason_note? }` to close it lost.\n- `lost_reason`: `budget` \\| `timing` \\| `chose_competitor` \\| `no_response` \\| `not_a_fit` \\| `spam` \\| `other` (required for lost).\n- `won` → 409 `LEAD_WON_REQUIRES_CONVERT`: a lead is won only by creating its tenant (*Convert lead*).\n- A closed lead (won/lost) can't move → 409 `LEAD_CLOSED`."
+              },
+              "response": []
+            },
+            {
+              "name": "Assign lead",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"assignee_id\": \"{{donexusOperatorId}}\",\n  \"reason\": \"Owner of the NSW territory\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}/assign",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}",
+                    "assign"
+                  ]
+                },
+                "description": "`{ assignee_id }` — an operator id from *Lead staff*; `null` (or `\"\"`) unassigns. **Errors:** 400 `INVALID_ASSIGNEE` (not a platform operator)."
+              },
+              "response": []
+            },
+            {
+              "name": "Convert lead (create tenant, comped)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"won with a tenant\", () => { pm.expect(res.data.lead.stage).to.eql(\"won\"); pm.expect(res.data.tenant.id).to.be.a(\"string\"); });"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"mode\": \"manual_provision\",\n  \"billing_mode\": \"comp\",\n  \"org_name\": \"Riverbend Food Bank\",\n  \"slug\": \"riverbend-{{donexusRunId}}\",\n  \"plan_code\": \"{{donexusPlanCode}}\",\n  \"billing_cycle\": \"yearly\",\n  \"comp_reason\": \"Launch partner\",\n  \"reason\": \"Signed 3-year agreement\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLeadId}}/convert",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLeadId}}",
+                    "convert"
+                  ]
+                },
+                "description": "Turns the lead into a charity on Donexus. Fields you omit fall back to the lead's own answers (`org_name`, `admin_name` ← contact name, `admin_email` ← contact email, `plan_code` ← interested plan, `billing_cycle`, `is_muslim_charity` ← vertical).\n\n| `mode` / `billing_mode` | what happens | lead |\n|---|---|---|\n| `manual_provision` + `comp` (default) | tenant + owner created **now**, comped; the owner is emailed a set-your-password link. **201** | `won` |\n| `manual_provision` + `send_link` | tenant + Stripe subscription created **pending**; the contact is emailed a link to pay. Goes live when paid | stays open until paid |\n| `activation_link` | nothing created; the contact is emailed a pre-filled self-serve signup link (valid 14 days) | `contacted`, won when they finish |\n| `manual_provision` + `charge_now` | **not available to API keys** (needs a card entered in a browser) → 400 `CHARGE_NOW_UNSUPPORTED` | |\n\nOther fields: `admin_name`, `admin_email`, `slug`, `is_muslim_charity`, `is_comp`, `comp_reason`, `trial_ends_at`, `coupon_code`, `reason`.\n\nResponse: `{ outcome: converted | payment_link_sent | activation_link_sent, lead, tenant: { id, name, slug } | null, link, email_status }`. `link` is the emailed link, so staff can share it if the email failed (`EMAIL_SEND_FAILED` warning).\n\n**Errors:** 409 `LEAD_CLOSED`, 400 `VALIDATION_ERROR` (e.g. the admin email already has an account, slug taken), `CONVERSION_FAILED`."
+              },
+              "response": []
+            },
+            {
+              "name": "Lead board",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/board",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "board"
+                  ]
+                },
+                "description": "Every lead grouped by stage for a kanban view: `{ stages: [...], columns: { new: [lead], contacted: [...], … } }`. Rows as *List leads*. Capped at the 1000 most recently updated."
+              },
+              "response": []
+            },
+            {
+              "name": "Create lead to discard",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "if (res.data && res.data.id !== undefined && res.data.id !== null) { pm.collectionVariables.set(\"donexusLostLeadId\", res.data.id); console.log(\"donexusLostLeadId =\", res.data.id); }"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"org_name\": \"Duplicate Enquiry Pty\",\n  \"contact_name\": \"Sam Doe\",\n  \"contact_email\": \"sam.doe+{{donexusRunId}}@example.org\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads"
+                  ]
+                },
+                "description": "A second lead so the lost/delete requests below have something to act on. Saves `{{donexusLostLeadId}}`."
+              },
+              "response": []
+            },
+            {
+              "name": "Mark lead lost",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"lost\", () => pm.expect(res.data.lost.reason).to.eql(\"spam\"));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"stage\": \"lost\",\n  \"lost_reason\": \"spam\",\n  \"lost_reason_note\": \"Duplicate of an existing enquiry\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLostLeadId}}/stage",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLostLeadId}}",
+                    "stage"
+                  ]
+                },
+                "description": "Closes the lead as lost. See *Move lead stage* for reasons."
+              },
+              "response": []
+            },
+            {
+              "name": "Delete lead",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/leads/{{donexusLostLeadId}}",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "leads",
+                    "{{donexusLostLeadId}}"
+                  ]
+                },
+                "description": "**Permanent** (the audit log keeps a `lead.deleted` event with the org name and contact email). Prefer *Mark lead lost* for real enquiries. Returns `{ id, deleted: true }`."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Platform",
+          "description": "Platform-wide views for a Hyper overview screen.",
+          "item": [
+            {
+              "name": "Dashboard",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"12 months of signups\", () => pm.expect(res.data.growth.signups_by_month.length).to.eql(12));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/dashboard",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "dashboard"
+                  ]
+                },
+                "description": "The console dashboard: everything in *Billing summary* plus\n- `growth: { new_tenants_this_month, growth_pct_vs_last_month, signups_by_month: [{ month, year, count }] }` (last 12 months, zero-filled)\n- `footprint: { donations_total, donations_count, users, programs, events, p2p_campaigns }` across every tenant."
+              },
+              "response": []
+            },
+            {
+              "name": "Audit log",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"status is 2xx\", () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                      "const res = pm.response.json();",
+                      "pm.test(\"success envelope\", () => pm.expect(res.success).to.eql(true));",
+                      "pm.test(\"has entries\", () => pm.expect(res.meta.total).to.be.above(0));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{donexus_base_url}}/integration/audit",
+                  "host": [
+                    "{{donexus_base_url}}"
+                  ],
+                  "path": [
+                    "integration",
+                    "audit"
+                  ],
+                  "query": [
+                    {
+                      "key": "tenant_id",
+                      "value": "{{donexusTenantId}}",
+                      "disabled": true,
+                      "description": "Optional: one tenant"
+                    },
+                    {
+                      "key": "action",
+                      "value": "org.suspended",
+                      "disabled": true,
+                      "description": "Optional: exact action, e.g. plan.updated, lead.converted, tenant_admin.mfa_reset"
+                    },
+                    {
+                      "key": "actor",
+                      "value": "integration:hyper",
+                      "disabled": true,
+                      "description": "Optional: substring of the actor label (operator email or integration:<key>)"
+                    },
+                    {
+                      "key": "target_type",
+                      "value": "plan",
+                      "disabled": true,
+                      "description": "Optional: organisation | plan | coupon | lead | user | ticket"
+                    },
+                    {
+                      "key": "target_id",
+                      "value": "{{donexusPlanCode}}",
+                      "disabled": true,
+                      "description": "Optional"
+                    },
+                    {
+                      "key": "from",
+                      "value": "2026-01-01",
+                      "disabled": true,
+                      "description": "Optional"
+                    },
+                    {
+                      "key": "to",
+                      "value": "2026-12-31",
+                      "disabled": true,
+                      "description": "Optional (date-only includes the whole day)"
+                    },
+                    {
+                      "key": "search",
+                      "value": "suspend",
+                      "disabled": true,
+                      "description": "Optional: action, actor, target or tenant name"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "disabled": true,
+                      "description": "Default 1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "100",
+                      "disabled": true,
+                      "description": "Default 100, max 500"
+                    }
+                  ]
+                },
+                "description": "Every platform-operator action, newest first — from the Donexus console and from this API. Paginated (`meta: { page, limit, total, pages }`).\n\n**Entry**: `{ id, action, actor, actor_id, tenant_id, tenant: { id, name, slug } | null, target_type, target_id, at, meta }`. `actor` is the operator's email, or `integration:<key name> (<x-actor-email>)` for API calls. `meta` holds the action's details (diffs, `reason`, Stripe outcome, …). IP and user agent are not exposed."
+              },
+              "response": []
+            }
+          ]
         }
       ]
     }
@@ -1680,6 +3981,31 @@
       "key": "donexusRunId",
       "value": "",
       "description": "Per-run suffix for unique names/emails (set by Create tenant)"
+    },
+    {
+      "key": "donexusInvoiceId",
+      "value": "",
+      "description": "Donexus platform invoice id (set by List invoices when any exist)"
+    },
+    {
+      "key": "donexusCouponCode",
+      "value": "",
+      "description": "Donexus coupon code (set by Create coupon)"
+    },
+    {
+      "key": "donexusOperatorId",
+      "value": "",
+      "description": "A Donexus platform operator id to assign leads to (set by Lead staff)"
+    },
+    {
+      "key": "donexusLeadId",
+      "value": "",
+      "description": "Donexus lead id (set by Create lead)"
+    },
+    {
+      "key": "donexusLostLeadId",
+      "value": "",
+      "description": "A second Donexus lead, marked lost then deleted (set by Create lead to discard)"
     }
   ]
 }

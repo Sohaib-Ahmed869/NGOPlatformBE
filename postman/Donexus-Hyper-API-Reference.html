@@ -1,0 +1,1737 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Donexus — Integration API Reference</title>
+<style>
+@page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+* { box-sizing: border-box; }
+body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #1f2328; font-size: 10pt; line-height: 1.45; margin: 0; }
+code, pre, .path { font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; }
+code { background: #eef1f4; border-radius: 3px; padding: 0 3px; font-size: 8.6pt; }
+.cover { height: 250mm; display: flex; flex-direction: column; justify-content: center; page-break-after: always; }
+.cover h1 { font-size: 34pt; margin: 0 0 6px; letter-spacing: -0.5px; }
+.cover .sub { font-size: 15pt; color: #57606a; margin: 0 0 22px; }
+.cover hr { border: 0; border-top: 1px solid #d0d7de; margin: 0 0 18px; }
+.cover p { margin: 4px 0; color: #57606a; }
+.cover p b { color: #1f2328; }
+h2 { font-size: 20pt; margin: 0 0 14px; padding-bottom: 6px; border-bottom: 3px solid #1f2328; page-break-before: always; page-break-after: avoid; }
+h2 small { font-size: 11pt; color: #6e7781; font-weight: normal; margin-left: 6px; }
+h3 { font-size: 11pt; letter-spacing: 1px; text-transform: uppercase; color: #424a53; margin: 22px 0 10px; page-break-after: avoid; }
+p { margin: 6px 0; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 9pt; page-break-inside: auto; }
+th { background: #f3f5f7; text-align: left; padding: 7px 8px; border-bottom: 1px solid #d0d7de; }
+td { padding: 7px 8px; border-bottom: 1px solid #e4e8ec; vertical-align: top; }
+tr { page-break-inside: avoid; }
+.card { border: 1px solid #d8dee4; border-radius: 6px; padding: 10px 14px 12px; margin: 0 0 12px; page-break-inside: avoid; }
+.card.long { page-break-inside: auto; }
+.head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.badge { color: #fff; font-weight: bold; font-size: 7.5pt; padding: 2px 7px; border-radius: 3px; font-family: Menlo, Consolas, monospace; letter-spacing: .5px; }
+.get { background: #1a7f37; } .post { background: #1d4ed8; } .patch { background: #7c3aed; } .put { background: #9a3412; } .delete { background: #b91c1c; }
+.path { font-weight: bold; font-size: 11pt; }
+.desc { color: #424a53; margin: 4px 0 6px; }
+.label { font-size: 8pt; font-weight: bold; letter-spacing: 1px; text-transform: uppercase; color: #6e7781; margin: 8px 0 4px; }
+.st.ok { color: #1a7f37; } .st.err { color: #b91c1c; }
+pre.code { margin: 0 0 6px; padding: 9px 12px; border-radius: 4px; font-size: 7.9pt; line-height: 1.35; white-space: pre-wrap; word-break: break-all; }
+pre.req { background: #f1f5fb; border-left: 3px solid #1d4ed8; }
+pre.res { background: #f4f6f4; border-left: 3px solid #1a7f37; }
+pre.res.bad { border-left-color: #b91c1c; }
+pre.cfg { background: #f1f5fb; border-left: 3px solid #1d4ed8; font-size: 8.5pt; }
+.trunc { color: #6e7781; }
+.note { border-radius: 5px; padding: 10px 14px; margin: 10px 0 14px; page-break-inside: avoid; }
+.note.blue { background: #f1f5fb; border-left: 4px solid #1d4ed8; }
+.note.amber { background: #fff8e6; border-left: 4px solid #b45309; }
+.note b.t { color: #1f2328; }
+.gotcha { border-radius: 5px; padding: 10px 14px; margin: 0 0 10px; background: #fff8e6; border-left: 4px solid #b45309; page-break-inside: avoid; }
+.gotcha.info { background: #f1f5fb; border-left-color: #1d4ed8; }
+.gotcha b.n { color: #b45309; margin-right: 6px; }
+.gotcha.info b.n { color: #1d4ed8; }
+.gotcha b.h { color: #92400e; }
+.gotcha.info b.h { color: #1e3a8a; }
+</style></head><body>
+
+<section class="cover">
+  <h1>Donexus — Integration API</h1>
+  <p class="sub">Server-to-server reference for Calcite Hyper</p>
+  <hr>
+  <p><b>Version</b> 1.1 · 17 September 2026</p>
+  <p><b>Donexus</b> 66 endpoints · charity fundraising platform</p>
+  <p><b>Auth</b> API key, <code>x-api-key</code> header</p>
+  <p><b>Samples</b> captured from live responses against a local server; personal data masked</p>
+  <p><b>Companion files</b> <code>Donexus.postman_collection.json</code>, <code>README.md</code></p>
+</section>
+
+<h2>1 &nbsp;Overview</h2>
+<p>Donexus exposes the same operator capabilities as its SuperAdmin console to Calcite Hyper: tenants and their admin accounts, plans and features, subscriptions and overrides, billing, support tickets, the leads CRM, the dashboard and the audit log. The console and this API call the same service code, so they cannot disagree. Every request authenticates with a static server-to-server API key sent as <code>x-api-key</code>, compared as a SHA-256 digest in constant time. JWTs are not accepted on these routes.</p>
+<table><thead><tr><th>System</th><th>Base URL</th><th>Key</th><th>Scope</th></tr></thead><tbody><tr><td><b>Donexus</b><br><span style='color:#6e7781'>Charity fundraising</span></td><td><code>https://ngoplatformbe.onrender.com/api</code><br><span style="color:#6e7781">local: <code>http://localhost:5000/api</code></span></td><td><code>dnx_live_…</code></td><td>Multi-tenant, one database. Tenant routes address a tenant by <code>:id</code> — the tenant id <b>or</b> its slug.</td></tr></tbody></table>
+<p style="color:#6e7781;font-size:8.8pt">Every path below is relative to the base URL, e.g. <code>GET {base}/integration/ping</code>. Confirm the production base URL with the Donexus team before go-live.</p>
+
+<h3>Configuration</h3>
+<p>Keys are read from <code>INTEGRATION_API_KEYS</code> — comma-separated <code>name:key</code> pairs; the name is an audit label only and is never secret:</p>
+<pre class="code cfg">INTEGRATION_API_KEYS=hyper:dnx_live_xxxxx,hyper-old:dnx_live_yyyyy</pre>
+<p>Changing it needs a redeploy. Two pairs at once make rotation zero-downtime. A pair whose key is shorter than 24 characters is <b>ignored</b> (with a warning), so <code>hyper:test</code> never works. If no valid pair is configured, every integration route returns <code>503 INTEGRATION_DISABLED</code> — a configuration fault, not an auth failure. Generate a key with:</p>
+<pre class="code cfg">node -e "console.log('dnx_live_' + require('crypto').randomBytes(32).toString('base64url'))"</pre>
+
+<h3>Authentication responses</h3>
+<table><thead><tr><th>Condition</th><th>Status</th><th>Body</th></tr></thead><tbody><tr><td>Valid key</td><td>2xx</td><td>The endpoint's payload</td></tr><tr><td>Header missing</td><td>401</td><td><code>API_KEY_MISSING</code></td></tr><tr><td>Key not recognised</td><td>401</td><td><code>API_KEY_INVALID</code></td></tr><tr><td>Malformed x-actor-email</td><td>400</td><td><code>INVALID_ACTOR_EMAIL</code></td></tr><tr><td>No keys configured</td><td>503</td><td><code>INTEGRATION_DISABLED</code></td></tr></tbody></table>
+
+<h3>Actor attribution</h3>
+<p>Send the optional <code>x-actor-email: person@calcite.live</code> header with the staff member behind the click. It grants nothing; it names them in the Donexus audit log, where every write through this API is recorded as <code>integration:hyper (person@calcite.live)</code> (or <code>integration:hyper</code> without the header), with <code>meta.reason</code> when a <code>reason</code> is sent.</p>
+
+<h3>Response envelope</h3>
+<p>Everything is wrapped: <code>{ "success": true, "data": …, "meta"?: {…}, "warnings"?: [{ "code", "message" }] }</code>, and on failure <code>{ "success": false, "error": { "code", "message", "details"? } }</code>. Branch on <code>error.code</code>, not the message. <b>Warnings</b> are non-fatal facts on a successful write (for example <code>STRIPE_CANCEL_FAILED</code>, <code>NOT_BILLED</code>) — show them to staff.</p>
+
+<h3>Conventions</h3>
+<table><thead><tr><th></th><th></th></tr></thead><tbody><tr><td>Field names</td><td>snake_case. Keys inside <code>limits</code> and <code>feature_flags</code> are catalogue codes and pass through verbatim (<code>eventsQuota</code>, <code>adminSeats</code>).</td></tr><tr><td>Unknown fields</td><td>Refused with <code>400 UNKNOWN_FIELD</code> — <code>featureFlags</code> instead of <code>feature_flags</code> fails loudly instead of silently changing nothing.</td></tr><tr><td>Dates</td><td>ISO 8601 UTC, or <code>null</code>. Date-only <code>to</code> filters include the whole day.</td></tr><tr><td>Money</td><td>Numbers in whole currency units next to a <code>currency</code> (platform-wide <code>AUD</code>).</td></tr><tr><td>Billing cycle</td><td><code>monthly</code> | <code>yearly</code> (<code>annual</code> also accepted as input).</td></tr><tr><td>Pagination</td><td><code>?page=&amp;limit=</code> → <code>meta: { page, limit, total, pages }</code> on tenants (100/500), tickets, leads, invoices (50/200) and audit (100/500). Plans, coupons, admins and the feature matrix return everything.</td></tr><tr><td>Caching</td><td>Every response is <code>Cache-Control: no-store</code>; reads are live.</td></tr></tbody></table>
+
+<div class="note blue"><b class="t">Privilege model.</b> The integration key carries full platform-operator access to tenant, plan, billing, support and CRM operations — the same actions as a SuperAdmin console owner, applied immediately with no approval step, and every write is audited. Three things stay in the console: <b>impersonation</b> (<code>act-as</code> is refused), <b>platform operators and platform settings</b> (Team, Stripe/email configuration, email templates), and <b>taking a card</b> during lead conversion.</div>
+
+<h2>2 &nbsp;Donexus <small>66 endpoints</small></h2>
+<h3>Health</h3>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/ping</span></div>
+  <p class="desc">Confirms the key works. Returns the key's audit name and the forwarded actor.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "service": "donexus",
+    "key": "hyper",
+    "actor": "s***@calcite.live",
+    "time": "2026-09-17T05:31:13.910Z"
+  }
+}</pre>
+</div><h3>Tenants</h3>
+<div class="card long">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants</span></div>
+  <p class="desc">Provision an organisation and its owner. Comped by default; no Stripe subscription. A generated password is returned <strong>once</strong>.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "organization_name": "Hope Street Foundation",
+  "email": "o***@hopestreet.example",
+  "first_name": "Jordan",
+  "last_name": "Lee",
+  "plan_code": "growth",
+  "billing_cycle": "yearly",
+  "trial_days": 30,
+  "is_comp": true,
+  "comp_reason": "Pilot partner",
+  "send_welcome_email": false,
+  "reason": "Signed at the Sydney roadshow"
+}</pre>
+  <div class="label">Response <span class="st ok">201</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "id": "6aab7b2a8083244e82a5ead0",
+    "name": "Hope Street Foundation",
+    "slug": "hope-street-foundation",
+    "status": "active",
+    "portal_url": "http://hope-street-foundation.localhost:5173",
+    "contact_email": "o***@hopestreet.example",
+    "is_muslim_charity": false,
+    "owner": {
+      "id": "6aab7b2a8083244e82a5ead2",
+      "name": "Jordan Lee",
+      "email": "o***@hopestreet.example"
+    },
+    "has_override": false,
+    "subscription": {
+      "plan_code": "growth",
+      "plan_name": "Growth",
+      "plan_status": "active",
+      "billing_cycle": "yearly",
+      "status": "active",
+      "billing": "comp",
+      "is_comp": true,
+      "comp_reason": "Pilot partner",
+      "trial_ends_at": "2026-10-17T05:31:22.557Z",
+      "current_period": null,
+      "last_paid_period": null,
+      "price": {
+        "currency": "AUD",
+        "amount": 1390,
+        "source": "plan"
+      }
+    },
+    "created_at": "2026-09-17T05:31:22.568Z",
+    "updated_at": "2026-09-17T05:31:22.633Z",
+    "deleted_at": null,
+    "override": null,
+    "entitlements": {
+      "feature_flags": {
+        "donations": true,
+        "recurringGiving": true,
+        "programs": false,
+        "p2pCampaigns": false,
+        "store": false,
+        "events": true,
+        "volunteers": false,
+        "newsletter": true,
+        "contacts": true,
+        "supportTickets": false,
+        "partners": false,
+        "cmsPages": true,
+        "initiatives": false,
+        "sectionBuilder": false,
+        "designSystem": false,
+        "islamicGiving": false,
+        "ownStripe": true,
+        "paypal": true,
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants</span></div>
+  <p class="desc">Every tenant with its subscription inline. Optional <code>?status=active|suspended|pending|deleted|all&amp;plan_code=&amp;search=&amp;page=&amp;limit=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b2a8083244e82a5ead0",
+      "name": "Hope Street Foundation",
+      "slug": "hope-street-foundation",
+      "status": "active",
+      "portal_url": "http://hope-street-foundation.localhost:5173",
+      "contact_email": "o***@hopestreet.example",
+      "is_muslim_charity": false,
+      "owner": {
+        "id": "6aab7b2a8083244e82a5ead2",
+        "name": "Jordan Lee",
+        "email": "o***@hopestreet.example"
+      },
+      "has_override": false,
+      "subscription": {
+        "plan_code": "growth",
+        "plan_name": "Growth",
+        "plan_status": "active",
+        "billing_cycle": "yearly",
+        "status": "active",
+        "billing": "comp",
+        "is_comp": true,
+        "comp_reason": "Pilot partner",
+        "trial_ends_at": "2026-10-17T05:31:22.557Z",
+        "current_period": null,
+        "last_paid_period": null,
+        "price": {
+          "currency": "AUD",
+          "amount": 1390,
+          "source": "plan"
+        }
+      },
+      "created_at": "2026-09-17T05:31:22.568Z",
+      "updated_at": "2026-09-17T05:31:22.633Z",
+      "deleted_at": null
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 100,
+    "total": 1,
+    "pages": 1
+  }
+}</pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id</span></div>
+  <p class="desc">One tenant: subscription, override, effective entitlements, usage and stats, recent audit events and invoices. <code>:id</code> is the id or slug.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "id": "6aab7b2a8083244e82a5ead0",
+    "name": "Hope Street Foundation",
+    "slug": "hope-street-foundation",
+    "status": "active",
+    "portal_url": "http://hope-street-foundation.localhost:5173",
+    "contact_email": "o***@hopestreet.example",
+    "is_muslim_charity": false,
+    "owner": {
+      "id": "6aab7b2a8083244e82a5ead2",
+      "name": "Jordan Lee",
+      "email": "o***@hopestreet.example"
+    },
+    "has_override": false,
+    "subscription": {
+      "plan_code": "growth",
+      "plan_name": "Growth",
+      "plan_status": "active",
+      "billing_cycle": "yearly",
+      "status": "active",
+      "billing": "comp",
+      "is_comp": true,
+      "comp_reason": "Pilot partner",
+      "trial_ends_at": "2026-10-17T05:31:22.557Z",
+      "current_period": null,
+      "last_paid_period": null,
+      "price": {
+        "currency": "AUD",
+        "amount": 1390,
+        "source": "plan"
+      }
+    },
+    "created_at": "2026-09-17T05:31:22.568Z",
+    "updated_at": "2026-09-17T05:31:22.633Z",
+    "deleted_at": null,
+    "override": null,
+    "entitlements": {
+      "feature_flags": {
+        "donations": true,
+        "recurringGiving": true,
+        "programs": false,
+        "p2pCampaigns": false,
+        "store": false,
+        "events": true,
+        "volunteers": false,
+        "newsletter": true,
+        "contacts": true,
+        "supportTickets": false,
+        "partners": false,
+        "cmsPages": true,
+        "initiatives": false,
+        "sectionBuilder": false,
+        "designSystem": false,
+        "islamicGiving": false,
+        "ownStripe": true,
+        "paypal": true,
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/tenants/:id</span></div>
+  <p class="desc">Rename, or change status. Suspend locks the portal and sign-ins, revokes sessions and cancels any Stripe subscription; reactivating doesn't restart billing (<code>BILLING_NOT_RESTARTED</code> warning).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "name": "Hope Street Foundation Ltd",
+  "reason": "Legal name change"
+}</pre><pre class="code req">{
+  "status": "suspended",
+  "reason": "Payment overdue"
+}</pre><pre class="code req">{
+  "status": "active",
+  "reason": "Paid in full"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge delete">DELETE</span><span class="path">/integration/tenants/:id</span></div>
+  <p class="desc">Soft delete: status → deleted, data kept, Stripe subscription cancelled. PATCH status active restores.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "reason": "Customer offboarded"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/invoices</span></div>
+  <p class="desc">This tenant's platform invoices. Optional <code>?status=&amp;from=&amp;to=&amp;page=&amp;limit=</code>.</p>
+  
+  
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/audit</span></div>
+  <p class="desc">Every operator action on this tenant — console and API. Optional <code>?action=&amp;from=&amp;to=&amp;search=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b2a8083244e82a5eb1a",
+      "action": "org.restored",
+      "actor": "integration:hyper (s***@calcite.live)",
+      "actor_id": null,
+      "tenant_id": "6aab7b2a8083244e82a5ead0",
+      "tenant": {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation"
+      },
+      "target_type": "organisation",
+      "target_id": "6aab7b2a8083244e82a5ead0",
+      "at": "2026-09-17T05:31:22.853Z",
+      "meta": {
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation",
+        "reason": "",
+        "from": "deleted",
+        "to": "active",
+        "via": "integration",
+        "integrationKey": "hyper",
+        "actorEmail": "s***@calcite.live"
+      }
+    },
+    {
+      "id": "6aab7b2a8083244e82a5eb12",
+      "action": "org.deleted",
+      "actor": "integration:hyper (s***@calcite.live)",
+      "actor_id": null,
+      "tenant_id": "6aab7b2a8083244e82a5ead0",
+      "tenant": {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation"
+      },
+      "target_type": "organisation",
+      "target_id": "6aab7b2a8083244e82a5ead0",
+      "at": "2026-09-17T05:31:22.831Z",
+      "meta": {
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation",
+        "reason": "Customer offboarded",
+        "stripe": "none",
+        "sessionsRevoked": 1,
+        "via": "integration",
+        "integrationKey": "hyper",
+        "actorEmail": "s***@calcite.live"
+      }
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 100,
+    "total": 6,
+<span class="trunc">… truncated</span></pre>
+</div><h3>Tenant admins</h3>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/admins</span></div>
+  <p class="desc">The charity's own admin accounts and their sign-in state.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b2a8083244e82a5ead2",
+      "name": "Jordan Lee",
+      "email": "o***@hopestreet.example",
+      "tenant_id": "6aab7b2a8083244e82a5ead0",
+      "tenant": {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation"
+      },
+      "status": "active",
+      "two_factor_enabled": false,
+      "mfa_policy": "default",
+      "mfa_required": false,
+      "locked_until": null,
+      "last_login_at": null,
+      "created_at": "2026-09-17T05:31:22.629Z"
+    }
+  ],
+  "meta": {
+    "total": 1
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/admins/:userId</span></div>
+  <p class="desc">One admin. An id from another tenant — or a platform operator — is 404.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/tenants/:id/admins/:userId</span></div>
+  <p class="desc">Suspend or reactivate one admin, and/or require two-factor (<code>mfa_policy: default | required</code>). Suspending signs them out immediately; the charity's site and donors are unaffected. Both fields are validated before either is written.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "status": "suspended",
+  "reason": "Staff member left the charity"
+}</pre><pre class="code req">{
+  "status": "active",
+  "mfa_policy": "required"
+}</pre>
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "id": "6aab7b2a8083244e82a5ead2",
+    "name": "Jordan Lee",
+    "email": "o***@hopestreet.example",
+    "tenant_id": "6aab7b2a8083244e82a5ead0",
+    "tenant": {
+      "id": "6aab7b2a8083244e82a5ead0",
+      "name": "Hope Street Foundation Ltd",
+      "slug": "hope-street-foundation"
+    },
+    "status": "suspended",
+    "two_factor_enabled": false,
+    "mfa_policy": "default",
+    "mfa_required": false,
+    "locked_until": null,
+    "last_login_at": null,
+    "created_at": "2026-09-17T05:31:22.629Z",
+    "message": "Admin suspended and signed out"
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/admins/:userId/unlock</span></div>
+  <p class="desc">Clear the failed-sign-in lockout.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "reason": "Identity confirmed by phone"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/admins/:userId/force-logout</span></div>
+  <p class="desc">End every session without changing the account.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "reason": "Laptop reported stolen"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/admins/:userId/reset-2fa</span></div>
+  <p class="desc">Remove two-factor so they can enrol a new authenticator. 409 <code>MFA_NOT_ENABLED</code> when it isn't on.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "reason": "New phone"
+}</pre>
+  <div class="label">Response <span class="st err">409</span></div><pre class="code res bad">{
+  "success": false,
+  "error": {
+    "code": "MFA_NOT_ENABLED",
+    "message": "Two-factor isn't switched on for this admin"
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/admins/:userId/password-reset</span></div>
+  <p class="desc">Email a one-hour reset link to the admin's own inbox. Never sets or reveals a password.</p>
+  
+  
+</div><h3>Subscriptions</h3>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/assign-plan</span></div>
+  <p class="desc">Change plan or billing cycle. With a live Stripe subscription the price is swapped with prorations; the tenant's status is never changed.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "plan_code": "growth-acme",
+  "billing_cycle": "monthly",
+  "reason": "Moved onto negotiated plan"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge put">PUT</span><span class="path">/integration/tenants/:id/override</span></div>
+  <p class="desc">Per-tenant limit / flag / price override. Replaces the whole override; <code>reason</code> required. Override pricing is recorded for reporting and doesn't change the Stripe charge.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "limits": {
+    "adminSeats": 25,
+    "campaigns": null
+  },
+  "feature_flags": {
+    "paypal": true
+  },
+  "pricing": {
+    "currency": "AUD",
+    "monthly": 99,
+    "yearly": null
+  },
+  "reason": "Negotiated agreement"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge delete">DELETE</span><span class="path">/integration/tenants/:id/override</span></div>
+  <p class="desc">Clear the override.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "reason": "Agreement ended"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/comp</span></div>
+  <p class="desc">Mark the tenant comped (no charge), or un-comp it. <code>reason</code> required to comp. Records who pays; moves no money.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "is_comp": true,
+  "reason": "Community partner — free for FY27"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/trial</span></div>
+  <p class="desc">Extend the trial (<code>extend_days</code>, from the current end or today) or set/clear <code>trial_ends_at</code>.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "extend_days": 14,
+  "reason": "Onboarding delay"
+}</pre>
+  
+</div><h3>Plans &amp; features</h3>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/feature-flags</span></div>
+  <p class="desc">The feature-flag and limit catalogue: the codes used in every <code>feature_flags</code> and <code>limits</code> map.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "categories": [
+      {
+        "code": "fundraising",
+        "name": "Fundraising",
+        "description": "Donations, recurring giving and campaigns."
+      },
+      {
+        "code": "engagement",
+        "name": "Engagement",
+        "description": "How the org reaches and grows its supporters."
+      },
+      {
+        "code": "content",
+        "name": "Website &amp; Content",
+        "description": "Public site pages, builder and design."
+      }
+    ],
+    "flags": [
+      {
+        "code": "donations",
+        "category": "fundraising",
+        "name": "Donations &amp; Checkout",
+        "description": "Accept one-off donations and the public checkout.",
+        "core": true,
+        "vertical": null
+      },
+      {
+        "code": "recurringGiving",
+        "category": "fundraising",
+        "name": "Recurring &amp; Installments",
+        "description": "Recurring subscriptions, installment plans and cancellation requests.",
+        "core": false,
+        "vertical": null
+      },
+      {
+        "code": "programs",
+        "category": "fundraising",
+        "name": "Programs / Causes",
+        "description": "Program &amp; cause pages with their own donations and payments.",
+        "core": false,
+        "vertical": null
+      }
+    ],
+    "limits": [
+      {
+        "code": "campaigns",
+        "category": "quotas",
+        "name": "Active Campaigns",
+        "description": "Maximum number of active programs/campaigns.",
+        "unit": "campaigns"
+      },
+      {
+        "code": "volunteers",
+        "category": "quotas",
+        "name": "Volunteer Applications",
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/plans</span></div>
+  <p class="desc">Create a plan (creates the Stripe product and prices), or fork one with <code>fork_from</code>: pricing, limits, flags and bullets are copied, anything in the body wins (merged per key), and forks default to <code>is_public: false</code>.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "code": "growth",
+  "name": "Growth",
+  "description": "For charities running several campaigns a year.",
+  "pricing": {
+    "currency": "AUD",
+    "monthly": 149,
+    "yearly": 1490,
+    "onboarding_fee": 500
+  },
+  "limits": {
+    "campaigns": 10,
+    "eventsQuota": 25,
+    "adminSeats": 5
+  },
+  "feature_flags": {
+    "recurringGiving": true,
+    "events": true,
+    "newsletter": true
+  },
+  "marketing_features": [
+    "10 active campaigns",
+    "Events &amp; paid registration"
+  ],
+  "is_public": true,
+  "sort_order": 2,
+  "reason": "New mid-tier"
+}</pre><pre class="code req">{
+  "code": "growth-acme",
+  "name": "Growth — Acme Foundation",
+  "fork_from": "growth",
+  "pricing": {
+    "monthly": 119
+  },
+  "limits": {
+    "adminSeats": 25
+  },
+  "reason": "Bespoke plan for a 3-year agreement"
+}</pre>
+  
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/plans</span></div>
+  <p class="desc">Catalogue with subscriber counts. Optional <code>?status=active|archived|all</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "code": "growth",
+      "name": "Growth",
+      "description": "For charities running several campaigns a year.",
+      "status": "active",
+      "archived_at": null,
+      "is_public": true,
+      "is_popular": false,
+      "sort_order": 2,
+      "color": "#10b981",
+      "pricing": {
+        "currency": "AUD",
+        "monthly": 149,
+        "yearly": 1490,
+        "onboarding_fee": 500
+      },
+      "limits": {
+        "campaigns": 10,
+        "eventsQuota": 25,
+        "adminSeats": 5
+      },
+      "feature_flags": {
+        "recurringGiving": true,
+        "events": true,
+        "newsletter": true
+      },
+      "marketing_features": [
+        "10 active campaigns"
+      ],
+      "stripe_synced": true,
+      "created_at": "2026-09-17T05:31:15.625Z",
+      "updated_at": "2026-09-17T05:31:15.625Z",
+      "subscribers": {
+        "total": 0,
+        "active": 0
+      }
+    }
+  ],
+  "meta": {
+    "total": 2
+  }
+}</pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/plans/:code</span></div>
+  <p class="desc">One plan with its price history and last 50 revisions (field-level diffs).</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "code": "growth",
+    "name": "Growth",
+    "description": "For charities running several campaigns a year.",
+    "status": "active",
+    "archived_at": null,
+    "is_public": true,
+    "is_popular": false,
+    "sort_order": 2,
+    "color": "#10b981",
+    "pricing": {
+      "currency": "AUD",
+      "monthly": 149,
+      "yearly": 1490,
+      "onboarding_fee": 500
+    },
+    "limits": {
+      "campaigns": 10,
+      "eventsQuota": 25,
+      "adminSeats": 5
+    },
+    "feature_flags": {
+      "recurringGiving": true,
+      "events": true,
+      "newsletter": true
+    },
+    "marketing_features": [
+      "10 active campaigns",
+      "Events &amp; paid registration"
+    ],
+    "stripe_synced": true,
+    "created_at": "2026-09-17T05:31:15.625Z",
+    "updated_at": "2026-09-17T05:31:15.625Z",
+    "subscribers": {
+      "total": 0,
+      "active": 0
+    },
+    "price_history": [],
+    "revisions": [
+      {
+        "id": "6aab7b238083244e82a5ea81",
+        "action": "plan.created",
+        "actor": "integration:hyper (s***@calcite.live)",
+        "at": "2026-09-17T05:31:15.641Z",
+        "diff": null,
+        "reason": null
+      }
+    ]
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/plans/:code</span></div>
+  <p class="desc">Edit pricing, limits, flags, bullets, visibility. <code>limits</code> and <code>feature_flags</code> merge per key; <code>pricing</code> per cycle. Price changes grandfather paying tenants.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "pricing": {
+    "yearly": 1390
+  },
+  "limits": {
+    "campaigns": 12
+  },
+  "feature_flags": {
+    "paypal": true
+  },
+  "reason": "Q3 packaging update"
+}</pre>
+  
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/feature-matrix</span></div>
+  <p class="desc">Every plan's features and limits side by side, with the catalogue. Optional <code>?status=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "categories": [
+      {
+        "code": "fundraising",
+        "name": "Fundraising",
+        "description": "Donations, recurring giving and campaigns."
+      },
+      {
+        "code": "engagement",
+        "name": "Engagement",
+        "description": "How the org reaches and grows its supporters."
+      }
+    ],
+    "flags": [
+      {
+        "code": "donations",
+        "category": "fundraising",
+        "name": "Donations &amp; Checkout",
+        "core": true,
+        "vertical": null
+      },
+      {
+        "code": "recurringGiving",
+        "category": "fundraising",
+        "name": "Recurring &amp; Installments",
+        "core": false,
+        "vertical": null
+      }
+    ],
+    "limits": [
+      {
+        "code": "campaigns",
+        "category": "quotas",
+        "name": "Active Campaigns",
+        "unit": "campaigns"
+      },
+      {
+        "code": "volunteers",
+        "category": "quotas",
+        "name": "Volunteer Applications",
+        "unit": "applications"
+      }
+    ],
+    "plans": [
+      {
+        "code": "growth",
+        "name": "Growth",
+        "status": "active",
+        "is_public": true,
+        "sort_order": 2,
+        "feature_flags": {
+          "recurringGiving": true,
+          "events": true,
+          "newsletter": true,
+          "paypal": true
+        },
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge put">PUT</span><span class="path">/integration/feature-matrix</span></div>
+  <p class="desc">Switch features and change limits for several plans at once. Merged per key; the whole body is validated before any plan is saved.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "plans": {
+    "growth": {
+      "feature_flags": {
+        "newsletter": true
+      },
+      "limits": {
+        "campaigns": 15
+      }
+    },
+    "growth-acme": {
+      "limits": {
+        "adminSeats": 30
+      }
+    }
+  },
+  "reason": "Q3 entitlement review"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/plans/:code/migrate-subscribers</span></div>
+  <p class="desc">Move paying tenants onto the plan's current Stripe price. <code>proration</code>: none | create_prorations | always_invoice.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "proration": "none",
+  "reason": "Move everyone onto the Q3 price"
+}</pre>
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "plan_code": "growth",
+    "proration": "none",
+    "migrated": 0,
+    "failed": 0,
+    "skipped": 0
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/plans/:code/sync-stripe</span></div>
+  <p class="desc">Create or repair the plan's Stripe product and prices.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge delete">DELETE</span><span class="path">/integration/plans/:code</span></div>
+  <p class="desc">Archive. Tenants keep the plan and Stripe keeps billing them; it can't be newly assigned. <code>?confirm=true</code> when tenants are active on it.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/plans/:code/restore</span></div>
+  <p class="desc">Put an archived plan back on sale (same as PATCH <code>status: "active"</code>).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "reason": "Agreement resumed"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/plans/:code/archive</span></div>
+  <p class="desc">Same as DELETE — the admin portal's spelling. Body <code>{ confirm?, reason? }</code>.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "confirm": true,
+  "reason": "Agreement paused"
+}</pre>
+  
+</div><h3>Billing</h3>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/billing/summary</span></div>
+  <p class="desc">MRR, ARR, subscribers per plan and cycle, lifetime collected — the console's Billing screen.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "currency": "AUD",
+    "mrr": 0,
+    "arr": 0,
+    "collected_lifetime": 1490,
+    "tenants_total": 1,
+    "subscriptions_active": 1,
+    "subscriptions_comped": 1,
+    "subscriptions_past_due": 0,
+    "paying_by_cycle": {
+      "monthly": 0,
+      "yearly": 0
+    },
+    "plans": [
+      {
+        "code": "growth",
+        "name": "Growth",
+        "subscribers": 0,
+        "paying_subscribers": 0,
+        "mrr": 0,
+        "list_price": {
+          "monthly": 149,
+          "yearly": 1390
+        }
+      },
+      {
+        "code": "growth-acme",
+        "name": "Growth — Acme Foundation",
+        "subscribers": 1,
+        "paying_subscribers": 0,
+        "mrr": 0,
+        "list_price": {
+          "monthly": 119,
+          "yearly": 1490
+        }
+      }
+    ],
+    "recent_signups": [
+      {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation",
+        "plan_code": "growth-acme",
+        "subscription_status": "active",
+        "owner": {
+          "id": "6aab7b2a8083244e82a5ead2",
+          "name": "Jordan Lee",
+          "email": "o***@hopestreet.example"
+        },
+        "created_at": "2026-09-17T05:31:22.568Z"
+      }
+    ]
+  }
+}</pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/invoices</span></div>
+  <p class="desc">Invoices across tenants, with totals for the whole filtered set. Optional <code>?status=&amp;tenant_id=&amp;search=&amp;from=&amp;to=&amp;page=&amp;limit=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b2d4a279134634019ee",
+      "number": "RGKZXU3Y-0002",
+      "status": "paid",
+      "tenant_id": "6aab7b2a8083244e82a5ead0",
+      "tenant": {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation"
+      },
+      "currency": "AUD",
+      "amount_due": 1490,
+      "amount_paid": 1490,
+      "period_start": "2026-09-01T00:00:00.000Z",
+      "period_end": "2027-09-01T00:00:00.000Z",
+      "paid_at": "2026-09-01T04:12:00.000Z",
+      "hosted_invoice_url": "https://invoice.stripe.com/i/acct_1TZ7Xt2FosXySDKn/test_YWNjdF8x",
+      "invoice_pdf_url": "https://pay.stripe.com/invoice/acct_1TZ7Xt2FosXySDKn/test_YWNjdF8x/pdf",
+      "stripe_invoice_id": "in_1TeFyx2FosXySDKnmu53dda9",
+      "stripe_subscription_id": "sub_1U1hYBC4KYYSqrW7fPAN7hJo",
+      "created_at": "2026-09-01T04:11:40.000Z"
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 50,
+    "total": 1,
+    "pages": 1,
+    "totals": {
+      "currency": "AUD",
+      "paid_amount": 1490,
+      "paid_count": 1,
+      "outstanding_amount": 0,
+      "outstanding_count": 0
+    }
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/invoices/:invoiceId</span></div>
+  <p class="desc">One invoice, by id or Stripe invoice id (<code>in_…</code>).</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/coupons</span></div>
+  <p class="desc">All coupons, redemption counts refreshed from Stripe. Optional <code>?status=active|archived|all</code>.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/coupons</span></div>
+  <p class="desc">Create a coupon (Stripe coupon + promotion code).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "code": "FOUNDINGMU53DD",
+  "description": "Founding partner — 20% off for 6 months",
+  "type": "percent",
+  "value": 20,
+  "duration": "repeating",
+  "duration_in_months": 6,
+  "plan_codes": [
+    "growth"
+  ],
+  "max_redemptions": 25,
+  "redeem_by": "2027-06-30",
+  "reason": "Partner programme launch"
+}</pre>
+  <div class="label">Response <span class="st ok">201</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "code": "FOUNDINGMU53DD",
+    "description": "Founding partner — 20% off for 6 months",
+    "type": "percent",
+    "value": 20,
+    "currency": "AUD",
+    "duration": "repeating",
+    "duration_in_months": 6,
+    "plan_codes": [
+      "growth"
+    ],
+    "max_redemptions": 25,
+    "times_redeemed": 0,
+    "redeem_by": "2027-06-30T00:00:00.000Z",
+    "status": "active",
+    "archived_at": null,
+    "stripe_synced": true,
+    "created_at": "2026-09-17T05:31:26.410Z",
+    "updated_at": "2026-09-17T05:31:26.410Z"
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/coupons/:code</span></div>
+  <p class="desc">One coupon.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/coupons/:code</span></div>
+  <p class="desc">Edit <code>description</code> and <code>plan_codes</code> only — Stripe coupons are immutable.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "description": "Founding partner — 20% off (all plans)",
+  "plan_codes": []
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/coupons/:code/replace</span></div>
+  <p class="desc">New discount terms: retires the Stripe coupon and issues a new one. Existing redemptions keep their discount.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "code": "FOUNDINGMU53DD",
+  "type": "percent",
+  "value": 25,
+  "duration": "once"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/coupons/:code/archive</span></div>
+  <p class="desc">Stop the code working at checkout. The record is kept.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/coupons/:code/restore</span></div>
+  <p class="desc">Bring an archived coupon back (recreated in Stripe). 400 <code>COUPON_NOT_RESTORABLE</code> if expired or used up.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge delete">DELETE</span><span class="path">/integration/coupons/:code</span></div>
+  <p class="desc">Delete a coupon nobody has redeemed. Otherwise 409 <code>COUPON_REDEEMED</code> — archive it.</p>
+  
+  
+</div><h3>Support tickets</h3>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/tickets</span></div>
+  <p class="desc">Raise a ticket on the tenant's behalf. Defaults the reporter to the owner. No email is sent.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "summary": "Donation receipts not being emailed",
+  "description": "Since Monday donors are not receiving receipts after checkout.",
+  "priority": "high",
+  "category": "technical_error",
+  "reporter_name": "Jordan Lee",
+  "reporter_email": "o***@hopestreet.example"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/tickets/:ticketId/comments</span></div>
+  <p class="desc">Add a comment. <code>is_internal: true</code> (default) is Calcite-only; <code>false</code> is emailed to the reporter.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "message": "Root cause: the tenant's SMTP password expired.",
+  "is_internal": true,
+  "author_name": "Calcite Support"
+}</pre>
+  
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tickets</span></div>
+  <p class="desc">Tickets across every tenant. Optional <code>?status=&amp;priority=&amp;category=&amp;assignee=&amp;tenant_id=&amp;search=&amp;page=&amp;limit=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b328083244e82a5eba9",
+      "number": 1,
+      "tenant_id": "6aab7b2a8083244e82a5ead0",
+      "tenant": {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation"
+      },
+      "summary": "Donation receipts not being emailed",
+      "description": "Since Monday donors are not receiving receipts after checkout.",
+      "status": "new",
+      "priority": "high",
+      "category": "technical_error",
+      "reporter": {
+        "user_id": "6aab7b2a8083244e82a5ead2",
+        "name": "Jordan Lee",
+        "email": "o***@hopestreet.example",
+        "kind": "admin"
+      },
+      "assignee": null,
+      "resolution": null,
+      "first_response_at": null,
+      "satisfaction": null,
+      "triage": {
+        "category": "unclassified",
+        "board_status": "todo",
+        "notes": ""
+      },
+      "attachments": [],
+      "comment_count": 1,
+      "created_at": "2026-09-17T05:31:30.727Z",
+      "updated_at": "2026-09-17T05:31:30.748Z"
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 50,
+    "total": 1,
+    "pages": 1,
+    "failed_tenants": []
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/tickets</span></div>
+  <p class="desc">One tenant's tickets (same filters).</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/tickets/stats</span></div>
+  <p class="desc">Counts by status and priority.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "tenant_id": "6aab7b2a8083244e82a5ead0",
+    "total": 1,
+    "open": 1,
+    "unassigned_open": 1,
+    "by_status": {
+      "new": 1,
+      "in_progress": 0,
+      "on_hold": 0,
+      "solved": 0,
+      "declined": 0
+    },
+    "by_priority": {
+      "low": 0,
+      "medium": 0,
+      "high": 1,
+      "critical": 0
+    }
+  }
+}</pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/tenants/:id/tickets/:ticketId</span></div>
+  <p class="desc">One ticket with comments.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "id": "6aab7b328083244e82a5eba9",
+    "number": 1,
+    "tenant_id": "6aab7b2a8083244e82a5ead0",
+    "tenant": {
+      "id": "6aab7b2a8083244e82a5ead0",
+      "name": "Hope Street Foundation Ltd",
+      "slug": "hope-street-foundation"
+    },
+    "summary": "Donation receipts not being emailed",
+    "description": "Since Monday donors are not receiving receipts after checkout.",
+    "status": "new",
+    "priority": "high",
+    "category": "technical_error",
+    "reporter": {
+      "user_id": "6aab7b2a8083244e82a5ead2",
+      "name": "Jordan Lee",
+      "email": "o***@hopestreet.example",
+      "kind": "admin"
+    },
+    "assignee": null,
+    "resolution": null,
+    "first_response_at": null,
+    "satisfaction": null,
+    "triage": {
+      "category": "unclassified",
+      "board_status": "todo",
+      "notes": ""
+    },
+    "attachments": [],
+    "comment_count": 1,
+    "created_at": "2026-09-17T05:31:30.727Z",
+    "updated_at": "2026-09-17T05:31:30.748Z",
+    "comments": [
+      {
+        "id": "6aab7b328083244e82a5ebaf",
+        "message": "Root cause: the tenant's SMTP password expired.",
+        "author_name": "Calcite Support",
+        "author_id": null,
+        "visibility": "platform",
+        "is_internal": true,
+        "email_status": null,
+        "created_at": "2026-09-17T05:31:30.748Z"
+      }
+    ]
+  }
+}</pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge put">PUT</span><span class="path">/integration/tenants/:id/tickets/:ticketId</span></div>
+  <p class="desc">Update summary, description, priority, category.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "priority": "critical",
+  "category": "bug_report"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/tickets/:ticketId/assign</span></div>
+  <p class="desc">Assign to an admin of that tenant (<code>null</code> unassigns).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "assignee_id": "6aab7b2a8083244e82a5ead2"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/tenants/:id/tickets/:ticketId/status</span></div>
+  <p class="desc">Change status; <code>resolution_notes</code> on solved/declined. The first resolve sends a one-time satisfaction survey unless <code>send_satisfaction_survey: false</code>.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "status": "solved",
+  "resolution_notes": "Expired SMTP credential rotated.",
+  "send_satisfaction_survey": false
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge delete">DELETE</span><span class="path">/integration/tenants/:id/tickets/:ticketId</span></div>
+  <p class="desc">Delete the ticket (permanent).</p>
+  
+  
+</div><h3>Leads (CRM)</h3>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/leads/staff</span></div>
+  <p class="desc">Platform operators a lead can be assigned to.</p>
+  
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/leads</span></div>
+  <p class="desc">Add a lead. Only <code>org_name</code>, <code>contact_name</code>, <code>contact_email</code> are required.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "org_name": "Riverbend Food Bank",
+  "org_website": "https://riverbend.example.org",
+  "country": "Australia",
+  "contact_name": "Priya Shah",
+  "contact_email": "p***@riverbend.example.org",
+  "contact_role": "CEO",
+  "contacts": [
+    {
+      "name": "Tom Lee",
+      "role": "Treasurer"
+    }
+  ],
+  "staff_size": "6-20",
+  "annual_budget_range": "250k_1m",
+  "interested_plan": "growth",
+  "interested_billing_cycle": "yearly",
+  "timeline": "this_quarter",
+  "priority": "high",
+  "tags": [
+    "conference-2026"
+  ],
+  "deal_value": 1788,
+  "expected_close_at": "2026-12-15",
+  "stage": "qualified",
+  "assignee_id": "6aab7b214a279134634019ed"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/leads/:leadId</span></div>
+  <p class="desc">Edit intake and deal fields. Only fields you send change.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "deal_value": 2400,
+  "expected_close_at": "2027-01-31",
+  "timeline": "this_month"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/leads/:leadId/messages</span></div>
+  <p class="desc">Add an internal note, or a reply that is emailed to the contact (<code>author_name</code> required for a reply).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "kind": "note",
+  "body": "Board approves budget on the 20th — follow up the next day.",
+  "author_name": "Calcite Sales"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge patch">PATCH</span><span class="path">/integration/leads/:leadId/stage</span></div>
+  <p class="desc">Move along the pipeline, or close as lost with <code>lost_reason</code>. <code>won</code> is set only by convert.</p>
+  <div class="label">Request</div><pre class="code req">{
+  "stage": "proposal_sent",
+  "note": "Sent 3-year proposal"
+}</pre>
+  
+</div>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/leads/:leadId/assign</span></div>
+  <p class="desc">Assign to an operator (<code>null</code> unassigns).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "assignee_id": "6aab7b214a279134634019ed"
+}</pre>
+  
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/leads</span></div>
+  <p class="desc">The pipeline. Optional <code>?stage=&amp;assignee_id=&amp;priority=&amp;tag=&amp;search=&amp;sort=&amp;dir=&amp;page=&amp;limit=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b328083244e82a5ebd8",
+      "org_name": "Riverbend Food Bank",
+      "org_website": "https://riverbend.example.org",
+      "vertical": "general",
+      "country": "Australia",
+      "contact": {
+        "name": "Priya Shah",
+        "email": "p***@riverbend.example.org",
+        "phone": null,
+        "role": "CEO"
+      },
+      "stage": "proposal_sent",
+      "priority": "high",
+      "tags": [
+        "conference-2026"
+      ],
+      "deal": {
+        "value": 2400,
+        "currency": "AUD",
+        "expected_close_at": "2027-01-31T00:00:00.000Z"
+      },
+      "interested_plan": "growth",
+      "interested_billing_cycle": "yearly",
+      "source": "superadmin_manual",
+      "assignee": {
+        "id": "6aab7b214a279134634019ed",
+        "name": "Alex Morgan",
+        "email": "a***@calcite.live",
+        "assigned_at": "2026-09-17T05:31:30.968Z"
+      },
+      "lost": null,
+      "converted_tenant_id": null,
+      "flagged_spam": false,
+      "consent_to_contact": false,
+      "last_activity_at": "2026-09-17T05:31:30.927Z",
+      "created_at": "2026-09-17T05:31:30.884Z",
+      "updated_at": "2026-09-17T05:31:30.971Z",
+      "tasks": {
+        "open": 0,
+        "overdue": 0,
+        "next_due_at": null
+      }
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 50,
+    "total": 1,
+    "pages": 1,
+    "sort": {
+      "key": "activity",
+      "dir": "desc"
+    },
+    "new_count": 0
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/leads/board</span></div>
+  <p class="desc">Every lead grouped by stage (kanban).</p>
+  
+  
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/leads/:leadId</span></div>
+  <p class="desc">One lead with thread, stage history, contacts and conversion.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "id": "6aab7b328083244e82a5ebd8",
+    "org_name": "Riverbend Food Bank",
+    "org_website": "https://riverbend.example.org",
+    "vertical": "general",
+    "country": "Australia",
+    "contact": {
+      "name": "Priya Shah",
+      "email": "p***@riverbend.example.org",
+      "phone": null,
+      "role": "CEO"
+    },
+    "stage": "proposal_sent",
+    "priority": "high",
+    "tags": [
+      "conference-2026"
+    ],
+    "deal": {
+      "value": 2400,
+      "currency": "AUD",
+      "expected_close_at": "2027-01-31T00:00:00.000Z"
+    },
+    "interested_plan": "growth",
+    "interested_billing_cycle": "yearly",
+    "source": "superadmin_manual",
+    "assignee": {
+      "id": "6aab7b214a279134634019ed",
+      "name": "Alex Morgan",
+      "email": "a***@calcite.live",
+      "assigned_at": "2026-09-17T05:31:30.968Z"
+    },
+    "lost": null,
+    "converted_tenant_id": null,
+    "flagged_spam": false,
+    "consent_to_contact": false,
+    "last_activity_at": "2026-09-17T05:31:30.927Z",
+    "created_at": "2026-09-17T05:31:30.884Z",
+    "updated_at": "2026-09-17T05:31:30.971Z",
+    "message": "",
+    "cause_areas": [],
+    "staff_size": "6-20",
+    "annual_budget_range": "250k_1m",
+    "donor_database_size": null,
+    "current_tools": [],
+    "current_tools_other": "",
+    "challenges": [],
+    "challenges_other": "",
+    "timeline": "this_month",
+    "decision_role": null,
+    "contacts": [
+      {
+        "id": "6aab7b328083244e82a5ebd9",
+        "name": "Tom Lee",
+        "email": null,
+        "phone": null,
+        "role": "Treasurer",
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/leads/:leadId/convert</span></div>
+  <p class="desc">Create the tenant (comped), or email a payment link (<code>billing_mode: send_link</code>), or a self-serve signup link (<code>mode: activation_link</code>).</p>
+  <div class="label">Request</div><pre class="code req">{
+  "mode": "manual_provision",
+  "billing_mode": "comp",
+  "slug": "riverbend-mu53dda9",
+  "plan_code": "growth",
+  "billing_cycle": "yearly",
+  "comp_reason": "Launch partner",
+  "reason": "Signed 3-year agreement"
+}</pre>
+  <div class="label">Response <span class="st ok">201</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "outcome": "converted",
+    "lead": {
+      "id": "6aab7b328083244e82a5ebd8",
+      "org_name": "Riverbend Food Bank",
+      "org_website": "https://riverbend.example.org",
+      "vertical": "general",
+      "country": "Australia",
+      "contact": {
+        "name": "Priya Shah",
+        "email": "p***@riverbend.example.org",
+        "phone": null,
+        "role": "CEO"
+      },
+      "stage": "won",
+      "priority": "high",
+      "tags": [
+        "conference-2026"
+      ],
+      "deal": {
+        "value": 2400,
+        "currency": "AUD",
+        "expected_close_at": "2027-01-31T00:00:00.000Z"
+      },
+      "interested_plan": "growth",
+      "interested_billing_cycle": "yearly",
+      "source": "superadmin_manual",
+      "assignee": {
+        "id": "6aab7b214a279134634019ed",
+        "name": "Alex Morgan",
+        "email": "a***@calcite.live",
+        "assigned_at": "2026-09-17T05:31:30.968Z"
+      },
+      "lost": null,
+      "converted_tenant_id": "6aab7b338083244e82a5ec1c",
+      "flagged_spam": false,
+      "consent_to_contact": false,
+      "last_activity_at": "2026-09-17T05:31:30.927Z",
+      "created_at": "2026-09-17T05:31:30.884Z",
+      "updated_at": "2026-09-17T05:31:33.487Z",
+      "message": "",
+      "cause_areas": [],
+      "staff_size": "6-20",
+      "annual_budget_range": "250k_1m",
+      "donor_database_size": null,
+      "current_tools": [],
+      "current_tools_other": "",
+      "challenges": [],
+      "challenges_other": "",
+      "timeline": "this_month",
+      "decision_role": null,
+      "contacts": [
+        {
+          "id": "6aab7b328083244e82a5ebd9",
+          "name": "Tom Lee",
+          "email": null,
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card">
+  <div class="head"><span class="badge delete">DELETE</span><span class="path">/integration/leads/:leadId</span></div>
+  <p class="desc">Delete a lead (permanent). Prefer marking it lost.</p>
+  
+  
+</div><h3>Platform</h3>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/dashboard</span></div>
+  <p class="desc">The console dashboard: revenue, 12-month signup growth, cross-tenant footprint.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": {
+    "currency": "AUD",
+    "mrr": 0,
+    "arr": 0,
+    "collected_lifetime": 1490,
+    "tenants_total": 2,
+    "subscriptions_active": 2,
+    "subscriptions_comped": 2,
+    "subscriptions_past_due": 0,
+    "paying_by_cycle": {
+      "monthly": 0,
+      "yearly": 0
+    },
+    "plans": [
+      {
+        "code": "growth",
+        "name": "Growth",
+        "subscribers": 1,
+        "paying_subscribers": 0,
+        "mrr": 0,
+        "list_price": {
+          "monthly": 149,
+          "yearly": 1390
+        }
+      },
+      {
+        "code": "growth-acme",
+        "name": "Growth — Acme Foundation",
+        "subscribers": 1,
+        "paying_subscribers": 0,
+        "mrr": 0,
+        "list_price": {
+          "monthly": 119,
+          "yearly": 1490
+        }
+      }
+    ],
+    "recent_signups": [
+      {
+        "id": "6aab7b338083244e82a5ec1c",
+        "name": "Riverbend Food Bank",
+        "slug": "riverbend-mu53dda9",
+        "plan_code": "growth",
+        "subscription_status": "active",
+        "owner": {
+          "id": "6aab7b338083244e82a5ec1e",
+          "name": "Priya Shah",
+          "email": "p***@riverbend.example.org"
+        },
+        "created_at": "2026-09-17T05:31:31.022Z"
+      },
+      {
+        "id": "6aab7b2a8083244e82a5ead0",
+        "name": "Hope Street Foundation Ltd",
+        "slug": "hope-street-foundation",
+        "plan_code": "growth-acme",
+<span class="trunc">… truncated</span></pre>
+</div>
+<div class="card long">
+  <div class="head"><span class="badge get">GET</span><span class="path">/integration/audit</span></div>
+  <p class="desc">The operator audit log, console and API. Optional <code>?tenant_id=&amp;action=&amp;actor=&amp;target_type=&amp;target_id=&amp;from=&amp;to=&amp;search=&amp;page=&amp;limit=</code>.</p>
+  
+  <div class="label">Response <span class="st ok">200</span></div><pre class="code res">{
+  "success": true,
+  "data": [
+    {
+      "id": "6aab7b358083244e82a5ec3c",
+      "action": "lead.deleted",
+      "actor": "integration:hyper (s***@calcite.live)",
+      "actor_id": null,
+      "tenant_id": null,
+      "tenant": null,
+      "target_type": "lead",
+      "target_id": "6aab7b358083244e82a5ec36",
+      "at": "2026-09-17T05:31:33.513Z",
+      "meta": {
+        "orgName": "Duplicate Enquiry",
+        "contactEmail": "s***@example.org",
+        "via": "integration",
+        "integrationKey": "hyper",
+        "actorEmail": "s***@calcite.live"
+      }
+    },
+    {
+      "id": "6aab7b358083244e82a5ec38",
+      "action": "lead.created",
+      "actor": "integration:hyper (s***@calcite.live)",
+      "actor_id": null,
+      "tenant_id": null,
+      "tenant": null,
+      "target_type": "lead",
+      "target_id": "6aab7b358083244e82a5ec36",
+      "at": "2026-09-17T05:31:33.504Z",
+      "meta": {
+        "via": "integration",
+        "integrationKey": "hyper",
+        "actorEmail": "s***@calcite.live"
+      }
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 100,
+    "total": 48,
+    "pages": 1
+  }
+}</pre>
+</div><h3>Blocked</h3>
+<div class="card">
+  <div class="head"><span class="badge post">POST</span><span class="path">/integration/tenants/:id/act-as</span></div>
+  <p class="desc">403 IMPERSONATION_NOT_ALLOWED. Signing in as a tenant needs a named person — use the Donexus console's Open as support.</p>
+  
+  
+</div>
+
+<h2>3 &nbsp;Gotchas</h2>
+<div class="gotcha"><b class="n">1</b><b class="h">Merge vs replace.</b> <code>PATCH /plans/:code</code> and <code>PUT /feature-matrix</code> <b>merge per key</b> into <code>limits</code> and <code>feature_flags</code> (keys you omit keep their value; <code>null</code> = unlimited) and <code>pricing</code> per cycle. <code>PUT /tenants/:id/override</code> <b>replaces the whole override</b> — keys you omit fall back to the plan. <code>PATCH /leads/:leadId</code> changes only the fields you send, but a list you send (tags, contacts) replaces the stored list.</div>
+<div class="gotcha"><b class="n">2</b><b class="h">Billing isn't restarted, and some flags don't move money.</b> Suspend and delete <b>cancel</b> the tenant's Stripe subscription, and Stripe cancellations are final: reactivating or restoring doesn't restart billing (<code>BILLING_NOT_RESTARTED</code>). A tenant created with <code>POST /tenants</code> or converted as comped has <b>no Stripe subscription</b>. <code>comp</code> records who pays; an override <code>pricing</code> is for reporting only and doesn't change what Stripe charges — to change a paying tenant's price, fork a plan and assign it.</div>
+<div class="gotcha"><b class="n">3</b><b class="h">Money-moving endpoints.</b> <code>assign-plan</code> on a Stripe-billed tenant swaps the price with prorations (a cycle change resets the billing date). <code>migrate-subscribers</code> with <code>create_prorations</code> or <code>always_invoice</code> charges tenants; <code>always_invoice</code> invoices immediately. There is no dry-run — the API key is enough.</div>
+<div class="gotcha"><b class="n">4</b><b class="h">Price changes are grandfathered.</b> Editing a plan's price mints a new Stripe price; tenants already paying stay on the old one (<code>SUBSCRIBERS_GRANDFATHERED</code> warning) until you call <code>migrate-subscribers</code>.</div>
+<div class="gotcha"><b class="n">5</b><b class="h">Soft deletes and hard deletes.</b> Deleting a tenant sets status <code>deleted</code> and keeps every record; archiving a plan keeps tenants on it; archiving a coupon keeps the record. <b>Permanent</b>: <code>DELETE</code> of a ticket, of a lead, and of a coupon nobody redeemed (a redeemed coupon returns <code>409 COUPON_REDEEMED</code>).</div>
+<div class="gotcha"><b class="n">6</b><b class="h">Some calls email real people.</b> A ticket comment with <code>is_internal: false</code> (and the first resolve's satisfaction survey), a lead <code>reply</code>, every lead conversion, and an admin <code>password-reset</code>. <code>is_internal</code> defaults to <b>true</b>, so a ticket note is never emailed by omission; a lead reply requires <code>author_name</code> because it signs the email.</div>
+<div class="gotcha info"><b class="n">7</b><b class="h">Resolve assignees first.</b> Ticket assignees must be an admin of that tenant — take an id from <code>GET /tenants/:id/admins</code> (<code>404 ASSIGNEE_NOT_IN_TENANT</code>). Lead assignees must be a platform operator — take an id from <code>GET /leads/staff</code> (<code>400 INVALID_ASSIGNEE</code>).</div>
+<div class="gotcha info"><b class="n">8</b><b class="h">Tenant admins vs the tenant.</b> <code>/tenants/:id/admins/:userId</code> acts on <b>one person</b>: suspending an admin signs them out but the charity's site and donors carry on. To lock the whole charity, <code>PATCH /tenants/:id { "status": "suspended" }</code>. Nothing here sets or reveals a password.</div>
+
+<h2>4 &nbsp;Error codes</h2>
+<table><thead><tr><th>Code</th><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td><code>INTEGRATION_DISABLED</code></td><td>503</td><td><code>INTEGRATION_API_KEYS</code> not set (or no valid pair) on the server</td></tr><tr><td><code>API_KEY_MISSING</code></td><td>401</td><td><code>x-api-key</code> header missing</td></tr><tr><td><code>API_KEY_INVALID</code></td><td>401</td><td>Key not in the configured list</td></tr><tr><td><code>INVALID_ACTOR_EMAIL</code></td><td>400</td><td><code>x-actor-email</code> is not a single email address</td></tr><tr><td><code>IMPERSONATION_NOT_ALLOWED</code></td><td>403</td><td><code>act-as</code> is closed to API keys</td></tr><tr><td><code>VALIDATION_ERROR</code></td><td>400</td><td>Body or params failed validation; <code>details.field</code> names the field</td></tr><tr><td><code>UNKNOWN_FIELD</code></td><td>400</td><td>A body field the endpoint doesn't accept (e.g. camelCase); <code>details.allowed</code> lists the valid ones</td></tr><tr><td><code>INVALID_JSON / PAYLOAD_TOO_LARGE</code></td><td>400 / 413</td><td>Malformed or oversized body</td></tr><tr><td><code>UNKNOWN_LIMIT_KEY / UNKNOWN_FEATURE_FLAG</code></td><td>400</td><td>A code that isn't in <code>/feature-flags</code></td></tr><tr><td><code>CORE_FLAG_LOCKED</code></td><td>400</td><td>Tried to switch off a core feature</td></tr><tr><td><code>REASON_REQUIRED</code></td><td>400</td><td>Override or comp without a <code>reason</code></td></tr><tr><td><code>OVERRIDE_WINDOW_UNSUPPORTED</code></td><td>400</td><td><code>effective_from</code> / <code>effective_until</code> sent — not supported</td></tr><tr><td><code>CURRENCY_MISMATCH</code></td><td>400</td><td>A currency other than the platform's (AUD)</td></tr><tr><td><code>INVALID_PLAN_CODE / INVALID_SLUG</code></td><td>400</td><td>Code or subdomain in the wrong format</td></tr><tr><td><code>INVALID_ASSIGNEE</code></td><td>400</td><td>Lead assignee isn't a platform operator</td></tr><tr><td><code>CHARGE_NOW_UNSUPPORTED</code></td><td>400</td><td>Lead conversion with <code>charge_now</code> (needs a browser card form)</td></tr><tr><td><code>COUPON_NOT_RESTORABLE</code></td><td>400</td><td>Archived coupon expired, used up or over 100% — use replace</td></tr><tr><td><code>TENANT_NOT_FOUND</code></td><td>404</td><td>No tenant with that id or slug</td></tr><tr><td><code>TENANT_ADMIN_NOT_FOUND</code></td><td>404</td><td>Not an admin of that tenant</td></tr><tr><td><code>PLAN_NOT_FOUND / FORK_SOURCE_NOT_FOUND</code></td><td>404</td><td>No such plan</td></tr><tr><td><code>TICKET_NOT_FOUND</code></td><td>404</td><td>No such ticket in that tenant</td></tr><tr><td><code>ASSIGNEE_NOT_IN_TENANT</code></td><td>404</td><td>Ticket assignee isn't an admin of that tenant</td></tr><tr><td><code>INVOICE_NOT_FOUND / COUPON_NOT_FOUND / LEAD_NOT_FOUND</code></td><td>404</td><td>No such record</td></tr><tr><td><code>ROUTE_NOT_FOUND</code></td><td>404</td><td>No integration endpoint with that method and path</td></tr><tr><td><code>EMAIL_IN_USE / SLUG_TAKEN</code></td><td>409</td><td>Owner email already has an account (emails are unique platform-wide) / subdomain taken</td></tr><tr><td><code>PLAN_CODE_TAKEN</code></td><td>409</td><td>A plan with that code exists</td></tr><tr><td><code>PLAN_ARCHIVED / PLAN_ALREADY_ARCHIVED / PLAN_NOT_ARCHIVED</code></td><td>409</td><td>Plan state doesn't allow the action</td></tr><tr><td><code>PLAN_HAS_ACTIVE_TENANTS</code></td><td>409</td><td>Archive with tenants still active — resend with <code>confirm=true</code></td></tr><tr><td><code>PLAN_NOT_BILLABLE</code></td><td>409</td><td>Moving a paying tenant onto a plan with no Stripe price for that cycle</td></tr><tr><td><code>TENANT_DELETED / TENANT_ALREADY_DELETED</code></td><td>409</td><td>Restore the tenant first / already deleted</td></tr><tr><td><code>TENANT_PENDING_PAYMENT / TENANT_HAS_NO_OWNER</code></td><td>409</td><td>Signup never paid / no owner account to sign in</td></tr><tr><td><code>TENANT_ADMIN_SUSPENDED / MFA_NOT_ENABLED / NO_PORTAL_ADDRESS</code></td><td>409</td><td>Admin action not possible in the admin's current state</td></tr><tr><td><code>COUPON_CODE_TAKEN / COUPON_ARCHIVED / COUPON_ALREADY_ACTIVE / COUPON_REDEEMED</code></td><td>409</td><td>Coupon state doesn't allow the action (a redeemed coupon can only be archived)</td></tr><tr><td><code>LEAD_CLOSED / LEAD_WON_REQUIRES_CONVERT</code></td><td>409</td><td>Lead already won or lost / <code>won</code> is only set by convert</td></tr><tr><td><code>CONVERSION_FAILED</code></td><td>4xx</td><td>Lead conversion refused; the message says why</td></tr><tr><td><code>STRIPE_UPDATE_FAILED / EMAIL_SEND_FAILED</code></td><td>502</td><td>Stripe refused the change (nothing was saved) / the email couldn't be sent</td></tr><tr><td><code>STRIPE_UNAVAILABLE</code></td><td>503</td><td>Stripe isn't configured on the server</td></tr><tr><td><code>INTERNAL_ERROR</code></td><td>500</td><td>Unexpected failure — logged server-side</td></tr></tbody></table>
+<p><b>Warnings</b> on 2xx responses: <code>STRIPE_NOT_SYNCED</code>, <code>SUBSCRIBERS_GRANDFATHERED</code>, <code>STRIPE_CANCEL_FAILED</code>, <code>BILLING_NOT_RESTARTED</code>, <code>NOT_BILLED</code>, <code>STRIPE_STILL_BILLING</code>, <code>WELCOME_EMAIL_FAILED</code>, <code>MIGRATION_PARTIAL</code>, <code>STRIPE_UNAVAILABLE</code>, <code>EMAIL_SEND_FAILED</code>.</p>
+
+<h2>5 &nbsp;Compared with Stewardex</h2>
+<p>Same authentication, envelope and resource layout. Where the products differ, Donexus keeps its own behaviour:</p>
+<table><thead><tr><th>Stewardex</th><th>Donexus</th></tr></thead><tbody><tr><td><code>orgId</code> (slug-like)</td><td><code>:id</code> = tenant id or slug</td></tr><tr><td><code>POST /tenants/:orgId/trial-extend { days }</code></td><td><code>POST /tenants/:id/trial { extend_days }</code> or <code>{ trial_ends_at }</code></td></tr><tr><td><code>GET /tenants/:orgId/users</code></td><td><code>GET /tenants/:id/admins</code> plus suspend, unlock, force-logout, reset-2fa, password reset, 2FA policy</td></tr><tr><td><code>GET /feature-matrix</code> (read-only)</td><td><code>GET</code> and <code>PUT /feature-matrix</code></td></tr><tr><td><code>POST /plans/:code/migrate-revision</code></td><td><code>POST /plans/:code/migrate-subscribers { proration }</code> — no pinned revisions; moves Stripe prices</td></tr><tr><td>PATCH plan nested objects <b>replace</b></td><td><b>merge</b> per key / per cycle</td></tr><tr><td>Assign plan resets period and sets status active</td><td>Stripe proration; period resets only on a cycle change; <b>status unchanged</b></td></tr><tr><td>Override <code>effective_until</code></td><td>not supported → <code>400 OVERRIDE_WINDOW_UNSUPPORTED</code></td></tr><tr><td>Invoice credit, void, retry, bulk retry, backfill</td><td>not offered — invoices are a read-only Stripe mirror; act in Stripe</td></tr><tr><td>Pause / resume, cycle anchor, override apply-to-stripe</td><td>not offered — no paused state; override pricing is reporting-only</td></tr><tr><td>Promo grants, apply coupon to tenant</td><td>not offered — coupons apply at checkout and on lead payment links</td></tr><tr><td><code>GET/PATCH /settings</code></td><td>not offered — platform settings stay in the console</td></tr><tr><td>—</td><td>Leads CRM (<code>/leads</code>), <code>/dashboard</code>, <code>/billing/summary</code>, tenant audit and invoices</td></tr><tr><td><code>401 API_KEY_REQUIRED</code></td><td><code>401 API_KEY_MISSING</code></td></tr></tbody></table>
+</body></html>

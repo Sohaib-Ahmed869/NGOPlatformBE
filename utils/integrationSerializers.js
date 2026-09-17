@@ -160,11 +160,22 @@ function serializeTenant(org, { plan, period } = {}) {
   };
 }
 
+/** A tenant reference from a populated organisationId (or null when it wasn't populated / was deleted). */
+function tenantRef(v) {
+  if (!v || typeof v !== "object" || v.slug === undefined) return null;
+  return { id: String(v._id), name: v.name, slug: v.slug };
+}
+
 function serializeAudit(a) {
   return {
     id: String(a._id),
     action: a.action,
     actor: a.actorEmail || null,
+    actor_id: a.actorId ? id(a.actorId) : null,
+    tenant_id: a.organisationId ? id(a.organisationId) : null,
+    tenant: tenantRef(a.organisationId),
+    target_type: a.targetType || null,
+    target_id: a.targetId || null,
     at: iso(a.createdAt),
     meta: a.meta || {},
   };
@@ -175,6 +186,8 @@ function serializeInvoice(inv) {
     id: String(inv._id),
     number: inv.number || null,
     status: inv.status,
+    tenant_id: inv.organisationId ? id(inv.organisationId) : null,
+    tenant: tenantRef(inv.organisationId),
     currency: String(inv.currency || "").toUpperCase(),
     amount_due: num(inv.amountDue),
     amount_paid: num(inv.amountPaid),
@@ -182,7 +195,138 @@ function serializeInvoice(inv) {
     period_end: iso(inv.periodEnd),
     paid_at: iso(inv.paidAt),
     hosted_invoice_url: inv.hostedInvoiceUrl || null,
+    invoice_pdf_url: inv.invoicePdf || null,
+    stripe_invoice_id: inv.stripeInvoiceId || null,
+    stripe_subscription_id: inv.stripeSubscriptionId || null,
     created_at: iso(inv.createdAt),
+  };
+}
+
+/* ── billing: coupons ──────────────────────────────────────────────────── */
+function serializeCoupon(c) {
+  return {
+    code: c.code,
+    description: c.description || "",
+    type: c.type,
+    // percent: 1–100; amount: whole currency units in `currency`
+    value: num(c.value),
+    currency: String(c.currency || "").toUpperCase(),
+    duration: c.duration,
+    duration_in_months: c.durationInMonths ?? null,
+    plan_codes: [...(c.planCodes || [])],
+    max_redemptions: c.maxRedemptions ?? null,
+    times_redeemed: c.timesRedeemed || 0,
+    redeem_by: iso(c.redeemBy),
+    status: c.archivedAt || c.isActive === false ? "archived" : "active",
+    archived_at: iso(c.archivedAt),
+    stripe_synced: !!(c.stripeCouponId && c.stripePromotionCodeId),
+    created_at: iso(c.createdAt),
+    updated_at: iso(c.updatedAt),
+  };
+}
+
+/* ── tenant admins ─────────────────────────────────────────────────────── */
+/**
+ * @param {object} u      User (doc or lean)
+ * @param {object} state  services/tenantAdminService.tenantAdminState(u)
+ * @param {object} [ctx]
+ * @param {object} [ctx.tenant]  the Organisation, when organisationId isn't populated
+ */
+function serializeTenantAdmin(u, state, { tenant } = {}) {
+  return {
+    id: String(u._id),
+    name: u.name || "",
+    email: u.email,
+    tenant_id: u.organisationId ? id(u.organisationId) : null,
+    tenant: tenantRef(tenant || u.organisationId),
+    status: state.status,
+    two_factor_enabled: state.twoFactorEnabled,
+    mfa_policy: state.mfaPolicy,
+    mfa_required: !!state.mfaRequired,
+    locked_until: iso(state.lockedUntil),
+    last_login_at: iso(state.lastLogin),
+    created_at: iso(u.createdAt),
+  };
+}
+
+/* ── leads (CRM) ───────────────────────────────────────────────────────── */
+const blankToNull = (v) => (v === "" || v === undefined ? null : v);
+const userRef = (v, fallbackName) =>
+  v ? { id: id(v), name: (typeof v === "object" && v.name) || fallbackName || null, email: (typeof v === "object" && v.email) || null } : null;
+
+/**
+ * @param {object} l  Lead (doc or lean). List rows have no thread and carry `tasks`.
+ * @param {object} [opts]
+ * @param {boolean} [opts.detail=false]  include thread, stage history, contacts, source tracking and conversion
+ */
+function serializeLead(l, { detail = false } = {}) {
+  const a = l.assignee || {};
+  const converted = l.convertedOrgId;
+  const out = {
+    id: String(l._id),
+    org_name: l.orgName,
+    org_website: l.orgWebsite || null,
+    vertical: l.verticalType || "general",
+    country: l.country || null,
+    contact: { name: l.contactName, email: l.contactEmail, phone: l.contactPhone || null, role: l.contactRole || null },
+    stage: l.stage,
+    priority: l.priority || "normal",
+    tags: [...(l.tags || [])],
+    deal: {
+      value: num(l.dealValue) ?? 0,
+      currency: String(l.currency || CURRENCY).toUpperCase(),
+      expected_close_at: iso(l.expectedCloseAt),
+    },
+    interested_plan: blankToNull(l.interestedPlan),
+    interested_billing_cycle: l.interestedBillingCycle ? cycleOut(l.interestedBillingCycle) : null,
+    source: l.source,
+    assignee: a.userId ? { id: id(a.userId), name: (typeof a.userId === "object" && a.userId.name) || a.name || null, email: (typeof a.userId === "object" && a.userId.email) || null, assigned_at: iso(a.assignedAt) } : null,
+    lost: l.stage === "lost" ? { reason: blankToNull(l.lostReason), note: l.lostReasonNote || "", lost_at: iso(l.lostAt) } : null,
+    converted_tenant_id: converted ? id(converted) : null,
+    flagged_spam: !!l.flaggedSpam,
+    consent_to_contact: !!l.consentToContact,
+    last_activity_at: iso(l.lastMessageAt),
+    created_at: iso(l.createdAt),
+    updated_at: iso(l.updatedAt),
+  };
+  if (l.tasks) out.tasks = { open: l.tasks.open || 0, overdue: l.tasks.overdue || 0, next_due_at: iso(l.tasks.nextDueAt) };
+  if (!detail) return out;
+
+  return {
+    ...out,
+    message: l.message || "",
+    cause_areas: [...(l.causeAreas || [])],
+    staff_size: blankToNull(l.staffSize),
+    annual_budget_range: blankToNull(l.annualBudgetRange),
+    donor_database_size: blankToNull(l.donorDatabaseSize),
+    current_tools: [...(l.currentTools || [])],
+    current_tools_other: l.currentToolsOther || "",
+    challenges: [...(l.challenges || [])],
+    challenges_other: l.challengesOther || "",
+    timeline: blankToNull(l.timeline),
+    decision_role: blankToNull(l.decisionRole),
+    contacts: (l.contacts || []).map((c) => ({ id: id(c._id), name: c.name, email: c.email || null, phone: c.phone || null, role: c.role || null, note: c.note || "" })),
+    tracking: {
+      utm: plain(l.utm),
+      referrer_url: l.referrerUrl || null,
+      landing_page: l.landingPage || null,
+    },
+    converted_tenant: tenantRef(converted),
+    conversion_mode: blankToNull(l.conversionMode),
+    converted_at: iso(l.convertedAt),
+    activation: l.activation?.sentAt
+      ? { sent_at: iso(l.activation.sentAt), expires_at: iso(l.activation.tokenExpiresAt), opened_at: iso(l.activation.openedAt) }
+      : null,
+    stage_history: (l.stageHistory || []).map((h) => ({ from: blankToNull(h.from), to: h.to, by: h.changedByName || null, note: h.note || "", at: iso(h.at) })),
+    thread: (l.thread || []).map((t) => ({
+      id: id(t._id),
+      kind: t.kind,
+      body: t.body,
+      author: userRef(t.author, t.authorName) || (t.authorName ? { id: null, name: t.authorName, email: null } : null),
+      emailed_to: t.emailedTo || null,
+      email_status: blankToNull(t.emailStatus),
+      created_at: iso(t.createdAt),
+    })),
   };
 }
 
@@ -268,6 +412,10 @@ module.exports = {
   serializeOverride,
   serializeAudit,
   serializeInvoice,
+  serializeCoupon,
+  serializeTenantAdmin,
+  serializeLead,
+  tenantRef,
   serializeTicket,
   serializeComment,
 };
